@@ -83,11 +83,13 @@ struct LongRunningMembershipForkTests {
                     let fresh = try MembershipLedgerTests.join(household, held.shuffled(using: &generator))
                     #expect(fresh.chain == ledger.chain && fresh.branches == ledger.branches)
                     #expect(fresh.owedRemovals == ledger.owedRemovals)
+                    #expect(fresh.exposedKeyHolders == ledger.exposedKeyHolders)
                     try #require(rounds < 2_000)
                 }
                 #expect(ledger.chain == reference.chain, "seed \(seed)")
                 #expect(ledger.branches == reference.branches)
                 #expect(ledger.owedRemovals == reference.owedRemovals)
+                #expect(ledger.exposedKeyHolders == reference.exposedKeyHolders)
             }
         }
     }

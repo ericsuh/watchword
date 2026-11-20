@@ -21,8 +21,8 @@ struct AdversarialAccountScreenTests {
 
     /// Threat: anyone who can send the person a message (outside §2's list: no access to anything of Watchword's)
     /// sends a fingerprint code for an account of their own, hoping a paste is taken as a comparison. It names the
-    /// account and nothing more: no pin is made without a typed number or the person's own comparison, and the pin
-    /// says which (S16), never "scanned".
+    /// account and nothing more: no pin is made without the full code typed (the person's own "they match" is no
+    /// longer offered, ADR 0010), and the pin says how it was made (S16), never "scanned".
     @Test("a pasted fingerprint code pins nothing, and the pin made after a comparison says how it was made")
     func pastedCode() async throws {
         let household = SharedVaultHousehold()
@@ -31,6 +31,7 @@ struct AdversarialAccountScreenTests {
         let vaultID = try await owner.session.createVault(name: "Household").id
         try await owner.session.shareVault(vaultID)
         let invitation = InvitationModel(vaultID: vaultID, context: Self.context(owner.session))
+        await invitation.useFullCode()
         invitation.accountText = OwnFingerprint(stranger.bundle).code
         await invitation.lookUp()
         guard case .compareFingerprint = invitation.step else {
@@ -40,10 +41,10 @@ struct AdversarialAccountScreenTests {
         await invitation.confirmFingerprint()
         let pins = VerifiedContacts(store: owner.contacts, account: owner.bundle)
         #expect(try await pins.pinned(stranger.accountID) == nil, "pinned on a pasted code alone")
-        invitation.confirmation.comparedByEye = true
+        invitation.confirmation.typedSafetyNumber = stranger.safetyNumber
         await invitation.confirmFingerprint()
-        #expect(try await pins.pinned(stranger.accountID)?.method == .comparedByEye)
-        #expect(invitation.verificationText == "You confirmed that the two safety numbers match.")
+        #expect(try await pins.pinned(stranger.accountID)?.method == .safetyNumber)
+        #expect(invitation.verificationText == "You typed their full vault sharing code, and it matched.")
     }
 
     /// Threat: a hostile import file (A7) offers an existing item a look-alike of its own site, `аmazon.com` with a
@@ -79,13 +80,56 @@ struct AdversarialAccountScreenTests {
         #expect(merged.scopes.map(\.host).contains(host.host), "the second confirmation is the person's to give")
     }
 
-    /// Threat: a vault member who may write (A4) renames the shared vault "Personal", so a new item meant for the
-    /// person's own vault lands in theirs. Every list labels vaults by ownership and role, not by name alone.
-    @Test("a shared vault a member renamed Personal is labelled apart from the real Personal vault")
+    /// Threat (Z75): the import file's duplicate of the Shop login adds `login.bank.example`, which resembles nothing
+    /// and was shown as ordinary, one switch to accept; merged, the Shop item took the bank's sign-in page from the
+    /// saved Bank login. The merge screen now says which account the host would take AutoFill from, holds it for a
+    /// second confirmation, and passes that confirmation to the session, which refuses the merge without it.
+    @Test("a merge host that would hide another saved login is named and held for a second confirmation")
+    func mergeHostThatHidesALogin() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let personal = try #require(await vault.session.personalVaultID)
+        _ = try await vault.session.save(
+            Item(
+                vaultID: personal, title: "Bank", scopes: [ServiceScope(host: "bank.example")],
+                fields: [Field(kind: .username, label: "Username", value: "pat")]))
+        let shop = try await vault.session.save(
+            Item(
+                vaultID: personal, title: "Shop", scopes: [ServiceScope(host: "shop.example")],
+                fields: [Field(kind: .username, label: "Username", value: "pat")]))
+        let file =
+            #"{"version":{"major":1,"minor":0},"exporterRpId":"x.example","exporterDisplayName":"X","timestamp":1,"#
+            + #""accounts":[{"id":"YQ","username":"","email":"","collections":[],"items":[{"id":"aQ","title":"Shop","#
+            + #""scope":{"urls":["https://shop.example/","https://login.bank.example/"],"androidApps":[]},"#
+            + #""credentials":[{"type":"basic-auth","username":{"fieldType":"string","value":"pat"}}]}]}]}"#
+        let model = ImportModel(context: Self.context(vault.session))
+        await model.load()
+        model.format = .credentialExchange
+        await model.read(Array(file.utf8))
+        let duplicate = try #require(model.duplicates.first)
+        await model.choose(.merge(into: shop.id), for: duplicate.id)
+        let host = try #require(model.merges[duplicate.id]?.hosts.first { $0.host == "login.bank.example" })
+        #expect(host.warning == "Accepting it would stop AutoFill offering “Bank” there.")
+        model.setHost(host.host, accepted: true, for: duplicate.id)
+        #expect(!model.isAccepted(host: host.host, for: duplicate.id), "accepted on one switch")
+        model.confirmAwaitingHost()
+        await model.commit()
+        #expect(model.errorMessage == nil)
+        let merged = try await vault.session.item(id: shop.id)
+        #expect(merged.scopes.map(\.host).contains("login.bank.example"))
+    }
+
+    /// Threat: an administrator of a shared vault (A4 with the role; a member who merely may write is refused, here
+    /// and by every device's judge, §8.7) renames it "Personal", so a new item meant for the person's own vault
+    /// lands in theirs. Every list labels vaults by ownership and role, not by name alone.
+    @Test("a shared vault an administrator renamed Personal is labelled apart from the real Personal vault")
     func sharedVaultNamedPersonal() async throws {
         let household = SharedVaultHousehold()
-        let home = try await household.household(roles: [.readWrite], seed: 711)
+        let home = try await household.household(roles: [.administrator, .readWrite], seed: 711)
         let member = home.members[0]
+        await #expect(throws: SharedVaultError.renameRefused) {
+            _ = try await home.members[1].session.renameVault(id: home.vaultID, to: "Personal")
+        }
         _ = try await member.session.renameVault(id: home.vaultID, to: "Personal")
         try await member.session.sync()
         try await home.owner.session.sync()

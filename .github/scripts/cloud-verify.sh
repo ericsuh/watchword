@@ -92,13 +92,16 @@ if [ "$runner" = "mise" ]; then
     if [ "$quick" -eq 0 ]; then
         run "strict memory safety" mise run build:strict
         run "unsafe confinement" mise run audit:unsafe
-        # `swift package dump-package` comes with the toolchain; python3 does not, on a minimal VM.
+        # `swift package dump-package` comes with the toolchain; python3 does not, on a minimal VM. Both audits read
+        # their files with it (the manifest's dump, and the workflows and Apps/project.yml as YAML).
         if command -v python3 > /dev/null 2>&1; then
             run "no dependencies" mise run audit:dependencies
+            run "action pins" mise run audit:actions
         else
             skip "no dependencies" "python3 is not on PATH, and audit:dependencies parses the manifest with it."
+            skip "action pins" "python3 is not on PATH, and audit:actions reads the workflows with it."
         fi
-        run "action pins" mise run audit:actions
+        run "mise pins" mise run audit:mise-pins
         # The workflow and task scripts, against stand-ins for the tools they call (Tests/ScriptTests).
         if command -v python3 > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
             run "script tests" mise run test:scripts

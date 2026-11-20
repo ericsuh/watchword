@@ -2,7 +2,7 @@ import Foundation
 import WatchwordMatching
 import WatchwordModel
 
-/// The items of one request, read from the vault once.
+/// The items of one request, read from the vault once, with what the vault said of each vault they are in.
 struct VaultSnapshot: Sendable {
     /// Everything readable, as stored, trashed and archived included. Secrets are read from these, and writes start
     /// from them.
@@ -14,26 +14,110 @@ struct VaultSnapshot: Sendable {
     /// (`Authorization` is only made for items in use). A scope the policy refuses (`com`, `co.uk`) cannot be
     /// created through the vault, but an item can arrive from another vault member or an import, and such a scope
     /// would match every site under it; here it matches nothing (PRD F11.2). The stored item is not rewritten.
-    let rankable: [Item]
+    ///
+    /// Never handed to `ItemRanker`, `AutoFillGate` or `PhishingDetector` directly: `candidates(on:)`, `decide`,
+    /// `authorize` and `assess` below pass `sharedVaults` with it, and are the only callers. It is `SavedSites`'
+    /// view, the one the item editor and the import preview judge hosts against too.
+    var rankable: [Item] { sites.items }
+    let sites: SavedSites
     /// IDs more than one readable item carries. No honest client writes two items with one ID, and everything here
     /// names an item by its ID alone (a choice, a record identifier, the ranker's "is this the match"), so with two
     /// candidates the gate could say yes about one and the secret be read from the other. Such items keep ranking,
     /// which can only narrow what is offered, and are never listed, released, written or published.
     let duplicatedIDs: Set<UUID>
+    /// The vaults as the vault described them, by ID.
+    let vaults: [UUID: CredentialVaultInfo]
+    /// The vaults accounts other than this one may write: every vault of an item here that the vault did not
+    /// describe as this account's alone (review finding Z60). An item of one of these says what a member said, so
+    /// it never shadows an item of another vault, never vouches for a look-alike of another vault's site, and is
+    /// never written to without the person.
+    var sharedVaults: Set<UUID> { sites.sharedVaults }
+    /// The vault a new item is created in.
+    let defaultVaultID: UUID?
 
-    init(_ items: [Item]) {
-        all = items
-        rankable = items.filter { !$0.isTrashed }.map { item in
-            var view = item
-            view.scopes = item.scopes.filter(ScopePolicy.isAcceptable)
-            return view
+    init(_ snapshot: CredentialSnapshot) {
+        var described: [UUID: CredentialVaultInfo] = [:]
+        for vault in snapshot.vaults {
+            // Two descriptions of one vault that disagree: shared wins.
+            if let held = described[vault.id], held.isShared { continue }
+            described[vault.id] = vault
         }
+        self.init(items: snapshot.items, vaults: described, defaultVaultID: snapshot.defaultVaultID)
+    }
+
+    /// Items taken to be the person's own, each in a vault nobody else writes: for `CredentialIdentityPlanner`'s
+    /// entry points that are given items alone, and for asking what one item would be published as on its own.
+    init(ownItems items: [Item]) {
+        var described: [UUID: CredentialVaultInfo] = [:]
+        for item in items {
+            described[item.vaultID] = CredentialVaultInfo(id: item.vaultID, name: "", isShared: false)
+        }
+        self.init(items: items, vaults: described, defaultVaultID: nil)
+    }
+
+    private init(items: [Item], vaults: [UUID: CredentialVaultInfo], defaultVaultID: UUID?) {
+        all = items
+        sites = SavedSites(stored: items, ownVaults: Set(vaults.values.filter { !$0.isShared }.map(\.id)))
         var seen = Set<UUID>()
         var duplicated = Set<UUID>()
         for item in items where !seen.insert(item.id).inserted {
             duplicated.insert(item.id)
         }
         duplicatedIDs = duplicated
+        self.vaults = vaults
+        self.defaultVaultID = defaultVaultID
+    }
+
+    /// This snapshot with one item alone in it, its vault as described here.
+    func only(_ item: Item) -> VaultSnapshot {
+        VaultSnapshot(items: [item], vaults: vaults, defaultVaultID: defaultVaultID)
+    }
+
+    /// Whether `item` is in a vault other accounts may write (or one the vault did not describe).
+    func isShared(_ item: Item) -> Bool {
+        sharedVaults.contains(item.vaultID)
+    }
+
+    /// Whether `item` and `other` are in different trust domains: different vaults, one of them shared. What one
+    /// says is not the other's word, so where they meet the person chooses, knowing the vaults (review finding Z70).
+    func crossesTrust(_ item: Item, _ other: Item) -> Bool {
+        item.vaultID != other.vaultID && (isShared(item) || isShared(other))
+    }
+
+    /// Whether an item of a shared vault is offered on `host` beside an item of another vault: then a request that
+    /// names no vault (a suggestion, the system's passkey sheet) must not lead to it without the person (Z70).
+    func meetsAnotherTrustClass(_ item: Item, on host: NormalizedHost) -> Bool {
+        isShared(item) && offered(on: host).contains { crossesTrust(item, $0.item) }
+    }
+
+    /// The vault of `item`, for a list or a sheet to name.
+    func vault(of item: Item) -> EntryVault {
+        vault(item.vaultID)
+    }
+
+    func vault(_ id: UUID) -> EntryVault {
+        guard let info = vaults[id] else { return EntryVault(id: id, name: "", isShared: true) }
+        return EntryVault(id: id, name: info.name, isShared: info.isShared)
+    }
+
+    // MARK: The gate, with the vaults' standing
+
+    /// What the gate offers on `host`: the unshadowed matches, or why nothing is offered there.
+    func candidates(on host: NormalizedHost) -> Result<ItemRanking, FillRefusal> {
+        sites.candidates(on: host)
+    }
+
+    /// The matches the gate offers on `host`, none where it refuses the host.
+    func offered(on host: NormalizedHost) -> [RankedMatch] {
+        (try? candidates(on: host).get().primary) ?? []
+    }
+
+    func decide(for identifier: ServiceIdentifier) -> FillDecision {
+        sites.decide(for: identifier)
+    }
+
+    func assess(_ host: NormalizedHost) -> PhishingAssessment {
+        sites.assess(host)
     }
 
     /// Whether a credential may be released from `item`, or the item written to, by the extension: not in the
@@ -117,13 +201,7 @@ enum ReleaseGate {
 
         var refusals: [FillRefusal] = []
         for identifier in identifiers.prefix(maximumIdentifiers) {
-            let result: Result<NormalizedHost, FillRefusal>
-            switch purpose {
-            case .credential:
-                result = AutoFillGate.authorize(ranked, for: identifier, among: snapshot.rankable)
-            case .oneTimeCode:
-                result = AutoFillGate.authorizeOneTimeCode(ranked, for: identifier, among: snapshot.rankable)
-            }
+            let result = snapshot.sites.authorize(ranked, for: identifier, oneTimeCode: purpose == .oneTimeCode)
             switch result {
             case .success(let host): return .success(Authorization(item: item, host: host))
             case .failure(let refusal): refusals.append(refusal)
@@ -136,7 +214,7 @@ enum ReleaseGate {
     /// report. Ranked once, then each most specific match is authorised like any single release.
     static func authorizedItems(for identifier: ServiceIdentifier, in snapshot: VaultSnapshot) -> [Authorization] {
         guard let host = try? HostNormalizer.normalize(identifier) else { return [] }
-        return ItemRanker.rank(items: snapshot.rankable, host: host).primary.compactMap { match in
+        return snapshot.offered(on: host).compactMap { match in
             try? authorize(itemID: match.item.id, for: [identifier], in: snapshot).get()
         }
     }
@@ -151,7 +229,8 @@ enum ReleaseGate {
     static func mostInformative(_ refusals: [FillRefusal]) -> FillRefusal {
         func weight(_ refusal: FillRefusal) -> Int {
             switch refusal {
-            case .itemNotScopedToHost(let assessment), .noMatchingItem(let assessment):
+            case .itemNotScopedToHost(let assessment), .noMatchingItem(let assessment),
+                .resemblesSavedSite(let assessment):
                 return assessment.isSuspicious ? 4 : 2
             case .insecurePage:
                 return 3

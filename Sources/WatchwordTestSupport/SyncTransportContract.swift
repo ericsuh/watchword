@@ -22,6 +22,67 @@ public enum SyncTransportContract {
         found += try await immutable(try await make())
         found += try await sizeLimit(try await make())
         found += try await deletion(try await make())
+        found += try await singleCopies(try await make())
+        return found
+    }
+
+    /// Every transport, whether or not it can hold several copies of a name: an object with one copy is listed with
+    /// no copies beside it and fetched as that one copy, and bounds are counted, never thrown.
+    public static func singleCopies(_ transport: any SyncTransport) async throws -> [String] {
+        var found: [String] = []
+        let missing = try await transport.fetchCopies(name, maximumLength: 100, maximumCopies: 4)
+        if missing != SyncObjectCopies() { found.append("a missing object has copies: \(missing)") }
+        try await transport.create(name, contents: [1, 2, 3])
+        let listing = try await transport.listWithCopies(prefix: prefix)
+        if Set(listing.names) != [name] { found.append("listWithCopies named \(listing.names)") }
+        if !listing.copied.isEmpty { found.append("one object listed with copies: \(listing.copied)") }
+        if try await transport.fetchCopies(name, maximumLength: 100, maximumCopies: 4)
+            != SyncObjectCopies(copies: [[1, 2, 3]])
+        {
+            found.append("fetchCopies of one object did not give its bytes once")
+        }
+        if try await transport.fetchCopies(name, maximumLength: 2, maximumCopies: 4) != SyncObjectCopies(omitted: 1) {
+            found.append("a copy over the limit was not counted as omitted")
+        }
+        return found
+    }
+
+    /// A transport that can hold several copies of a name, given a way to put one beside an object (`plant`, which
+    /// stands for the provider or for A1): every copy is listed in the count and handed over, the current one first;
+    /// the bounds hold per copy; a plain `fetch` still reads the current object; and `delete` removes them all.
+    public static func heldCopies(
+        _ transport: any SyncTransport, plant: (String, [UInt8]) async throws -> Void
+    ) async throws -> [String] {
+        var found: [String] = []
+        try await transport.create(name, contents: [1])
+        try await plant(name, [2, 2])
+        try await plant(name, Array(repeating: 3, count: 101))
+        let other = SyncObjectLocation.segment(vaultID: vault, author: deviceA, sequence: 2).name
+        try await transport.create(other, contents: [9])
+        let listing = try await transport.listWithCopies(prefix: prefix)
+        if Set(listing.names) != [name, other] { found.append("names with copies listed as \(listing.names)") }
+        if listing.copied != [name: 3] { found.append("copies counted as \(listing.copied)") }
+        if Set(try await transport.list(prefix: prefix)) != [name, other] { found.append("list changed by copies") }
+        let copies = try await transport.fetchCopies(name, maximumLength: 100, maximumCopies: 8)
+        if copies != SyncObjectCopies(copies: [[1], [2, 2]], omitted: 1) {
+            found.append("copies fetched as \(copies)")
+        }
+        let bounded = try await transport.fetchCopies(name, maximumLength: 100, maximumCopies: 1)
+        if bounded != SyncObjectCopies(copies: [[1]], omitted: 2) { found.append("count bound gave \(bounded)") }
+        if try await transport.fetch(name, maximumLength: 100) != [1] { found.append("fetch is not the current copy") }
+        do {
+            try await transport.create(name, contents: [7])
+            found.append("an object with copies was overwritten")
+        } catch SyncTransportError.objectExists {
+        } catch {
+            found.append("a create over copies threw \(error)")
+        }
+        try await transport.delete(name)
+        let after = try await transport.listWithCopies(prefix: prefix)
+        if Set(after.names) != [other] || !after.copied.isEmpty { found.append("copies outlived their object") }
+        if try await transport.fetchCopies(name, maximumLength: 100, maximumCopies: 8) != SyncObjectCopies() {
+            found.append("copies fetched after deletion")
+        }
         return found
     }
 

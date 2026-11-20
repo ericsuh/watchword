@@ -29,6 +29,20 @@ public enum SharingStateKey: String, Sendable, CaseIterable {
     /// Which segment of which device's stream first carried each record version, and the head the vault was last
     /// judged at (`SharedStreamIndex`), signed.
     case streamIndex
+    /// What this device has anchored of the other members' device registries (`MemberRegistryPins`), signed: for each
+    /// account and signing key the vault's chain lists, the genesis entry and the credential entry it follows
+    /// (review finding Z6).
+    case memberDevices
+    /// The vault keys that arrived by grant which this device has checked against a grant its saved ledger entitles
+    /// this account to, byte for byte (`SharedKeyProvenance`, review finding Z59), signed: only those are made
+    /// resident for the vault.
+    case vaultKeys
+    /// The versions this device's own take-out held aside before they were published (`SharedStreamIndex.ownTakenOut`),
+    /// signed, in a row of their own so that they survive the index being refused or rebuilt (review finding Z121).
+    case ownTakenOut
+    /// The earlier device IDs of this installation whose work a restore has still to carry into the vault
+    /// (`RestoredChainRow`), signed, bound to this device's ID (review of round 16, Z216).
+    case restoredChain
 }
 
 public actor InMemorySharingStateStore: SharingStateStore {
@@ -69,15 +83,19 @@ public struct SharingSettings: Sendable {
     /// Published key bundles; the adapter is the account record on the transport (milestone 4's open list).
     public var directory: any KeyBundleDirectory
     public var shareAccess: (any ShareAccessControl)?
+    /// Where vault sharing code sessions meet (ADR 0010); `nil` where there is none, and only the full code is offered.
+    /// Like the directory, it has no production adapter yet (milestone 4's open list).
+    public var board: (any SharingBoard)?
 
     public init(
         state: any SharingStateStore, contacts: any VerifiedContactStore, directory: any KeyBundleDirectory,
-        shareAccess: (any ShareAccessControl)? = nil
+        shareAccess: (any ShareAccessControl)? = nil, board: (any SharingBoard)? = nil
     ) {
         self.state = state
         self.contacts = contacts
         self.directory = directory
         self.shareAccess = shareAccess
+        self.board = board
     }
 }
 
@@ -92,6 +110,10 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     case syncNotConfigured
     /// This account may not write to the vault now (PRD F4.5): `MembershipLedger.writePermission`.
     case writeRefused(WriteRefusal)
+    /// Only a shared vault's owner or an administrator may rename it (docs/02-architecture.md §8.7; owner decision of
+    /// 2026-11-17): this account may write to the vault, but holds neither role on the head this device knows.
+    /// Refused before anything is sealed; another device would hold such a description aside anyway.
+    case renameRefused
     /// The vault was shared by another account: only its owner can delete it (a member leaves instead).
     case notOwner
     /// The current vault key has not been received yet (its grant is not on the transport, or not for this account).
@@ -100,4 +122,61 @@ public enum SharedVaultError: Error, Equatable, Sendable {
     /// (grant names, envelope headers) and, for a shared vault, chosen by its owner: adopting one would displace the
     /// other vault's key. Refused before anything is stored or made resident.
     case keyIDInUse(UUID)
+    /// No sharing board is configured, so no vault sharing code session can run (ADR 0010); the full code still can.
+    case sharingBoardNotConfigured
+    /// A vault sharing code session authenticated keys for an account that a shared vault here lists with other keys:
+    /// the pin is not replaced on the session's word against the chain's (`replacePinFromSharingCode`).
+    case sharingCodeKeysNotListed
+    /// The vault is shared and this device holds no verified membership ledger for it: its account's marker or a key
+    /// that arrived by grant says it is shared (another device of the account shared or joined it; or the saved
+    /// ledger, or the owner's pin that anchors it, is gone or damaged: A8). Nothing is written, renamed, sealed,
+    /// published, deleted or shared again there until this device accepts the vault's invitation itself, or the
+    /// owner's pin it lacks is made again (review finding Z41; docs/06-adversarial-review.md V19 and V31): a shared
+    /// vault is never run as one of the account's own.
+    case ledgerUnavailable(UUID)
+    /// The vault's sync log was compacted before it was shared (segments collected, their work surviving only in a
+    /// snapshot). A shared vault attributes every value through the segment that carried it, and nothing attributes
+    /// those: shared as it is, the vault's older items would be held aside on every device (review finding Z42).
+    /// Refused until there is a rule for them; a new vault can be shared and the items moved into it.
+    case historyCompacted(UUID)
+    /// `removeLocalCopies` was asked for a vault this account is still a member of: a member leaves first, and the
+    /// copies can go once the chain says they are out.
+    case stillAMember(UUID)
+    /// `removeLocalCopies` was asked for a vault in which this device holds changes of its own that nobody else has,
+    /// more of them than the caller said the person had been told of (review finding Z57): those are not copies,
+    /// and discarding them is the person's choice, made knowing the number. Carries the number.
+    case unsharedWork(UUID, Int)
+    /// An invitation for a vault this device holds keys of, which arrived by grant, without knowing whose the vault
+    /// is: it has no ledger for it and the account's marker has not reached it (review finding Z48). The vault has an
+    /// owner, and an invitation is accepted only if it names them; one this device cannot check is not accepted,
+    /// whoever it names. It waits for the marker, or for the sync that brings it. Also refused before this session has
+    /// listed the account's vault directory, and for a vault that listing names: the account's other devices know the
+    /// vault, and their marker is what names its owner (review finding Z59).
+    case ownerUnknown(UUID)
+    /// The account's own devices disagree about whose the vault is: its markers name two owners, or this device's
+    /// ledger names an owner its account's marker does not (review finding Z59). Each side holds a chain verified to
+    /// someone the person compared a safety number with, and nothing on the device can tell which the person meant.
+    /// The vault is held closed on every device of the account, ledger or not: readable, and nothing written,
+    /// sealed again, published or proposed, and its keys given to nobody.
+    case ownerDisputed(UUID)
+    /// This device's ID does not commit to its account under its key (`DeviceIdentifier`, review findings Z157 and
+    /// Z162): a device of an account made before IDs committed (its registry started under the device's old random
+    /// ID), or one an older build approved. Every other device of a shared vault counts no device whose ID does not
+    /// commit, so nothing this device wrote there would reach anyone, and a move into the vault would leave the item
+    /// on this device alone (PRD F7.6). Nothing is written, shared, accepted or published there from this device until
+    /// it is enrolled again as a new device, whose ID commits.
+    case deviceIDDoesNotCommit
+    /// The chain an invitation leads to never names a key of the vault that reached this account by grant: it is
+    /// behind what the account has seen (a store serving an older prefix of the chain), or it is another chain. Not
+    /// joined; a later sync, with the store serving the whole chain, can try again (docs/06-adversarial-review.md
+    /// V41).
+    case chainBehindHeldKeys(UUID)
+    /// The invitation was issued (the joiner is added and holds a grant) but could not be delivered inside the vault
+    /// sharing code session: something else is in its slot (anyone who heard the number may take it). Hand it over as
+    /// text (`SharingCodes.text(for:)`); the joiner, who checked this device, pastes it (docs/06-adversarial-review.md,
+    /// V22).
+    case invitationNotDelivered(Invitation)
+    /// This device's key could not be read just now (the Keychain failed), so whether its ID commits is unknown.
+    /// Refused as `deviceIDDoesNotCommit` would be, and worth trying again: nothing is wrong with the device.
+    case deviceKeyUnreadable
 }

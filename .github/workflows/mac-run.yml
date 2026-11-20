@@ -19,14 +19,14 @@ on:
       gate:
         description: The gate to run (a mise task)
         type: choice
-        options: [test, "test:adversarial", build, "build:strict", lint, "app:test", "app:screenshots", check]
+        options: [test, "test:adversarial", build, "build:strict", lint, "app:test", "app:release", "app:screenshots", check]
         default: test
       filter:
         description: "test: a swift test --filter regex. app:test (ios/macos): an -only-testing identifier. Empty for all"
         type: string
         default: ""
       platform:
-        description: "app:test and app:screenshots only: which app"
+        description: "app:test, app:release and app:screenshots only: which app"
         type: choice
         options: [macos, ios, all]
         default: macos

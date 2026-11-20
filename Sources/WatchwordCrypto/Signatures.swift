@@ -27,6 +27,15 @@ public enum SignatureDomain: UInt8, Sendable, CaseIterable {
     /// domain of its own rather than a magic inside `pendingDeletion`'s: those messages begin with a vault ID and
     /// have no magic, so nothing could keep a stash message from being read as one.
     case syncStash = 9
+    /// A vault's sync state as this device saved it (`SyncState.authenticator`, review finding Z20): what it has
+    /// merged, published and erased, which its next snapshot and segments sign for every other device. A row planted
+    /// in the local state store is then no state, and the log is replayed.
+    case syncState = 10
+    /// That this installation is moving the sync state of an earlier device ID of its own to its current one
+    /// (`DeviceMigration.authenticator`, review of round 10, Z181): recorded with the account record that names the new
+    /// ID, and done again at each unlock until complete. A record planted in the local database could otherwise make
+    /// this device take another device's pending deletions, copied into its state file, for its own.
+    case deviceMigration = 11
 }
 
 public enum Signatures {

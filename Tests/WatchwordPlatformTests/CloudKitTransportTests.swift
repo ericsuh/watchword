@@ -144,12 +144,161 @@
             }
             #expect(database.zoneNames.isEmpty)
 
-            // Only the person's choice to start again forgets it.
+            // A device that never saw the zone (a marker of its own) creates it with its first write, as ever.
             let fresh = InMemorySyncStoreMarker()
             let restarted = FakeCloudKitTransport(database: database, marker: fresh)
             try await restarted.create(name, contents: [3])
             #expect(database.zoneNames == ["Watchword"])
             #expect(await fresh.hasSeen(restarted.markerName))
+        }
+
+        /// The person's confirmed decision to upload again (docs/02-architecture.md §7.10): `startStoreAgain`
+        /// creates the zone this device had seen and found missing, uploads nothing, and keeps the marker, so a
+        /// second deletion is a reset again.
+        @Test("startStoreAgain recreates a zone that was deleted, uploads nothing, and keeps the marker")
+        func startingAgain() async throws {
+            let database = FakeCloudKitDatabase()
+            let marker = InMemorySyncStoreMarker()
+            let transport = FakeCloudKitTransport(database: database, marker: marker)
+            let name = SyncTransportContract.name
+            try await transport.create(name, contents: [1])
+            database.purgeZone("Watchword")
+            await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
+
+            try await transport.startStoreAgain()
+            #expect(database.zoneNames == ["Watchword"] && database.deletedZones.isEmpty)
+            #expect(try await transport.list(prefix: "").isEmpty)
+            #expect(await marker.hasSeen(transport.markerName))
+            try await transport.create(name, contents: [2])
+            #expect(try await transport.fetch(name, maximumLength: 10) == [2])
+
+            database.purgeZone("Watchword")
+            await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
+        }
+
+        /// Another device started the store again first, or the zone was never gone: nothing in it is touched.
+        @Test("startStoreAgain leaves a zone that exists, and every record in it, as it is")
+        func startingAgainOverAnExistingZone() async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            let name = SyncTransportContract.name
+            try await transport.create(name, contents: [1])
+            let zoneSaves = database.savedZones
+            let queries = database.queries.count
+            try await transport.startStoreAgain()
+            #expect(database.savedZones == zoneSaves && database.deletedZones.isEmpty)
+            // One record per prefix, in a listing's shape: never a TRUEPREDICATE query, which needs an index nothing
+            // else needs (SR20). The records are read, payload and all, since only they show a key reset (SR26, SR29):
+            // the query asks for the encrypted field, and the record it lists is fetched whole.
+            let probes = database.queries.dropFirst(queries)
+            #expect(!probes.isEmpty && probes.count <= 3)
+            #expect(probes.allSatisfy { $0.limit == 1 && $0.predicate.contains("BEGINSWITH") })
+            #expect(database.queriedKeys.suffix(probes.count).allSatisfy { $0.contains("payload") })
+            #expect(database.callCount(.fetchRecord) == 1)
+            #expect(try await transport.fetch(name, maximumLength: 10) == [1])
+        }
+
+        /// CloudKit reset the key that protected the zone: the zone is still there, its metadata fetches, its records
+        /// answer `zoneNotFound` with the reset key, and Apple prescribes deleting it before saving it again. Only
+        /// then, and only on this call. Review finding SR26: a probe that only fetched the zone found it present and
+        /// left it, so the listings kept answering the reset and the person was asked again at every sync. Review
+        /// finding SR29: the probe that replaced it asked for the plain `name` field only, so if CloudKit reports the
+        /// reset only when encrypted fields are read, it found a readable page and left the zone just the same. The
+        /// documentation does not settle which, so the fake answers each way, and the transport must start again under
+        /// each. (Unverified against CloudKit itself until a Mac run.)
+        @Test(
+            "a zone whose encryption key was reset is deleted and saved again by startStoreAgain alone",
+            arguments: FakeCloudKitDatabase.ResetReporting.allCases)
+        func startingAgainAfterAKeyReset(_ reporting: FakeCloudKitDatabase.ResetReporting) async throws {
+            let database = FakeCloudKitDatabase()
+            database.resetReporting = reporting
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            try await transport.create(SyncTransportContract.name, contents: [1])
+            database.resetEncryptionKey(of: "Watchword")
+            if reporting == .encryptedFieldsOnly {
+                // The listing asks for names only, and lists; the fetch reads the payload, and answers the reset.
+                #expect(try await transport.list(prefix: "vault/") == [SyncTransportContract.name])
+            } else {
+                await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
+            }
+            await #expect(throws: SyncTransportError.storeReset) {
+                try await transport.fetch(SyncTransportContract.name, maximumLength: 10)
+            }
+            #expect(database.deletedZones.isEmpty && database.zoneNames == ["Watchword"])
+
+            try await transport.startStoreAgain()
+            #expect(database.deletedZones == ["Watchword"] && database.zoneNames == ["Watchword"])
+            #expect(try await transport.list(prefix: "").isEmpty)
+            try await transport.create(SyncTransportContract.name, contents: [2])
+            #expect(try await transport.fetch(SyncTransportContract.name, maximumLength: 10) == [2])
+        }
+
+        /// Review finding SR20: after a key reset the zone may already be gone by the time it is deleted, and CloudKit
+        /// then answers the deletion with `zoneNotFound` (or `userDeletedZone`, `unknownItem`). Taken as a failure,
+        /// every retry would repeat it and the store could never be started again. Taken as done, the zone is saved.
+        @Test(
+            "a key reset whose zone is already gone when deleted is still started again",
+            arguments: [CKError.Code.zoneNotFound, .userDeletedZone, .unknownItem])
+        func startingAgainAfterAKeyResetWithTheZoneGone(_ answer: CKError.Code) async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            try await transport.create(SyncTransportContract.name, contents: [1])
+            database.purgeZone("Watchword")
+            // Both looks at the zone answer the reset (SR30: the second, just before deleting, must agree).
+            for _ in 0..<2 { database.injectFailure(FakeCloudKitDatabase.resetError, on: .fetchZone) }
+            database.injectFailure(CKError(answer), on: .deleteZone)
+            try await transport.startStoreAgain()
+            #expect(database.zoneNames == ["Watchword"])
+            #expect(try await transport.list(prefix: "").isEmpty)
+        }
+
+        /// Review finding SR29: the zone fetches, and then the probe's query fails for a reason that says nothing about
+        /// the key (the network, throttling). Nothing is decided on it: the typed error, no deletion, no save, and the
+        /// zone is as it was, whether its key was reset or not.
+        @Test(
+            "a probe query that fails after the zone fetched decides nothing and deletes nothing",
+            arguments: [false, true])
+        func probeQueryFailsAfterTheZoneFetched(_ keyWasReset: Bool) async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            try await transport.create(SyncTransportContract.name, contents: [1])
+            if keyWasReset { database.resetEncryptionKey(of: "Watchword") }
+            let zoneSaves = database.savedZones
+            database.injectFailure(CKError(.networkUnavailable), on: .query)
+            await #expect(throws: SyncTransportError.unavailable) { try await transport.startStoreAgain() }
+            #expect(database.deletedZones.isEmpty && database.savedZones == zoneSaves)
+            #expect(database.zoneNames == ["Watchword"])
+            if !keyWasReset {
+                #expect(try await transport.fetch(SyncTransportContract.name, maximumLength: 10) == [1])
+            }
+        }
+
+        /// Review finding SR29: an existing zone that lists nothing under any probe prefix is no evidence that its
+        /// records can be read, and none that its key was reset: another device may have started it again a moment ago.
+        /// It is left as it is, never deleted.
+        @Test("an empty zone is left as it is")
+        func startingAgainOverAnEmptyZone() async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            try await transport.create(SyncTransportContract.name, contents: [1])
+            try await transport.delete(SyncTransportContract.name)
+            let zoneSaves = database.savedZones
+            let queries = database.queries.count
+            try await transport.startStoreAgain()
+            #expect(database.deletedZones.isEmpty && database.savedZones == zoneSaves)
+            #expect(database.queries.count - queries == 3, "every probe prefix was looked at")
+        }
+
+        @Test("startStoreAgain that cannot reach CloudKit throws the typed error and creates nothing")
+        func startingAgainOffline() async throws {
+            let database = FakeCloudKitDatabase()
+            let transport = FakeCloudKitTransport(database: database, marker: InMemorySyncStoreMarker())
+            try await transport.create(SyncTransportContract.name, contents: [1])
+            database.purgeZone("Watchword")
+            database.injectFailure(CKError(.networkUnavailable))
+            await #expect(throws: SyncTransportError.unavailable) { try await transport.startStoreAgain() }
+            #expect(database.zoneNames.isEmpty)
+            await #expect(throws: SyncTransportError.storeReset) { try await transport.list(prefix: "vault/") }
         }
 
         @Test("a marker that cannot be read counts as seen: a missing zone is a reset, and nothing is created")

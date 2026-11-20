@@ -73,7 +73,14 @@ first of an ambiguous set is how the AWS root password ends up in a retail login
 `ScopePolicy.validate` refuses, at creation and edit time:
 
 - single-label hosts (`com`, `localhost`);
-- hosts that are themselves public suffixes (`co.uk`, `com.au`, `github.io`, `herokuapp.com`).
+- hosts that are themselves public suffixes (`co.uk`, `com.au`, `github.io`, `herokuapp.com`), with one
+  exception: a shared-hosting suffix that is also its operator's own sign-in site (`wordpress.com`,
+  `substack.com`, `tumblr.com`, `bandcamp.com`, and the others in `PublicSuffix.signInAtSuffix`) is accepted as
+  an *exact-host* scope, subdomains off, since that spans no other owner; with subdomains, which would reach its
+  tenants, it is refused like the rest. Refusing it outright left those sites with no saved login, no passkey
+  and so no look-alike warning either: the silence §1 is written against (review finding Z63). A new scope for
+  such a host gets that reach wherever nobody chose one (`ScopePolicy.newScope(forHost:)`: the editor, an
+  imported URL, a passkey's relying party).
 
 The embedded list in `PublicSuffix` is deliberately small and covers the country-code second-level
 domains plus the "anyone can host a tenant here" platforms, where one tenant must never be treated
@@ -83,6 +90,13 @@ see `07-supply-chain.md` §6.
 
 Importers run every scope through the same policy, so a malicious or sloppy 1PUX/CSV file cannot
 install a `com` scope.
+
+The other direction is the list's known tail, not a defect of the policy: a tenant-hosting parent the
+list does not name (the audit's examples were `pythonanywhere.com`, `neocities.org` and `altervista.org`)
+gets an ordinary scope with subdomains from the editor, an import and the `www` apex, so a tenant's page
+under it is filled with the parent account's login. That is tracked with the open full-PSL decision
+(`07-supply-chain.md` §6; review entries D1 and K6); entries are added to the embedded list one at a time, with
+the tradeoff noted, never wholesale.
 
 ### L4 — Normalisation that cannot invent a match
 
@@ -96,6 +110,12 @@ Two findings from probing `URLComponents` on the real toolchain (both now tested
 2. **`trimmingCharacters(in: .whitespacesAndNewlines)` strips U+200B.** A trailing zero-width space
    was silently removed, turning `amazon.com\u{200B}` into a match for `amazon.com`. Trimming is
    now ASCII-only, so exotic characters survive to be rejected rather than normalised away.
+
+3. **An IPv6 literal is parsed, not pattern-matched.** The branch for a host containing `:` used to
+   accept any run of hex digits, colons and dots and skip every other check, so `a::b.cafe.de` was a
+   "subdomain" of a saved `cafe.de`, and neither the length bound nor the IDNA mapping applied (fullwidth
+   hex digits passed). It is now parsed on ASCII bytes as RFC 4291 writes an address, bounded at 45 bytes,
+   and the matcher never treats a colon-bearing host as below a scope (review finding Z64).
 
 Also rejected: user-info (`https://amazon.com@evil.example/`), non-HTTP(S) schemes, C0/C1 controls,
 zero-width and bidi formatting characters, soft hyphen, empty labels, and labels or hosts beyond
@@ -154,8 +174,11 @@ than a claim about which site it imitates. `impersonatesSavedSite` distinguishes
 - **Clipboard.** Secrets copied from the app expire (default 60 s) and are marked local-only.
 - **Manual reveal inside the app** is the one place a determined person can still defeat all of
   this. The app cannot know what site a browser is showing, so the design does not pretend to: the
-  item detail view shows the item's scopes prominently, and revealing a secret on an item whose
-  scopes the person is actively searching away from carries the assessment banner.
+  item detail view shows the item's scopes prominently, each in its ASCII form (a Cyrillic look-alike
+  shows as `xn--…`) with how far it reaches. *Not built:* an assessment banner when a secret is revealed
+  on an item whose scopes the person is searching away from. Earlier text described it in the present
+  tense; nothing in the app or `WatchwordPresentation` computes it, and it is tracked as open (review
+  finding Z69).
 
 ## 3. User-visible flows
 
@@ -167,24 +190,49 @@ dialog people click through.
 
 **Suspicious host, person wants to use it anyway.** The sole route is adding the host as a scope on
 the item, inside the app, which requires: unlocking, opening the item, typing the host, and
-confirming a warning that names the site being added. That deliberate friction is the feature.
+confirming a warning that names the site being added and the item (PRD F11.7). That deliberate
+friction is the feature. It is enforced in the session, not the view: `VaultSession.save` judges every
+host a save adds (to a new item, or one the item did not have) against what the gate ranks among
+(`SavedSites`, every vault) and refuses one that resembles a saved site, or cannot be verified by eye,
+with `VaultError.hostsNeedConfirmation` unless the call names it in `confirmingHosts`. `ItemEditorModel`
+turns that refusal into the question, one per host, naming the site as it resolves, its reach and the
+item, and saves again naming exactly the hosts asked about ("Add Anyway"). Before review finding Z61 the
+editor added any host the scope policy accepted, with subdomains and no question, and the detail view
+then showed a Cyrillic look-alike as the real name; only the import's merge screen asked.
 
 **A website an import would add to an existing item.** The duplicate screen (`ImportModel`, `MergeHost`) shows
 each host a merge would add in its ASCII form, punycode for any label in another alphabet (`аmazon.com` is
 `xn--mazon-3ve.com`), with the registrable domain in bold, how far the scope reaches ("and its subdomains", "this
-address only", and its exclusions), and `PhishingDetector`'s assessment against every item in the vault. A host that
+address only", and its exclusions), and `PhishingDetector`'s assessment against what the gate ranks among
+(`SavedSites`: trashed items and policy-refused scopes left out, and a shared vault's scope vouching only for its own
+vault, so a member's item scoped to the look-alike does not make it recognised; review finding Z65). A host that
 resembles a saved site, or uses another alphabet at all, carries a warning that names the site, and switching it on
-asks a second time ("Accept Anyway"). The switch is off to begin with, as every addition is (`MergeChoices`). Before
+asks a second time ("Accept Anyway"); so does a host that would make the item hide or stand beside another saved
+account, named in the warning (review finding Z75). The session holds the rule, not the screen: `commitImport`
+judges every host a merge adds against `SavedSites` and refuses one that needs it unless
+`MergeChoices.confirmedHosts` names it (`mergeNeedsConfirmation`). The switch is off to begin with, as every
+addition is (`MergeChoices`). Before
 this, the screen showed the host as the file spelled it, so a file could offer the bank's item a look-alike that
 rendered as the bank (review of the account screens, finding 3).
 
-**Comparing fingerprints before sharing.** A fingerprint code (`WWFP1-…`) pasted from a message only names the
-account: anyone who can message the person can send a code for an account of their own. The invite screen still asks
-for the typed safety number or the person's own "they match", and the pin records which (`VerificationMethod`,
-S16). `scannedCode` is for a code read by the camera from the other person's screen, which the app does not do yet,
-so it never records one. The role step names the account being invited and says how its keys were confirmed, never
-"the numbers match" unless they were compared (finding 2). Accepting an invitation from an owner verified before
-still asks before joining (finding 8).
+**A new item an import would add.** Every entry's hosts are shown the same way, and an entry that would hide a saved
+account from AutoFill, stand beside one, or name a look-alike host needs a decision ("Import Anyway" or "Skip")
+that names the accounts it would hide and their vaults (`ImportConcern`, review finding Z62; architecture §14).
+
+**Checking each other before sharing** (ADR 0010). The invite screen runs a vault sharing code session: eight digits
+one way, then six typed on each device from the other's screen, each compared by the device, never a "they match"
+taken on the person's word (G3). The screens say whose screen the digits come from and warn against digits that
+arrive in a message (`SharingCodeWording.channelWarning`): a voice imitated on a call, or a person persuaded to type
+digits someone sent, defeats this as it defeats every out-of-band comparison, and nothing in the protocol can tell.
+A scan reads the other person's screen with the live camera only, never the photo library or the pasteboard, so a QR
+code passed on in a message is no scan. A fingerprint code (`WWFP1-…`) pasted on the fallback path only names the
+account: anyone who can message the person can send a code for an account of their own, so the full code must still be
+typed, and the pin records how it was made (`VerificationMethod`, S16). Whatever the evidence, the session checks it
+against the bundle it pins, so a key directory that answers a later lookup with other keys gets `fingerprintMismatch`,
+not a pin (review finding Z40; architecture §8.4). The role step names the account being invited and says how its keys
+were checked (finding 2). Accepting an invitation from an owner verified before still asks before joining (finding
+8), and an invitation whose owner is not the person just checked waits for the owner to be checked too: nobody
+vouches for an owner.
 
 **Ambiguous match.** Both accounts listed with their distinguishing field (username/email) and the
 matched scope. Nothing pre-selected.

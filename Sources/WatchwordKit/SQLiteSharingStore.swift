@@ -8,9 +8,11 @@
     /// App Group container (docs/02-architecture.md §6, §8.8), opened with the same hardening as `sync.sqlite`
     /// (`SQLiteConnection`, no symlinks, `STRICT` tables, an exact schema check).
     ///
-    /// Nothing here is secret, and the file is as untrusted as the record store (A8): pins, the saved ledger, a plan
-    /// and the stream index are each signed by the account and verified again by `VaultSession` and
-    /// `WatchwordSharing` when read, so a row planted or edited here is refused, never believed.
+    /// Nothing here is secret, and the file is as untrusted as the record store (A8): pins, the saved ledger, a plan,
+    /// the stream index, the member registry pins (`WWMD`), the key provenance row (`WWVK`), what the take-out held
+    /// aside (`WWTO`) and a restore's chain of earlier device IDs (`WWRC`) are each signed by the account and verified
+    /// again by `VaultSession` and `WatchwordSharing` when read, so a row planted or edited here is refused, never
+    /// believed (review of round 17, Z228).
     public final class SQLiteSharingStore: SharingStateStore, VerifiedContactStore {
         public static let schemaVersion = 1
         public static let databaseName = "sharing.sqlite"

@@ -24,6 +24,12 @@ struct DevicesView: View {
                         ForEach(sync.notices) { notice in
                             SyncNoticeText(notice: notice)
                         }
+                        // After the sync storage was reset (§7.10): asked, never done unasked.
+                        if sync.storageNeedsUpload {
+                            Button("Upload Again…") { Task { await model.askToUploadAgain() } }
+                                .disabled(model.isWorking)
+                                .accessibilityIdentifier(AccessibilityID.Devices.uploadAgain)
+                        }
                     }
                 }
             }
@@ -89,6 +95,18 @@ struct DevicesView: View {
         .sheet(item: $revoking) { device in
             RevokeDeviceView(device: device, model: model, close: { revoking = nil })
                 .onDisappear { model.revocation = RevocationForm() }
+        }
+        // The question before anything is uploaded again (§7.10). Dismissing it any other way is "Not Now".
+        .alert(
+            model.reuploadQuestion?.title ?? "",
+            isPresented: Binding(
+                get: { model.reuploadQuestion != nil }, set: { if !$0 { model.declineUpload() } }),
+            presenting: model.reuploadQuestion
+        ) { question in
+            Button(question.confirmLabel) { Task { await model.confirmUpload(question) } }
+            Button(question.declineLabel, role: .cancel) { model.declineUpload() }
+        } message: { question in
+            Text(question.paragraphs.joined(separator: "\n\n"))
         }
     }
 }

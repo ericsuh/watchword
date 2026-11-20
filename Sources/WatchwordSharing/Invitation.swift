@@ -211,9 +211,15 @@ public struct IncomingInvitation: Sendable {
     ///     verified, in which members removed since are still listed and the old key is current (review finding
     ///     S26). Continued, the ledger stays at the newest head it knows, and the invitation is accepted only once
     ///     the record that adds this account again is in it.
+    ///   - held: keys of this vault that this account's own vault directory already gave this device (signed by the
+    ///     account, opened under its keyset): another device of the account shared the vault. If the invitation's
+    ///     owner is this account, the chain entitles it to its current key and no grant of it opens, the held key
+    ///     with that ID is the key. That is the owner's genesis key on the owner's other device, for which no grant
+    ///     was ever made (review finding Z41), and nothing else: for anyone else's vault only a grant gives a key
+    ///     (Z48). A grant that does open is preferred, and the caller checks it against what it holds.
     public mutating func accept(
         membership candidates: [[UInt8]], grants: [(name: String, contents: [UInt8])], as keyset: Keyset,
-        continuing existing: MembershipLedger?
+        continuing existing: MembershipLedger?, holding held: [VaultKey] = []
     ) throws -> JoinedVault {
         switch state {
         case .awaitingVerification: throw SharingError.fingerprintNotVerified
@@ -239,7 +245,20 @@ public struct IncomingInvitation: Sendable {
             guard me.bundle.hasSameKeys(as: try keyset.publicKeyBundle()) else {
                 throw SharingError.ownKeySubstituted
             }
-            let vaultKey = try ledger.openGrant(of: current.vaultKeyID, from: grants, as: keyset)
+            let vaultKey: VaultKey
+            do {
+                vaultKey = try ledger.openGrant(of: current.vaultKeyID, from: grants, as: keyset)
+            } catch SharingError.grantNotFound {
+                // Entitled (`openGrant` checked that first), with no grant that opens. Only for a vault this account
+                // owns: a key ID is public, and a chain someone else signed that names one this device holds, with
+                // no grant, proves nothing about the key (review finding Z48).
+                guard invitation.ownerAccountID == keyset.accountID,
+                    let own = held.first(where: {
+                        $0.vaultID == invitation.vaultID && $0.key.keyID == current.vaultKeyID
+                    })
+                else { throw SharingError.grantNotFound }
+                vaultKey = own
+            }
             state = .accepted
             return JoinedVault(ledger: ledger, vaultKey: vaultKey)
         }

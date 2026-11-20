@@ -8,21 +8,26 @@
 #USAGE   choices "Debug" "Release"
 #USAGE }
 #
-# Signing settings are in signing.sh, shared with `app:test`, so a local build matches what CI tests.
+# Signing settings are in signing.sh, shared with `app:test`, so a local build matches what CI tests. The package
+# sources Xcode checks out are read before and after (packages.sh): the build fails unless they are the pinned commits.
 set -euo pipefail
 # shellcheck source=signing.sh
 source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
+# shellcheck source=packages.sh
+source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"
 
 build() { # build <scheme> <destination> <build settings...>
   local scheme="$1" destination="$2"
   shift 2
   xcodebuild build -project Apps/Watchword.xcodeproj -scheme "$scheme" -destination "$destination" \
-    -configuration "$usage_configuration" "$@"
+    -configuration "$usage_configuration" "${package_arguments[@]}" "$@"
 }
 
+resolve_packages
 case "$usage_platform" in
   ios | all) build Watchword-iOS 'generic/platform=iOS Simulator' "${ios_signing[@]}" ;;
 esac
 case "$usage_platform" in
   macos | all) build Watchword-macOS 'platform=macOS' "${macos_signing[@]}" ;;
 esac
+check_resolved_packages "After building"

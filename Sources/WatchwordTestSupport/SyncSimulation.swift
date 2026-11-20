@@ -153,6 +153,22 @@ public actor SyncTestClient {
         await syncState.loadState(vaultID: vaultID)
     }
 
+    /// A validly sealed and signed segment of this device's stream at `sequence`, carrying `rows` (versions it
+    /// wrote): the bytes another installation of this device would create under that name. Planted beside the
+    /// segment the device really wrote, it is the second copy of a forked stream (docs/02-architecture.md §7.5,
+    /// "Conflict copies").
+    public func signedSegment(
+        _ sequence: UInt64, carrying rows: [StoredRecord], acknowledging vector: [UUID: UInt64] = [:]
+    ) async throws -> [UInt8] {
+        let location = SyncObjectLocation.segment(vaultID: vaultID, author: deviceID, sequence: sequence)
+        let payload = SyncPayload(
+            kind: .segment, vaultID: vaultID, author: deviceID, number: sequence, vector: vector,
+            entries: rows.map(SyncEntry.init))
+        let envelope = try await keyring.seal(payload.encoded(), at: location)
+        let signature = try await keyring.sign(envelope, at: location)
+        return SignedObject(signature: signature, envelope: envelope).serialized()
+    }
+
     /// The entries this device keeps aside for a later version (ADR 0009), as stored.
     public func stash() async -> SyncStash {
         guard let bytes = await syncState.stash(vaultID: vaultID) else { return SyncStash() }
@@ -173,16 +189,25 @@ public actor SimulatedServer {
     }
 
     private var objects: [String: Stored] = [:]
+    /// Copies beside an object, as iCloud Drive keeps a conflict version or a renamed second create (§7.5).
+    private var otherCopies: [String: [Stored]] = [:]
     private var offline: Set<UUID> = []
     private var now = 0
     private var generator: SeededGenerator
     public var maximumVisibilityDelay: Int
     public var duplicateListings: Bool
+    /// Whether a create of a name whose object the creating device cannot see yet succeeds and leaves two copies,
+    /// as iCloud Drive does; off, every second create fails, as on CloudKit.
+    public var keepsConflictCopies: Bool
 
-    public init(seed: UInt64, maximumVisibilityDelay: Int = 3, duplicateListings: Bool = true) {
+    public init(
+        seed: UInt64, maximumVisibilityDelay: Int = 3, duplicateListings: Bool = true,
+        keepsConflictCopies: Bool = false
+    ) {
         generator = SeededGenerator(seed: seed)
         self.maximumVisibilityDelay = maximumVisibilityDelay
         self.duplicateListings = duplicateListings
+        self.keepsConflictCopies = keepsConflictCopies
     }
 
     public func transport(for device: UUID) -> SimulatedTransport {
@@ -201,15 +226,49 @@ public actor SimulatedServer {
     public func heal() {
         offline = []
         for name in objects.keys { objects[name]!.visibleAt = min(objects[name]!.visibleAt, now) }
+        for name in otherCopies.keys {
+            for index in otherCopies[name]!.indices {
+                otherCopies[name]![index].visibleAt = min(otherCopies[name]![index].visibleAt, now)
+            }
+        }
     }
 
     public var allObjects: [String: [UInt8]] {
         objects.mapValues(\.bytes)
     }
 
+    /// Removes every object and copy, for every device: a store that was reset, or a folder that was emptied
+    /// (docs/02-architecture.md §7.10).
+    public func removeEverything() {
+        objects = [:]
+        otherCopies = [:]
+    }
+
+    public func setVisibilityDelay(_ ticks: Int) {
+        maximumVisibilityDelay = ticks
+    }
+
+    /// How many copies are kept beside objects, in all.
+    public var copyCount: Int {
+        otherCopies.values.reduce(0) { $0 + $1.count }
+    }
+
     /// Writes an object as no device: what a provider glitch, a half-uploaded file or a stray file looks like.
     public func plant(_ name: String, contents: [UInt8]) {
         objects[name] = Stored(bytes: contents, creator: UUID(), visibleAt: now)
+    }
+
+    /// Adds a copy beside the object under `name`, visible to everyone at once: junk someone planted, or the other
+    /// copy of a name that was created twice.
+    public func plantCopy(_ name: String, contents: [UInt8]) {
+        otherCopies[name, default: []].append(Stored(bytes: contents, creator: UUID(), visibleAt: now))
+    }
+
+    /// Whether `device` could create `name` now although an object is under it: the object is not visible to it yet,
+    /// which is when a file provider ends up with two copies of one name.
+    public func createsCopy(device: UUID, name: String) -> Bool {
+        guard let stored = objects[name] else { return false }
+        return !visible(stored, to: device)
     }
 
     func check(_ device: UUID) throws {
@@ -230,6 +289,31 @@ public actor SimulatedServer {
         return names
     }
 
+    func listWithCopies(device: UUID, prefix: String) throws -> SyncListing {
+        var listing = SyncListing(names: try list(device: device, prefix: prefix))
+        for (name, copies) in otherCopies where name.hasPrefix(prefix) {
+            let seen = copies.filter { visible($0, to: device) }.count
+            guard seen > 0 else { continue }
+            let current = objects[name].map { visible($0, to: device) } ?? false
+            listing.copied[name] = seen + (current ? 1 : 0)
+            if !current { listing.names.append(name) }
+        }
+        return listing
+    }
+
+    func fetchCopies(device: UUID, name: String, maximumLength: Int, maximumCopies: Int) throws -> SyncObjectCopies {
+        try check(device)
+        var found = SyncObjectCopies()
+        for stored in (objects[name].map { [$0] } ?? []) + (otherCopies[name] ?? []) where visible(stored, to: device) {
+            if found.copies.count < maximumCopies, stored.bytes.count <= maximumLength {
+                found.copies.append(stored.bytes)
+            } else {
+                found.omitted += 1
+            }
+        }
+        return found
+    }
+
     func fetch(device: UUID, name: String, maximumLength: Int) throws -> [UInt8]? {
         try check(device)
         guard let stored = objects[name], visible(stored, to: device) else { return nil }
@@ -239,14 +323,24 @@ public actor SimulatedServer {
 
     func create(device: UUID, name: String, contents: [UInt8]) throws {
         try check(device)
-        guard objects[name] == nil else { throw SyncTransportError.objectExists(name) }
         let delay = maximumVisibilityDelay > 0 ? Int.random(in: 0...maximumVisibilityDelay, using: &generator) : 0
-        objects[name] = Stored(bytes: contents, creator: device, visibleAt: now + delay)
+        let stored = Stored(bytes: contents, creator: device, visibleAt: now + delay)
+        if let existing = objects[name] {
+            // A provider that has not shown this device the object yet takes the second create and keeps both
+            // (`keepsConflictCopies`); otherwise, and always once the object is visible, objects are written once.
+            guard keepsConflictCopies, !visible(existing, to: device) else {
+                throw SyncTransportError.objectExists(name)
+            }
+            otherCopies[name, default: []].append(stored)
+            return
+        }
+        objects[name] = stored
     }
 
     func delete(device: UUID, name: String) throws {
         try check(device)
         objects[name] = nil
+        otherCopies[name] = nil
     }
 }
 
@@ -268,5 +362,14 @@ public struct SimulatedTransport: SyncTransport {
 
     public func delete(_ name: String) async throws {
         try await server.delete(device: device, name: name)
+    }
+
+    public func listWithCopies(prefix: String) async throws -> SyncListing {
+        try await server.listWithCopies(device: device, prefix: prefix)
+    }
+
+    public func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws -> SyncObjectCopies {
+        try await server.fetchCopies(
+            device: device, name: name, maximumLength: maximumLength, maximumCopies: maximumCopies)
     }
 }

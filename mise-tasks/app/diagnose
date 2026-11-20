@@ -23,6 +23,7 @@ if [ ${#bundles[@]} -eq 0 ]; then
 fi
 
 limit=200 # lines per file, so one runaway log cannot bury the rest
+before=150 # lines of a session log shown before a UI query's timeout
 show() {  # show <file>: its last $limit lines, under a heading
   echo "--- ${1#"$out"/} ($(wc -l < "$1" | tr -d ' ') lines, last $limit shown)"
   tail -n "$limit" "$1"
@@ -73,6 +74,17 @@ for bundle in "${bundles[@]}"; do
     echo "::endgroup::"
   done < <(find "$out" -type f \( -name '*.ips' -o -name '*.crash' -o -name 'StandardOutputAndStandardError*.txt' \
     -o -name 'Session-*.log' \) -print0 | sort -z)
+  # Where a UI query timed out, what the session log holds from before the first two reports of it: what XCUITest
+  # saw while it waited (accessibility errors, whether the app was idle), which says whether the app or the simulator
+  # was the one not answering and is long gone from the last lines shown above.
+  while IFS= read -r -d '' file; do
+    grep -n -m 2 'Timed out while evaluating UI query' "$file" | cut -d: -f1 | while read -r line; do
+      start=$((line > before ? line - before : 1))
+      echo "::group::$name: ${file#"$out"/}, lines $start to $line, before a UI query timed out"
+      sed -n "${start},${line}p" "$file" | cut -c1-400
+      echo "::endgroup::"
+    done
+  done < <(find "$out" -type f -name 'Session-*.log' -print0 | sort -z)
   # The runner's own output, where the tests' STEP lines are whatever xcodebuild echoed.
   index=0
   while IFS= read -r -d '' file; do

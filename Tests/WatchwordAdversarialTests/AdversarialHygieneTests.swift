@@ -841,8 +841,8 @@ struct AdversarialHygieneTests {
         ]
         for plant in plants {
             let rig = await Rig(breached: ["password": 3])
-            await rig.cache.plant(plant, under: PwnedRangePrefix("5BAA6")!)
             let item = Self.item(1, passwords: ["password"])
+            await rig.cache.plant(plant, under: PwnedRangePrefix("5BAA6")!, in: item.vaultID)
             _ = try await rig.unlock([item])
             #expect(await rig.engine.scan(item, now: Self.now) == .scanned(breachedPasswords: 1, networkRequests: 1))
         }

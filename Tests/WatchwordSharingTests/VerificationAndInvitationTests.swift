@@ -118,16 +118,14 @@ struct VerificationAndInvitationTests {
     @Test("each kind of evidence pins the contact, and the pin is what later lookups trust")
     func pinning() async throws {
         let me = try SharingParty(seed: 1)
-        for (index, method) in [VerificationMethod.safetyNumber, .scannedCode, .comparedByEye].enumerated() {
+        for (index, method) in [VerificationMethod.safetyNumber, .scannedCode].enumerated() {
             let (contacts, _) = Self.book(for: me)
             let them = try SharingParty(seed: 10 + UInt64(index))
             #expect(try await contacts.trust(of: them.bundle) == .unverified)
-            let evidence: VerificationEvidence
-            switch method {
-            case .safetyNumber: evidence = .safetyNumber(them.bundle.fingerprint.safetyNumber)
-            case .scannedCode: evidence = .scannedCode(FingerprintCode(bundle: them.bundle).payload)
-            case .comparedByEye: evidence = .comparedByEye
-            }
+            let evidence: VerificationEvidence =
+                method == .safetyNumber
+                ? .safetyNumber(them.bundle.fingerprint.safetyNumber)
+                : .scannedCode(FingerprintCode(bundle: them.bundle).payload)
             let contact = try await contacts.verify(them.bundle, evidence: evidence, signedBy: me.keyset, at: Self.now)
             #expect(contact.bundle == them.bundle)
             #expect(contact.method == method)
@@ -136,6 +134,27 @@ struct VerificationAndInvitationTests {
             #expect(try await contacts.trust(of: them.bundle) == .verified(contact))
             #expect(try await contacts.pinned(them.accountID) == contact)
         }
+    }
+
+    /// ADR 0010 (G3): "I compared them myself" is no longer offered or accepted, and its raw value stays reserved. A
+    /// pin carrying it, even one this account signed (made by an earlier version), is not a pin: the contact is back
+    /// in front of the person.
+    @Test("a pin carrying the reserved method of the person's own comparison is ignored")
+    func reservedMethodIsNoPin() async throws {
+        let me = try SharingParty(seed: 1)
+        let them = try SharingParty(seed: 2)
+        let (contacts, store) = Self.book(for: me)
+        _ = try await contacts.verify(
+            them.bundle, evidence: .safetyNumber(them.bundle.fingerprint.safetyNumber), signedBy: me.keyset,
+            at: Self.now)
+        var pin = try #require(await store.pin(for: them.accountID))
+        var content = Array(pin.prefix(pin.count - 64))
+        content[4 + 1 + 16] = 3
+        pin = content + (try me.keyset.sign(content, domain: .membership))
+        await store.savePin(pin, for: them.accountID)
+        #expect(try await contacts.pinned(them.accountID) == nil)
+        #expect(try await contacts.trust(of: them.bundle) == .unverified)
+        #expect(VerificationMethod(rawValue: 3) == nil)
     }
 
     @Test("evidence that does not match the bundle pins nothing")
@@ -158,7 +177,9 @@ struct VerificationAndInvitationTests {
                 them.bundle, evidence: .scannedCode("junk"), signedBy: me.keyset, at: Self.now)
         }
         await #expect(throws: SharingError.notPermitted, "pins are signed by the account they belong to") {
-            _ = try await contacts.verify(them.bundle, evidence: .comparedByEye, signedBy: other.keyset, at: Self.now)
+            _ = try await contacts.verify(
+                them.bundle, evidence: .safetyNumber(them.bundle.fingerprint.safetyNumber), signedBy: other.keyset,
+                at: Self.now)
         }
         #expect(await store.pin(for: them.accountID) == nil)
         #expect(try await contacts.trust(of: them.bundle) == .unverified)
@@ -169,7 +190,9 @@ struct VerificationAndInvitationTests {
         let me = try SharingParty(seed: 1)
         let them = try SharingParty(seed: 2)
         let (contacts, _) = Self.book(for: me)
-        _ = try await contacts.verify(them.bundle, evidence: .comparedByEye, signedBy: me.keyset, at: Self.now)
+        _ = try await contacts.verify(
+            them.bundle, evidence: .safetyNumber(them.bundle.fingerprint.safetyNumber), signedBy: me.keyset,
+            at: Self.now)
 
         // The same account ID with other keys: what a store substituting a key would publish.
         let replacement = try SharingParty(accountID: them.accountID, seed: 900).bundle
@@ -258,7 +281,7 @@ struct VerificationAndInvitationTests {
         #expect(invitation.fingerprintToConfirm == nil)
         await #expect(throws: SharingError.invitationAlreadyCompleted) {
             try await invitation.confirm(
-                .comparedByEye, contacts: household.contacts, signedBy: owner.keyset, at: Self.now)
+                .safetyNumber(""), contacts: household.contacts, signedBy: owner.keyset, at: Self.now)
         }
 
         var generator = SeededGenerator(seed: 5)
@@ -317,7 +340,9 @@ struct VerificationAndInvitationTests {
         var outgoing = try await OutgoingInvitation.begin(
             vaultID: setup.household.vaultID, inviting: setup.guest.accountID, as: role,
             directory: setup.directory, contacts: contacts)
-        try await outgoing.confirm(.comparedByEye, contacts: contacts, signedBy: inviter.keyset, at: now)
+        try await outgoing.confirm(
+            .safetyNumber(try #require(outgoing.fingerprintToConfirm).safetyNumber), contacts: contacts,
+            signedBy: inviter.keyset, at: now)
         let package = try outgoing.issue(
             ledger: setup.household.ledger, vaultKey: setup.household.vaultKey, signedBy: inviter.keyset)
         try setup.household.adopt(package.record.contents)
@@ -372,7 +397,9 @@ struct VerificationAndInvitationTests {
 
         var incoming = try await IncomingInvitation.begin(
             invitation, knownOwner: nil, directory: setup.directory, contacts: setup.guestContacts)
-        try await incoming.confirm(.comparedByEye, contacts: setup.guestContacts, signedBy: guest.keyset, at: Self.now)
+        try await incoming.confirm(
+            .safetyNumber(try #require(incoming.fingerprintToConfirm).safetyNumber), contacts: setup.guestContacts,
+            signedBy: guest.keyset, at: Self.now)
         let joined = try incoming.accept(membership: records, grants: grants, as: guest.keyset, continuing: nil)
         #expect(joined.ledger.state.member(guest.accountID)?.role == .readWrite)
         #expect(
@@ -391,7 +418,8 @@ struct VerificationAndInvitationTests {
                 invitation, knownOwner: nil, directory: setup.directory, contacts: setup.guestContacts)
             if incoming.fingerprintToConfirm != nil {
                 try await incoming.confirm(
-                    .comparedByEye, contacts: setup.guestContacts, signedBy: guest.keyset, at: Self.now)
+                    .safetyNumber(try #require(incoming.fingerprintToConfirm).safetyNumber),
+                    contacts: setup.guestContacts, signedBy: guest.keyset, at: Self.now)
             }
             return incoming
         }

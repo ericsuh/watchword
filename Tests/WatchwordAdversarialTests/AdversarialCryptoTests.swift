@@ -88,6 +88,64 @@ struct AdversarialCryptoTests {
         }
     }
 
+    /// Threat: someone with the database file (A8), or the store serving the account's vault directory (A1), wants a
+    /// vault key that arrived by another account's grant to pass for one the account made itself, so that a device
+    /// holding no membership ledger runs a shared vault as a private one (review finding Z41). The class is the
+    /// wrap's authenticated context: it comes back from `unwrap`, every key a grant opens has it, and a wrap whose
+    /// embedded context is edited to the other class does not open.
+    @Test("whether a vault key arrived by grant is authenticated by its wrap")
+    func grantedKeyWrapClass() throws {
+        let keyset = Keyset.generate(accountID: UUID())
+        let sender = Keyset.generate(accountID: UUID())
+        let own = VaultKey.generate(vaultID: Self.vaultA)
+        let ownWrap = try own.wrap(for: keyset)
+        let reopened = try VaultKey.unwrap(ownWrap, vaultID: Self.vaultA, keyID: own.key.keyID, with: keyset)
+        #expect(!own.arrivedByGrant && !reopened.arrivedByGrant && reopened.hasSameMaterial(as: own))
+
+        let grant = try VaultKeyGrant.seal(own, to: keyset.publicKeyBundle(), from: sender)
+        let granted = try grant.open(
+            as: keyset, from: sender.publicKeyBundle(), vaultID: Self.vaultA, keyID: own.key.keyID)
+        #expect(granted.arrivedByGrant && granted.hasSameMaterial(as: own))
+        let grantedWrap = try granted.wrap(for: keyset)
+        #expect(
+            try VaultKey.unwrap(grantedWrap, vaultID: Self.vaultA, keyID: own.key.keyID, with: keyset).arrivedByGrant)
+        for wrap in [ownWrap, grantedWrap] {
+            try VaultKey.checkWrapForm(wrap, vaultID: Self.vaultA, keyID: own.key.keyID)
+            #expect(throws: (any Error).self) {
+                try VaultKey.checkWrapForm(wrap, vaultID: Self.vaultB, keyID: own.key.keyID)
+            }
+        }
+
+        // The two classes differ in the context the header embeds. Putting the other class's context into a wrap
+        // gives one that parses as that class and fails authentication: the header is the AEAD's associated data.
+        func context(_ arrivedByGrant: Bool) -> [UInt8] {
+            VaultKey.wrapContext(
+                vaultID: Self.vaultA, keyID: own.key.keyID, keysetKeyID: keyset.symmetricKey.keyID,
+                arrivedByGrant: arrivedByGrant
+            ).canonicalAAD()
+        }
+        func replacing(_ old: [UInt8], with new: [UInt8], in bytes: [UInt8]) throws -> [UInt8] {
+            let start = try #require(
+                (0...(bytes.count - old.count)).first { Array(bytes[$0..<($0 + old.count)]) == old })
+            return Array(bytes[..<start]) + new + Array(bytes[(start + old.count)...])
+        }
+        #expect(context(true) != context(false) && context(true).count == context(false).count)
+        let downgraded = try replacing(context(true), with: context(false), in: grantedWrap)
+        #expect(throws: CryptoError.authenticationFailed) {
+            _ = try VaultKey.unwrap(downgraded, vaultID: Self.vaultA, keyID: own.key.keyID, with: keyset)
+        }
+        let upgraded = try replacing(context(false), with: context(true), in: ownWrap)
+        #expect(throws: CryptoError.authenticationFailed) {
+            _ = try VaultKey.unwrap(upgraded, vaultID: Self.vaultA, keyID: own.key.keyID, with: keyset)
+        }
+        // Another key under the same ID is not the same key.
+        let other = VaultKey(
+            vaultID: Self.vaultA,
+            key: try EncryptionKey(keyID: own.key.keyID, material: VaultKey.generate(vaultID: Self.vaultA).key.material)
+        )
+        #expect(!other.hasSameMaterial(as: own))
+    }
+
     @Test("a key-sized record refuses an oversized envelope before parsing it")
     func perKindSizeCap() throws {
         let keyset = Keyset.generate(accountID: UUID())

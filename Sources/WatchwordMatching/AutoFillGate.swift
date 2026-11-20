@@ -14,6 +14,14 @@ public enum FillRefusal: Error, Hashable, Sendable {
     /// and whatever the person chose: the page's content, its scripts and the form's destination are all open to
     /// anyone on the network path. Carries the host so the UI can name it.
     case insecurePage(NormalizedHost)
+    /// Items are scoped to this host, but only in vaults other accounts write, and the host resembles a site saved in
+    /// another vault (review finding Z60). A scope is evidence about a host only within its own trust domain: a
+    /// member of a shared vault who scopes an item to `amaz0n.com` has not vouched for it on behalf of the person
+    /// whose own vault holds `amazon.com`, so the host is treated as the look-alike it may be and nothing is offered
+    /// on it. The same holds for a host that cannot be verified by eye (a label mixing scripts, punycode that did not
+    /// decode), which then names no site. It stops being refused when an item in a vault only this account writes is
+    /// scoped to the host, which is the person saying so themselves. The assessment is always `suspicious`.
+    case resemblesSavedSite(PhishingAssessment)
 }
 
 /// What the AutoFill extension is permitted to do for one request.
@@ -58,22 +66,43 @@ public enum AutoFillGate {
         return .success(host)
     }
 
+    /// What may be offered on a page the gate has read: the ranking, or why nothing is offered there.
+    ///
+    /// `sharedVaults` names the vaults accounts other than this one may write, as for `ItemRanker.rank`. Where the
+    /// only items scoped to the host are in such vaults, the host is still compared with what the other vaults hold,
+    /// and one that resembles a site saved there is refused as `resemblesSavedSite`.
+    public static func candidates(
+        on host: NormalizedHost, among items: [Item], sharedVaults: Set<UUID> = []
+    ) -> Result<ItemRanking, FillRefusal> {
+        let ranking = ItemRanker.rank(items: items, host: host, sharedVaults: sharedVaults)
+        guard !ranking.primary.isEmpty else {
+            return .failure(
+                .noMatchingItem(PhishingDetector.assess(host: host, againstItemsIn: items, sharedVaults: sharedVaults)))
+        }
+        // An item of the person's own that matches is never shadowed by a shared vault's, so this is exactly the
+        // case in which nothing of the person's own is scoped to the host.
+        if ranking.primary.allSatisfy({ sharedVaults.contains($0.item.vaultID) }) {
+            let assessment = PhishingDetector.assess(host: host, againstItemsIn: items, sharedVaults: sharedVaults)
+            if assessment.isSuspicious { return .failure(.resemblesSavedSite(assessment)) }
+        }
+        return .success(ranking)
+    }
+
     /// What to offer for an incoming request.
-    public static func decide(for identifier: ServiceIdentifier, among items: [Item]) -> FillDecision {
+    public static func decide(
+        for identifier: ServiceIdentifier, among items: [Item], sharedVaults: Set<UUID> = []
+    ) -> FillDecision {
         let host: NormalizedHost
         switch page(identifier) {
         case .success(let found): host = found
         case .failure(let refusal): return .refuse(refusal)
         }
 
-        let ranking = ItemRanker.rank(items: items, host: host)
-        guard !ranking.primary.isEmpty else {
-            return .refuse(.noMatchingItem(PhishingDetector.assess(host: host, againstItemsIn: items)))
+        switch candidates(on: host, among: items, sharedVaults: sharedVaults) {
+        case .failure(let refusal): return .refuse(refusal)
+        case .success(let ranking):
+            return ranking.isAmbiguous ? .chooseAmong(ranking.primary) : .fill(ranking.primary[0])
         }
-        if ranking.isAmbiguous {
-            return .chooseAmong(ranking.primary)
-        }
-        return .fill(ranking.primary[0])
     }
 
     /// Final check before returning `item`'s secret to the system. Call this even when the person
@@ -82,7 +111,8 @@ public enum AutoFillGate {
     public static func authorize(
         _ item: Item,
         for identifier: ServiceIdentifier,
-        among items: [Item]
+        among items: [Item],
+        sharedVaults: Set<UUID> = []
     ) -> Result<NormalizedHost, FillRefusal> {
         let host: NormalizedHost
         switch page(identifier) {
@@ -90,10 +120,19 @@ public enum AutoFillGate {
         case .failure(let refusal): return .failure(refusal)
         }
 
-        guard ItemRanker.isSelectable(item, for: host, among: items) else {
-            return .failure(.itemNotScopedToHost(PhishingDetector.assess(host: host, againstItemsIn: items)))
+        switch candidates(on: host, among: items, sharedVaults: sharedVaults) {
+        case .failure(.noMatchingItem(let assessment)):
+            return .failure(.itemNotScopedToHost(assessment))
+        case .failure(let refusal):
+            return .failure(refusal)
+        case .success(let ranking):
+            guard ranking.primary.contains(where: { $0.item.id == item.id }) else {
+                return .failure(
+                    .itemNotScopedToHost(
+                        PhishingDetector.assess(host: host, againstItemsIn: items, sharedVaults: sharedVaults)))
+            }
+            return .success(host)
         }
-        return .success(host)
     }
 
     /// Whether a one-time code may be placed on the clipboard or returned for this host.
@@ -103,8 +142,9 @@ public enum AutoFillGate {
     public static func authorizeOneTimeCode(
         _ item: Item,
         for identifier: ServiceIdentifier,
-        among items: [Item]
+        among items: [Item],
+        sharedVaults: Set<UUID> = []
     ) -> Result<NormalizedHost, FillRefusal> {
-        authorize(item, for: identifier, among: items)
+        authorize(item, for: identifier, among: items, sharedVaults: sharedVaults)
     }
 }

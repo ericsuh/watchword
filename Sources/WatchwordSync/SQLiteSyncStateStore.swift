@@ -16,11 +16,14 @@
     /// (`PendingDeletion.authenticator`), and `VaultSession` ignores any that does not verify, so a row planted here
     /// cannot become a tombstone.
     ///
+    /// The quarantine is found by an indexed digest and counted by a stored length (schema version 3, review finding
+    /// Z27), so keeping an entry never rereads the entries already kept; the engine caps what it keeps there.
+    ///
     /// A separate file rather than tables in the record store keeps `WatchwordStore` ignorant of sync. Nothing needs
     /// both in one transaction: tombstones are recorded after the deletion commits (`DeletionRecordingStore`) and the
     /// engine's state can always be rebuilt with a reconciling sync.
     public final class SQLiteSyncStateStore: SyncStateStore {
-        public static let schemaVersion = 2
+        public static let schemaVersion = 3
         public static let databaseName = "sync.sqlite"
 
         private let connection: SQLiteConnection
@@ -75,7 +78,8 @@
                 PRIMARY KEY (vault_id, record_id, kind)
             ) STRICT
             """
-        static let quarantineTable = """
+        /// The quarantine of versions 1 and 2: no way to find an entry but to read them all.
+        static let legacyQuarantineTable = """
             CREATE TABLE quarantine (
                 vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
                 record_id BLOB NOT NULL CHECK (length(record_id) = 16),
@@ -87,6 +91,27 @@
                 erasure BLOB NOT NULL
             ) STRICT
             """
+
+        /// Version 3 (review finding Z27): each entry with a digest of all of it, indexed, so that a duplicate is
+        /// found without reading the rest, and with its size, so that what a vault's quarantine holds is counted
+        /// without reading an envelope. The small columns come first and the envelope last: SQLite reads a row only
+        /// as far as the last column asked for.
+        static let quarantineTable = """
+            CREATE TABLE quarantine_entries (
+                vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
+                digest INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                record_id BLOB NOT NULL CHECK (length(record_id) = 16),
+                kind INTEGER NOT NULL,
+                key_id BLOB NOT NULL CHECK (length(key_id) = 16),
+                version INTEGER NOT NULL,
+                device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+                erasure BLOB NOT NULL,
+                envelope BLOB
+            ) STRICT
+            """
+        static let quarantineIndex =
+            "CREATE INDEX quarantine_entries_digest ON quarantine_entries (vault_id, digest)"
 
         /// Version 2 (ADR 0009): the stash, one row per vault, written once per sync rather than with the state.
         static let stashTable = """
@@ -103,10 +128,17 @@
             [.text("index"), .text("sqlite_autoindex_staged_1"), .text("staged"), .null],
             [.text("table"), .text("pending_deletions"), .text("pending_deletions"), .text(pendingTable)],
             [.text("index"), .text("sqlite_autoindex_pending_deletions_1"), .text("pending_deletions"), .null],
-            [.text("table"), .text("quarantine"), .text("quarantine"), .text(quarantineTable)],
+            [.text("table"), .text("quarantine_entries"), .text("quarantine_entries"), .text(quarantineTable)],
+            [
+                .text("index"), .text("quarantine_entries_digest"), .text("quarantine_entries"),
+                .text(quarantineIndex),
+            ],
             [.text("table"), .text("stash"), .text("stash"), .text(stashTable)],
             [.text("index"), .text("sqlite_autoindex_stash_1"), .text("stash"), .null],
         ]
+
+        /// Rows of the earlier quarantine carried to schema version 3 per query.
+        static let migrationPage = 16
 
         private func migrate() throws {
             try connection.transaction {
@@ -117,7 +149,7 @@
                     throw RecordStoreError.unsupportedSchemaVersion(Int(version))
                 }
                 if version < 1 {
-                    for table in [Self.stateTable, Self.stagedTable, Self.pendingTable, Self.quarantineTable] {
+                    for table in [Self.stateTable, Self.stagedTable, Self.pendingTable, Self.legacyQuarantineTable] {
                         try connection.execute(table)
                     }
                     try connection.execute("PRAGMA user_version = 1")
@@ -125,6 +157,43 @@
                 if version < 2 {
                     try connection.execute(Self.stashTable)
                     try connection.execute("PRAGMA user_version = 2")
+                }
+                if version < 3 {
+                    try connection.execute(Self.quarantineTable)
+                    try connection.execute(Self.quarantineIndex)
+                    // Every row of the earlier table is carried over: the quarantine holds what no replay rebuilds.
+                    // One that does not read as an entry keeps its columns under digest zero, and is reported as
+                    // malformed when the quarantine is listed, as before.
+                    // A page at a time, by rowid: the earlier table was unbounded, envelopes included, and one query
+                    // for all of it would hold all of it in memory at once (review finding Z39).
+                    var after: Int64 = -1
+                    while true {
+                        let rows = try connection.query(
+                            """
+                            SELECT rowid, vault_id, record_id, kind, key_id, version, device_id, erasure, envelope
+                            FROM quarantine WHERE rowid > ? ORDER BY rowid LIMIT \(Self.migrationPage)
+                            """,
+                            [.integer(after)])
+                        guard !rows.isEmpty else { break }
+                        for row in rows {
+                            guard row.count == 9, case .integer(let rowid) = row[0] else {
+                                throw RecordStoreError.malformedRow("quarantine")
+                            }
+                            after = rowid
+                            let columns = Array(row[1...])
+                            var digest: UInt64 = 0
+                            var length = 0
+                            if case .blob(let erasure) = columns[6] { length += erasure.count }
+                            if case .blob(let envelope) = columns[7] { length += envelope.count }
+                            if let entry = try? Self.entry(Array(columns[1...])) { digest = entry.quarantineDigest }
+                            try connection.query(
+                                Self.quarantineInsert,
+                                [columns[0], .integer(Int64(bitPattern: digest)), .integer(Int64(length))]
+                                    + columns[1...])
+                        }
+                    }
+                    try connection.execute("DROP TABLE quarantine")
+                    try connection.execute("PRAGMA user_version = 3")
                 }
                 // As in `SQLiteRecordStore`: a planted trigger could make deletions or state saves silently do nothing
                 // (review finding S1), so anything but exactly this schema is refused.
@@ -168,7 +237,7 @@
                 "INSERT OR REPLACE INTO staged (vault_id, name, object) VALUES (?, ?, ?)",
                 [
                     SQLiteRecordStore.value(object.location.vaultID), .text(object.location.name),
-                    .blob(object.object.serialized()),
+                    .blob(object.storageBytes),
                 ])
         }
 
@@ -177,10 +246,9 @@
                 "SELECT name, object FROM staged WHERE vault_id = ? ORDER BY name", [SQLiteRecordStore.value(vaultID)])
             return rows.compactMap { row in
                 guard row.count == 2, case .text(let name) = row[0], case .blob(let bytes) = row[1],
-                    let location = SyncObjectLocation(name: name), location.vaultID == vaultID,
-                    let object = try? SignedObject.parse(bytes)
+                    let location = SyncObjectLocation(name: name), location.vaultID == vaultID
                 else { return nil }
-                return StagedObject(location: location, object: object)
+                return StagedObject(location: location, storageBytes: bytes)
             }
         }
 
@@ -260,49 +328,110 @@
 
         // MARK: - Quarantine
 
-        public func quarantine(_ entry: SyncEntry, vaultID: UUID) throws {
+        static let quarantineInsert = """
+            INSERT INTO quarantine_entries (vault_id, digest, size, record_id, kind, key_id, version, device_id,
+                erasure, envelope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+
+        /// `IS` rather than `=` for the envelope, so a deletion's NULL envelope matches itself. The digest narrows
+        /// the search through the index; the other columns, compared by SQLite, decide it.
+        static let quarantineMatch = """
+            vault_id = ? AND digest = ? AND record_id = ? AND kind = ? AND key_id = ? AND version = ?
+                AND device_id = ? AND erasure = ? AND envelope IS ?
+            """
+
+        /// The most kept entries one digest may name (review finding Z39). FNV-1a is not keyed, so a writer can make
+        /// entries that share one; each lookup then compares, and reads, every row under it. Sixty-four bits collide
+        /// by chance with odds that never arise in a quarantine of thousands, so a digest named more often than this
+        /// is someone's doing: nothing more is kept under it, and a lookup reads no more than this many rows.
+        static let maximumEntriesPerDigest = 16
+
+        /// Whether the digest of `entry` already names `maximumEntriesPerDigest` kept entries. Reads the index only.
+        private func digestCrowded(_ entry: SyncEntry, vaultID: UUID) throws -> Bool {
+            let rows = try connection.query(
+                """
+                SELECT COUNT(*) FROM (SELECT 1 FROM quarantine_entries WHERE vault_id = ? AND digest = ? LIMIT ?)
+                """,
+                [
+                    SQLiteRecordStore.value(vaultID), .integer(Int64(bitPattern: entry.quarantineDigest)),
+                    .integer(Int64(Self.maximumEntriesPerDigest)),
+                ])
+            guard case .integer(let count) = rows.first?.first else { throw RecordStoreError.malformedRow("count") }
+            return count >= Int64(Self.maximumEntriesPerDigest)
+        }
+
+        @discardableResult
+        public func quarantine(_ entry: SyncEntry, vaultID: UUID) throws -> Bool {
             try connection.transaction {
-                guard try !quarantined(vaultID: vaultID).contains(entry) else { return }
+                guard try !holdsQuarantined(entry, vaultID: vaultID) else { return false }
+                // A crowded digest keeps nothing more. Answered as not added; the engine, finding it not held either,
+                // counts it as not kept and remembers whose it was (review finding Z141).
+                guard try !digestCrowded(entry, vaultID: vaultID) else { return false }
                 try connection.query(
-                    """
-                    INSERT INTO quarantine (vault_id, record_id, kind, key_id, version, device_id, envelope, erasure)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [SQLiteRecordStore.value(vaultID)] + Self.columns(entry))
+                    Self.quarantineInsert,
+                    [
+                        SQLiteRecordStore.value(vaultID), .integer(Int64(bitPattern: entry.quarantineDigest)),
+                        .integer(Int64(entry.storedLength)),
+                    ] + Self.columns(entry))
+                return true
             }
+        }
+
+        public func holdsQuarantined(_ entry: SyncEntry, vaultID: UUID) throws -> Bool {
+            try !connection.query(
+                "SELECT 1 FROM quarantine_entries WHERE \(Self.quarantineMatch) LIMIT 1",
+                Self.matching(entry, vaultID: vaultID)
+            ).isEmpty
         }
 
         public func quarantined(vaultID: UUID) throws -> [SyncEntry] {
             try connection.query(
                 """
-                SELECT record_id, kind, key_id, version, device_id, envelope, erasure
-                FROM quarantine WHERE vault_id = ? ORDER BY rowid
+                SELECT record_id, kind, key_id, version, device_id, erasure, envelope
+                FROM quarantine_entries WHERE vault_id = ? ORDER BY rowid
                 """,
                 [SQLiteRecordStore.value(vaultID)]
             ).map { row in
                 guard row.count == 7 else { throw RecordStoreError.malformedRow("quarantine") }
-                var envelope: [UInt8]?
-                if case .blob(let bytes) = row[5] { envelope = bytes }
-                return SyncEntry(
-                    recordID: try Self.uuid(row[0]), kind: try Self.kind(row[1]), keyID: try Self.uuid(row[2]),
-                    version: try Self.version(row[3]), device: try Self.uuid(row[4]), envelope: envelope,
-                    erasure: try Self.blob(row[6]))
+                return try Self.entry(row)
             }
         }
 
         public func discardQuarantined(_ entries: [SyncEntry], vaultID: UUID) throws {
             try connection.transaction {
                 for entry in entries {
-                    // `IS` rather than `=`, so a deletion's NULL envelope matches itself.
                     try connection.query(
-                        """
-                        DELETE FROM quarantine
-                        WHERE vault_id = ? AND record_id = ? AND kind = ? AND key_id = ? AND version = ?
-                            AND device_id = ? AND envelope IS ? AND erasure = ?
-                        """,
-                        [SQLiteRecordStore.value(vaultID)] + Self.columns(entry))
+                        "DELETE FROM quarantine_entries WHERE \(Self.quarantineMatch)",
+                        Self.matching(entry, vaultID: vaultID))
                 }
             }
+        }
+
+        /// What one device's share of the quarantine is counted as at most: well past every cap, far below `Int.max`.
+        static let maximumCountedBytes = 1 << 40
+
+        public func quarantineUsage(vaultID: UUID) throws -> QuarantineUsage {
+            let rows = try connection.query(
+                """
+                SELECT device_id, COUNT(*), SUM(size) FROM quarantine_entries WHERE vault_id = ?
+                GROUP BY device_id
+                """,
+                [SQLiteRecordStore.value(vaultID)])
+            var usage = QuarantineUsage()
+            for row in rows {
+                guard row.count == 3, case .integer(let entries) = row[1], case .integer(let bytes) = row[2] else {
+                    throw RecordStoreError.malformedRow("quarantine")
+                }
+                // A length the file made negative or huge counts as full rather than as room, and is held far below
+                // `Int.max`, so that adding to it cannot overflow (review finding Z39; the engine adds without
+                // overflow too).
+                let ceiling = Int64(Self.maximumCountedBytes)
+                usage.devices[try Self.uuid(row[0])] = QuarantineUsage.Share(
+                    entries: Int(clamping: min(max(entries, 0), ceiling)),
+                    bytes: Int(clamping: bytes < 0 ? ceiling : min(bytes, ceiling)))
+            }
+            return usage
         }
 
         // MARK: - Stash
@@ -328,8 +457,8 @@
             try connection.transaction {
                 try connection.execute(
                     """
-                    DELETE FROM sync_state; DELETE FROM staged; DELETE FROM pending_deletions; DELETE FROM quarantine;
-                    DELETE FROM stash;
+                    DELETE FROM sync_state; DELETE FROM staged; DELETE FROM pending_deletions;
+                    DELETE FROM quarantine_entries; DELETE FROM stash;
                     """
                 )
             }
@@ -341,13 +470,30 @@
 
         // MARK: - Columns
 
+        /// An entry's own columns, in the table's order: record, kind, key, version, device, erasure, envelope.
         private static func columns(_ entry: SyncEntry) -> [SQLiteValue] {
             [
                 SQLiteRecordStore.value(entry.recordID), .integer(Int64(entry.kind.rawValue)),
                 SQLiteRecordStore.value(entry.keyID), .integer(Int64(bitPattern: entry.version)),
-                SQLiteRecordStore.value(entry.device), entry.envelope.map(SQLiteValue.blob) ?? .null,
-                .blob(entry.erasure),
+                SQLiteRecordStore.value(entry.device), .blob(entry.erasure),
+                entry.envelope.map(SQLiteValue.blob) ?? .null,
             ]
+        }
+
+        /// The bindings of `quarantineMatch`.
+        private static func matching(_ entry: SyncEntry, vaultID: UUID) -> [SQLiteValue] {
+            [SQLiteRecordStore.value(vaultID), .integer(Int64(bitPattern: entry.quarantineDigest))] + columns(entry)
+        }
+
+        /// The entry in seven columns ordered as `columns(_:)` writes them.
+        private static func entry(_ row: [SQLiteValue]) throws -> SyncEntry {
+            guard row.count == 7 else { throw RecordStoreError.malformedRow("quarantine") }
+            var envelope: [UInt8]?
+            if case .blob(let bytes) = row[6] { envelope = bytes }
+            return SyncEntry(
+                recordID: try uuid(row[0]), kind: try kind(row[1]), keyID: try uuid(row[2]),
+                version: try version(row[3]), device: try uuid(row[4]), envelope: envelope,
+                erasure: try blob(row[5]))
         }
 
         private static func uuid(_ value: SQLiteValue) throws -> UUID {

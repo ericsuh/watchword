@@ -78,6 +78,10 @@ public struct AccountRecord: Sendable, Hashable {
     public var createdAt: Date
     /// When the person confirmed they saved the Emergency Kit (PRD F5.1); `nil` until then.
     public var emergencyKitConfirmedAt: Date?
+    /// The earlier device ID whose sync state this installation has not yet finished moving to `deviceID` (a restore
+    /// onto other hardware registers a new ID; review of round 10, Z181), or `nil`. Written in the commit that names
+    /// the new ID and cleared once the move is complete, so a move a failure interrupted is done again.
+    public var migration: DeviceMigration?
 
     public init(
         accountID: UUID,
@@ -91,7 +95,8 @@ public struct AccountRecord: Sendable, Hashable {
         keysetVersion: UInt64,
         credentialGeneration: UInt64,
         createdAt: Date,
-        emergencyKitConfirmedAt: Date? = nil
+        emergencyKitConfirmedAt: Date? = nil,
+        migration: DeviceMigration? = nil
     ) {
         self.accountID = accountID
         self.deviceID = deviceID
@@ -105,5 +110,19 @@ public struct AccountRecord: Sendable, Hashable {
         self.credentialGeneration = credentialGeneration
         self.createdAt = createdAt
         self.emergencyKitConfirmedAt = emergencyKitConfirmedAt
+        self.migration = migration
+    }
+}
+
+/// A move of an installation's sync state from an earlier device ID of its own (`AccountRecord.migration`): the ID,
+/// and the session's signature binding it to the account and the new ID. The store holds the bytes; the session signs
+/// and verifies them, and acts on none it did not sign.
+public struct DeviceMigration: Sendable, Hashable {
+    public var previousDeviceID: UUID
+    public var authenticator: [UInt8]
+
+    public init(previousDeviceID: UUID, authenticator: [UInt8]) {
+        self.previousDeviceID = previousDeviceID
+        self.authenticator = authenticator
     }
 }

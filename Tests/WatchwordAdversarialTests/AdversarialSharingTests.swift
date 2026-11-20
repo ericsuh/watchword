@@ -15,7 +15,7 @@ struct AdversarialSharingTests {
     static let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     static func trusted(_ party: SharingParty) -> VerifiedContact {
-        VerifiedContact(bundle: party.bundle, method: .comparedByEye, verifiedAt: nil)
+        VerifiedContact(bundle: party.bundle, method: .safetyNumber, verifiedAt: nil)
     }
 
     /// A device that has seen nothing yet and is offered `records`.
@@ -394,7 +394,9 @@ struct AdversarialSharingTests {
         var incoming = try await IncomingInvitation.begin(
             Invitation(vaultID: household.vaultID, ownerAccountID: household.owner.accountID), knownOwner: nil,
             directory: directory, contacts: contacts)
-        try await incoming.confirm(.comparedByEye, contacts: contacts, signedBy: guest.keyset, at: Self.now)
+        try await incoming.confirm(
+            .safetyNumber(try #require(incoming.fingerprintToConfirm).safetyNumber), contacts: contacts,
+            signedBy: guest.keyset, at: Self.now)
         #expect(throws: SharingError.ownKeySubstituted) {
             _ = try incoming.accept(
                 membership: household.ledger.chain.map(\.encoded),
@@ -415,7 +417,8 @@ struct AdversarialSharingTests {
         var victim = members[0]
         let attacker = try await world.member("attacker", seed: 49)
         _ = try await victim.contacts.verify(
-            attacker.bundle, evidence: .comparedByEye, signedBy: victim.keyset, at: Self.now)
+            attacker.bundle, evidence: .safetyNumber(attacker.bundle.fingerprint.safetyNumber), signedBy: victim.keyset,
+            at: Self.now)
 
         let before = try victim.ledger(vault).state
         await #expect(throws: SharingError.vaultOwnerConflict(vaultID: vault)) {
@@ -612,7 +615,7 @@ struct AdversarialSharingTests {
         var generator = SeededGenerator(seed: 52)
         let theirKey = VaultKey.generate(vaultID: UUID(), using: &generator)
         var theirs = try MembershipLedger.create(vaultKey: theirKey, owner: attacker.keyset)
-        let victimContact = VerifiedContact(bundle: victim.bundle, method: .comparedByEye, verifiedAt: nil)
+        let victimContact = VerifiedContact(bundle: victim.bundle, method: .safetyNumber, verifiedAt: nil)
         theirs.ingest([
             try theirs.proposeAddition(of: victimContact, as: .readWrite, signedBy: attacker.keyset).encoded()
         ])
@@ -908,9 +911,10 @@ struct AdversarialSharingTests {
     }
 
     /// A4, an administrator, or anyone holding an administrator's key: signs records that carry a write cut where
-    /// no permission to write ends, so that one record would have two encodings or a later reader would take the
-    /// cut for something it is not. And A1, altering the cut of a genuine record or swapping in a longer one.
-    @Test("a write cut is accepted only on the record that ends a permission to write, exactly as it was signed")
+    /// neither a permission to write nor an administrator's role ends, so that one record would have two encodings or
+    /// a later reader would take the cut for something it is not. And A1, altering the cut of a genuine record or
+    /// swapping in a longer one.
+    @Test("a write cut is accepted only on the record that ends a permission or a role, exactly as it was signed")
     func misplacedWriteCut() async throws {
         let household = try await SharingHousehold.make()
         let owner = household.owner
@@ -942,10 +946,11 @@ struct AdversarialSharingTests {
             _ = try Self.freshDevice(household, [genesis.signed(by: owner.keyset)])
         }
 
-        // Where a permission does end, the cut is the signer's, to the byte.
+        // Where a permission or an administrator's role does end, the cut is the signer's, to the byte.
         for operation in [
             MembershipRecord.Operation.removeMember(household.writer.accountID),
             .changeRole(household.writer.accountID, to: .readOnly),
+            .changeRole(household.administrator.accountID, to: .readWrite),
         ] {
             let newKeyID = operation == .removeMember(household.writer.accountID) ? keys.newKeyID() : nil
             var forged = household.forgery(operation, signer: owner, newKeyID: newKeyID)
@@ -963,8 +968,76 @@ struct AdversarialSharingTests {
             }
             try device.adopt(genuine)
             #expect(device.ledger.chain.last?.record.writeCut.bytes == [1, 2, 3])
-            #expect(device.ledger.writeStanding(of: household.writer.accountID).refusal != nil)
+            if operation == .changeRole(household.administrator.accountID, to: .readWrite) {
+                #expect(device.ledger.administratorStanding(of: household.administrator.accountID) != .holdsRole)
+            } else {
+                #expect(device.ledger.writeStanding(of: household.writer.accountID).refusal != nil)
+            }
         }
+    }
+
+    /// A5 as to the role: an administrator the owner demoted to read-write, who may still write items and holds
+    /// their account key. Only the owner and administrators name the vault (§8.7), so which of their descriptions
+    /// count must be the cut in the owner's record on every device. They try what would move it: a branch of their
+    /// own from before the demotion, longer than the chain, on which they still hold the role; the store (A1) alters
+    /// the cut of the genuine record; and an administrator who is not the owner (A4) tries to end the role with a cut
+    /// of nothing, to erase the names they chose.
+    @Test("a former administrator's descriptions count as the owner's record cut them, on any device, in any order")
+    func administratorStandingFollowsTheOwnersRecord() async throws {
+        var household = try await SharingHousehold.make()
+        let former = household.administrator
+        let second = try SharingParty(seed: 47)
+        try await household.add(second, as: .administrator, by: household.owner)
+        let forkPoint = household.ledger
+        let listed = try #require(household.state.member(former.accountID))
+
+        // Only the owner ends an administrator's role, with or without a cut.
+        #expect(throws: MembershipError.ownerOnly) {
+            _ = try household.ledger.proposeRoleChange(
+                of: former.accountID, to: .readWrite, writeCut: .nothing, signedBy: second.keyset)
+        }
+        var bySecond = household.forgery(.changeRole(former.accountID, to: .readWrite), signer: second)
+        bySecond.writeCut = []
+        var refusing = household
+        #expect(throws: MembershipError.ownerOnly) { try refusing.adopt(bySecond.signed(by: second.keyset)) }
+
+        // The owner's demotion, with the cut; the same record with another cut does not verify.
+        var demotion = household.forgery(.changeRole(former.accountID, to: .readWrite), signer: household.owner)
+        demotion.writeCut = [4, 2]
+        let genuine = try demotion.signed(by: household.owner.keyset)
+        var altered = demotion
+        altered.writeCut = [4, 2, 1]
+        #expect(throws: MembershipError.signatureInvalid) {
+            try refusing.adopt(altered.withSignature(Array(genuine.suffix(64))))
+        }
+        try household.adopt(genuine)
+        let cut = try WriteCut([4, 2])
+        let standing = AdministratorStanding.ended(cut: cut, author: listed)
+        #expect(household.ledger.administratorStanding(of: former.accountID) == standing)
+        #expect(household.ledger.writeStanding(of: former.accountID) == .mayWrite)
+
+        // Their branch from before the demotion, three records long: it lacks the owner's record and loses.
+        var branch = forkPoint
+        var attack: [[UInt8]] = []
+        for _ in 0..<3 {
+            let rotation = try RotationPlanner.plan(.routine, ledger: branch, signedBy: former.keyset)
+            branch.ingest([rotation.record.contents])
+            attack.append(rotation.record.contents)
+        }
+        #expect(branch.administratorStanding(of: former.accountID) == .holdsRole, "on their own branch alone")
+        var informed = household.ledger
+        informed.ingest(attack)
+        #expect(informed.administratorStanding(of: former.accountID) == standing)
+        let chain = household.ledger.chain.map(\.encoded)
+        for records in [attack + chain, chain + attack, Array((attack + chain).reversed())] {
+            let device = try Self.freshDevice(household, records)
+            #expect(device.administratorStanding(of: former.accountID) == standing)
+            #expect(device.writeStanding(of: former.accountID) == .mayWrite)
+        }
+        // A device shown only their branch follows it until the owner's record arrives, and then agrees.
+        var misled = branch
+        misled.ingest(chain)
+        #expect(misled.administratorStanding(of: former.accountID) == standing)
     }
 
     /// A1 with two honest administrators, as in `withheldSiblingReleasedLate`: a fork displaces the record that
@@ -1469,7 +1542,8 @@ struct AdversarialSharingTests {
         let otherStore = InMemoryVerifiedContactStore()
         let othersContacts = VerifiedContacts(store: otherStore, account: other.bundle)
         _ = try await othersContacts.verify(
-            attacker.bundle, evidence: .comparedByEye, signedBy: other.keyset, at: Self.now)
+            attacker.bundle, evidence: .safetyNumber(attacker.bundle.fingerprint.safetyNumber), signedBy: other.keyset,
+            at: Self.now)
         let foreign = try #require(await otherStore.pin(for: target.accountID))
 
         // The same pin re-signed by the attacker, claiming to be mine.
@@ -1485,7 +1559,9 @@ struct AdversarialSharingTests {
         }
 
         // A genuine pin of mine for one contact, copied under another contact's name.
-        let mine = try await contacts.verify(other.bundle, evidence: .comparedByEye, signedBy: me.keyset, at: Self.now)
+        let mine = try await contacts.verify(
+            other.bundle, evidence: .safetyNumber(other.bundle.fingerprint.safetyNumber), signedBy: me.keyset,
+            at: Self.now)
         #expect(mine.accountID == other.accountID)
         await store.savePin(try #require(await store.pin(for: other.accountID)), for: target.accountID)
         #expect(try await contacts.pinned(target.accountID) == nil)
@@ -1836,7 +1912,7 @@ struct AdversarialSharingTests {
         try household.rotate(.removal(victim.accountID), by: household.administrator)
         try household.adopt(
             household.ledger.proposeAddition(
-                of: VerifiedContact(bundle: impostor.bundle, method: .comparedByEye, verifiedAt: nil),
+                of: VerifiedContact(bundle: impostor.bundle, method: .safetyNumber, verifiedAt: nil),
                 as: .readOnly, signedBy: household.administrator.keyset
             ).encoded())
         let ledger = household.ledger
@@ -1879,7 +1955,8 @@ struct AdversarialSharingTests {
         #expect(try await afterwards.checkMemberKeys(against: household.contacts).substituted.isEmpty)
         // ... or verify the new keys with the member and replace the pin, explicitly.
         _ = try await household.contacts.verify(
-            impostor.bundle, evidence: .comparedByEye, signedBy: household.owner.keyset, at: Self.now,
+            impostor.bundle, evidence: .safetyNumber(impostor.bundle.fingerprint.safetyNumber),
+            signedBy: household.owner.keyset, at: Self.now,
             replacingPin: true)
         let verified = try await ledger.checkMemberKeys(against: household.contacts)
         #expect(verified.substituted.isEmpty)

@@ -44,17 +44,22 @@ that a test target may contain both as long as a single test does not mix their 
 
 | Requirement | Tests |
 | --- | --- |
-| F1.x items/fields | Codable round trips; property test "any item survives encode→decode"; history kept whatever its age or length, with `FakeClock`, and an edit past the payload limit refused rather than pruned |
+| F1.x items/fields | Codable round trips; property test "any item survives encode→decode"; history kept whatever its age or length, with `FakeClock`, and an edit past the payload limit refused rather than pruned; `WatchwordModelTests`: "Binary text encodings", "OTP parameters" (the canonical `otpauth` URI round trip, issuers and accounts containing a colon included), "Passkey credential field", "Byte-exact equality of item values", "Sync metadata as stored" |
 | F3.x generator | Parameterised tests over all knob combinations; statistical uniformity test (chi-square over 100k samples, seeded); entropy formula tests; site-rule mapping tests |
+| F4.2 checking a contact (ADR 0010) | `WatchwordSharingTests` "Vault sharing codes" (typed and scanned input parsed exactly, every board message at its one length, the commitment and codes against Python `hashlib`, the whole transcript and both codes against `hashlib` (`transcriptKnownAnswer`, V30), the transcript binding every input and ignoring a re-signed bundle, an honest session, a scan each way, the invitation inside a session); "Fingerprint verification and invitations" (`reservedMethodIsNoPin`: a pin carrying the removed "compared by eye" is no pin). `WatchwordKitTests` "Vault sharing codes through VaultSession" (pins both ways, the invitation through the session joins the vault, a scan each way, a lock ends the session, no board, a malformed number). `WatchwordPresentationTests` "Screen models: sharing" (`inviteBySharingCode`, `memberVerification`, `memberCheckAgainstTheListedKeys` (V24), `screensDoNotShareASession` (V25), `checkTheOwnerThenJoin` (V27), the fallback by full code, and `fallbackShowsOnlyOwnDigits`: the fallback shows this device's own code and none of the directory's, V17) and the wording tests. Adversarial: "sharing and membership" (`AdversarialSharingCodeTests.swift`) and "shared vaults through the session" (`AdversarialSharedVaultSharingCodeTests.swift`), §6.4. Fuzz: `sharing-code`. UI: `VaultSharingTests`. Manual: `camera-scanning.md`, `vault-sharing-code.md` |
 | F4.x sharing | Scenario S3/S4 over `InMemorySyncTransport`; revoke then verify former member cannot decrypt new versions and remaining members can; read-only client refuses writes (protocol core, milestone 4, `WatchwordSharingTests`: "Membership record format", "Sharing formats: known answers", "Membership chain rules", "Membership ledger", "Fingerprint verification and invitations", "Key grants and rotation", and "Shared vault simulation" — two and three members with real keysets over a hostile store: create, invite, verify, accept, write, role change, removal with rotation, leaving, an interrupted rotation, concurrent administrators, deletion; through `VaultSession`s of different accounts over `InMemorySyncTransport`: `WatchwordKitTests` "Shared vaults through VaultSession", S3 and S4 with invitation, verification, read-only refusal, promotion, removal with rotation; over CloudKit: open) |
+| F4.7 renaming a shared vault | `WatchwordSharingTests` "Key grants and rotation": which of an account's descriptions count along a chain (all, the cut that ended the role, none), and a cut required exactly where a permission or an administrator's role ends. `WatchwordKitTests` "Shared vaults through VaultSession": `renamingASharedVault` (the typed refusal before anything is sealed, the owner's and an administrator's renames on every device, the member's own vaults unaffected, the role deciding in both directions, a rename made before the device heard of its demotion never published). `WatchwordPresentationTests` "Screen models: sharing": `whoMayRename`. Adversarial: "shared vaults through the session" (`AdversarialSharedVaultRenameTests.swift`) and "sharing and membership" (`administratorStandingFollowsTheOwnersRecord`), below. The view's control (`VaultsView`): not built here |
 | F5.x unlock | `UnlockPolicy` table tests for every expiry reason; `FakeKeychain` enrolment change invalidates quick unlock; lock zeroises (inspect `SecureBytes`) |
+| F5.1 Emergency Kit | `WatchwordKitTests`: "Vault session: account and unlock" (the kit again, with the password, and not while locked); "Adversarial: unlock and quick unlock" ("a quick-unlocked session cannot read the Emergency Kit without the account password", Z86); `WatchwordPresentationTests`: "Screen models: Emergency Kit and revealed secrets" (the password asked for from Settings, the PDF staged in the swept folder and removed after the save and on lock, Z84); "Emergency Kit PDF" (*Mac only*: the page, the QR code, `write`, the storage line). Manual, on a device: save the kit, cancel once and complete once, and list the container's `tmp/` and `Library/Caches` for a PDF |
+| F5.7 screen privacy | What is promised: entry fields are `SecureField`; the iOS app-switcher snapshot is covered (`PrivacyShield`); every revealed secret (item fields, conflict and merge values, the Secret Key) is hidden again when the app resigns active and when the screen starts to be captured, and none can be revealed while it is (`ScreenPrivacy`, `RevealedSecrets`, Z95: "Screen models: Emergency Kit and revealed secrets"); macOS windows are excluded from screen capture (`sharingType = .none`); they stay restorable (Z96, tracked: marking them non-restorable made the next launch open no window). Not promised: anything against a camera, or a capture iOS does not report. *Mac only*, not automated: start a screen recording on a device, reveal a password, and play it back (the value must be hidden as the recording starts); share a Mac window in a call (it must show blank). A Debug `--uitest` launch keeps macOS windows capturable and does not hide on resign-active, so the UI tests and the screenshot tour can see them |
+| F5.x Password AutoFill on the app's own fields | Manual, on an iPhone signed in to iCloud Keychain with AutoFill on (Z97): create an account, lock, unlock, then edit an item and save. The check is whether iOS offers the QuickType Passwords key over the account-password field or the item's password field, and whether a "Save Password?" sheet appears afterwards. If either does, try `.textContentType(.oneTimeCode)` on those fields and repeat; record the outcome in `docs/06-adversarial-review.md` Z97 |
 | F6.x AutoFill | `HostMatcher` tests (S1), IDN/userinfo/port edge cases, and "Public suffix: the broadest site of a host" (the site a QuickType identity is assumed to reach); request-handler tests per request kind; identity publishing diff tests (`WatchwordAutoFillTests`: "One-time codes (TOTP)" — every vector of RFC 6238 appendix B and RFC 4226 appendix D —, "Passkey authenticator" — known answers from an independent Python implementation for the COSE key, authenticator data, attestation object and `prf`, and a signature that implementation verified —, "Site password rules", "Credential identity publishing", "Request model: credential list and passwords", "… one-time codes and text to insert", "… passkeys", "… saving and generating passwords", "… credential-update reports", "… pages loaded over plain http" (F6.9: every list, release, save and generate request refused for an `http` URL, by choice too; `https` pages and domains unchanged; identities unaffected, and an `http` URL in an identity's place refused), "Scenarios S1 and S2 through the request model", "Request model over a real vault session" — S1 and S2 again over a `VaultSession` as the model's `CredentialVault` —, and "Vault session as the AutoFill vault" in `WatchwordKitTests` — the compare-and-swap, including a save landing between the session's read and its commit, a lock between the model's read and its release, one ID per item across vaults after a move, `isBackedUp`, and the extension's quick unlock; milestone 5) |
 | F7.x sync | Convergence under random schedules; offline edits; snapshot GC; locked-device download-only (`WatchwordSyncTests`: "Multi-device sync simulation" — convergence and no lost value —, "Simultaneous edits across devices" — separate fields, separate items, a long note, the same line, one field on three devices, trash or delete against an edit (F7.6), and which trash the 30-day purge may remove (F1.5, F7.7) —, "Sync engine", "Field-level item merge", "Item merge audit regressions", "Item merge laws under random histories" and "Item merge, every small history" — the merge as a CRDT (`10-sync-correctness.md` §7): the specification of a multi-value register at every step, the semilattice laws on whole items, every update inflationary, the same versions in any order with repeats, convergence and nothing typed lost, with the number of histories explored asserted —, "Sync review regressions", "Sync payload format", "Sync transport contract", "Sync state store contract", "SQLite sync state store", "Sync state encoding"; record kinds a device does not know (ADR 0009, N7): "Record kinds a device does not know" — an earlier version merges items past results it cannot read, keeps them byte for byte, acknowledges, writes no snapshot while it holds them so collection loses nothing for a later-version newcomer, and processes them after an upgrade without downloading again, from segments and from snapshots; a critical kind stops the stream at its segment or snapshot, skips nothing, sets `requiresNewerVersion` and stays staged; past the stash's cap entries are dropped, the stream still merges and the upgrade replays the log —, "Unknown record kinds in the payload", "Record kind criticality" (every kind's raw value in the range of its intended criticality), "Sync stash encoding" (round trip, truncations, planted rows) and the state store contract's stash row; in "Record kinds a device does not know" also a revoked device's own entries across a replay, a superseded snapshot entry not kept, a covered critical segment passed without a stop, and an unsaved stash rebuilt; "Record kinds a device does not know, in a shared vault" — a held-aside segment keeps nothing aside, a revoked device's kept tombstone is held aside while its versions are judged as usual, and a replay neither drops a revoked device's kept versions nor processes any kept entry twice; "Record kinds a device does not know: the stash under review" — another carrier's attribution suppresses nothing, crowded-out entries are blamed on nobody and come back once room is freed, a stash row of another generation is rebuilt; "Sync stash encoding" also a row of 8,192 entries in one slot parsed in time and over-cap rows refused from their header; "SQLite sync state store" the migration from version 1; `WatchwordKitTests`: "Vault session: one vault's report over two engine runs"; `WatchwordKitTests`: "Vault session: sync between devices" — two real sessions, AES-GCM and Ed25519: round trip, ciphertext only (F7.3), a conflict kept on both devices and resolved by the person, locked download, a deletion against an unseen edit, the purge, SQLite stores across a relaunch; XCUITest `SyncConflictTests`; milestone 3) |
 | F2.x vaults | `WatchwordKitTests`: "Vault session: vaults" — create, list, rename; each vault its own key and a sealed name; items per vault and across; copy; move, and a move interrupted at each commit (never neither, never falsely moved); vault deletion confirmed by item count, the Personal vault undeletable; search over decrypted items, never a secret (F2.3); directory rows edited in the file. "Vault session: vaults across devices" — a vault, its name and items reaching another device; concurrent renames; a move against an unseen edit (kept, in the trash: F7.6); the same move on two devices; unresolved values refused; a vault deleted against concurrent work (what the deletion had not seen is kept: F7.7); a vault deletion outliving the revocation of the device that made it; a move whose copy could not be published (the original stays on the other devices, never neither); a locked device learning of a vault. "Vault session: a lock during the account's objects" — a lock landing in a vault-key fetch or in the reconciliation after an unlock wins, and traps nothing |
 | F5.2, F10.1, F10.2 enrolment and devices | `WatchwordKitTests`: "Vault session: enrolment from the transport (F5.2)" — a device joining from the transport, password and Secret Key alone; wrong credentials one failure, leaving nothing behind; an approved device; an account from before the registry; a store restored onto other hardware, and the edits and deletions its old device had not synced reaching the others. "Vault session: devices, revocation and password changes" — a password change reaching other devices (old password refused, quick unlock destroyed, nothing merged or published until the new one is entered); enrolling after a change; revocation with and without a password change; a password change the person did not make, undone; a registry rolled back in the local file. `WatchwordCryptoTests`: "Device keys and signatures", "Device registry", "Published account header". Section 6.9 |
 | F7.5 automatic sync | `WatchwordSyncTests`: "Automatic sync policy" — unlock, debounced saves and their cap, a save during a sync, coalesced hints, periodic intervals locked and unlocked, backoff and retry, spacing, a clock moved backwards, a transport's requested wait held to the cap — all with dates, no sleeping; `WatchwordPlatformTests`: "Automatic sync driver" — the timer started and re-armed as the policy decides, download-only while locked, a throttled sync waiting as asked, nothing after `stop()`, against a manual clock |
 | F7.x transports | `WatchwordSyncTests`: "Sync transport contract" (`SyncTransportContract`, in-memory and directory), "Sync transport failures" (each stopping error stops the sync like being offline, with the reason in the report), "File sync transport: iCloud placeholders"; on a Mac, `WatchwordPlatformTests`: "Coordinated iCloud Drive transport" (the contract under file coordination, placeholders, concurrent creates of one name, the folder presenter, two engines over it) and "CloudKit transport" (the contract over a fake `CloudKitDatabase` with CloudKit's save-policy semantics, the record layout, create-only saves, paging, assets, the zone, every error mapping, failures reaching the report; the real container only when enabled); adversarial suites "Apple adapters: iCloud Drive transport" and "Apple adapters: CloudKit transport" (§6.10) |
-| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Through the session and the encrypted archive (`02-architecture.md` §14.1): "Vault session: import, export and the encrypted archive" (`WatchwordKitTests`; with `apexOfWWWHosts`: a `www` host gains its apex by default, each addition in the preview, and the opt-out), "Items from an encrypted Watchword archive" (`WatchwordInterchangeTests`), "Encrypted archive key derivation" and "Encrypted archive format" (`WatchwordCryptoTests`, a vector from Python `cryptography` and a whole archive written by an independent Python implementation), and the adversarial areas "encrypted Watchword archive" and "interchange through the session" (with `AdversarialSessionLockTests.swift`: a lock during each step the session runs off its actor, through the public call, wins and ends the call in `locked`), and "Forked generator" (`WatchwordCryptoTests`). Still to come: file protection (the app's) and the Credential Exchange calls |
+| F8.x interchange | Fixture round trips for each format; instruction text snapshot tests (`WatchwordInterchangeTests`: "CSV reader and writer (RFC 4180)", "Password CSV import and export", "1PUX import and export", "Credential Exchange Format import and export", "ZIP reader and writer", "DEFLATE inflater and CRC-32" — against streams from Python's `zlib` and archives from Python's `zipfile` —, "Bounded JSON reader and writer", "Import mapping into the vault", "Duplicate detection", "Interchange instructions"; milestone 7). Through the session and the encrypted archive (`02-architecture.md` §14.1): "Vault session: import, export and the encrypted archive" (`WatchwordKitTests`; with `apexOfWWWHosts`: a `www` host gains its apex by default, each addition in the preview, and the opt-out), "Items from an encrypted Watchword archive" (`WatchwordInterchangeTests`), "Encrypted archive key derivation" and "Encrypted archive format" (`WatchwordCryptoTests`, a vector from Python `cryptography` and a whole archive written by an independent Python implementation), and the adversarial areas "encrypted Watchword archive" and "interchange through the session" (with `AdversarialSessionLockTests.swift`: a lock during each step the session runs off its actor, through the public call, wins and ends the call in `locked`), and "Forked generator" (`WatchwordCryptoTests`). Still to come: file protection (the app's) and the Credential Exchange calls; the backup's file type: "Screen models: import, export and restore" holds `Apps/project.yml`'s exported type to `ExportKind`'s identifier and `.watchwordbackup` extension, on both apps, and fails if a document type is registered (architecture §14.1) |
 | F9.x hygiene | HIBP prefix/suffix logic with padded and malformed fixtures; cache TTL; scheduling with keys absent (`WatchwordHygieneTests`: "Pwned Passwords: digest and prefix", "…: range parser", "…: cache entries", "…: client", "Breach scan scheduling", "Scan ledger", "Strength estimator", "Password reuse", "Item checks", "Hygiene report", "Hygiene engine", "Breached-account lookup", "Synced scan results"; `WatchwordKitTests`: "Vault session: synced hygiene"; milestone 6, synced results per owner decision 10, §6.6) |
 | F11.x phishing | Section 6.7: never-release on look-alikes, warn-not-silence, false-positive guards, scope policy, normalisation |
 | SEC1–SEC10 | Section 6 below |
@@ -101,9 +106,11 @@ with password re-entry, import of 1PUX/CSV fixtures.
   itself until the extension answers requests (milestone 5). The accessibility audit is not wired
   in yet.
 - The account screens (vaults and sharing, devices, the quarantine, the security report, import, export and
-  restore) add, on both platforms: `VaultSharingTests` (a vault created, renamed and shared; the other person's
-  safety number shown and confirmed before a role is offered; the invitation issued, accepted by `UITestPeer`'s
-  second account and the member listed with the role given), `DeviceRevocationTests` (a password changed on the other device announced after a sync, the
+  restore) add, on both platforms: `VaultSharingTests` (a vault created, renamed and shared, and the other person
+  invited with a vault sharing code: no role offered before both codes are checked, a wrong code refused with the
+  tries left, the invitation sent inside the session and accepted by `UITestPeer`'s second account, the member listed
+  with the role given; the same with their screen scanned through the camera's stand-in; and this account joining the
+  other person's vault, number typed, codes both ways, the invitation arriving inside the session), `DeviceRevocationTests` (a password changed on the other device announced after a sync, the
   old one refused with the way out shown and taken, then that device removed with a new password, which then
   unlocks), `QuarantineTests` (a version jumping past the
   launch's ceiling held aside, listed by item and discarded only through the confirmation) and `ImportExportTests`
@@ -125,8 +132,22 @@ with password re-entry, import of 1PUX/CSV fixtures.
   Settings). Opening and closing a screen retry a click that did not take, Sync Now and the UI-test hooks work from any
   screen (an open account screen is closed and Settings opened first), waits are bounded (a missing element fails in
   seconds), and every such failure attaches the whole element tree (`attachTree`), kept whether or not the test
-  passes. To keep the iOS job short, `DeviceRevocationTests` is one launch; `ImportExportTests` is two (import with a lock
-  during the review; export, a lock during the report, and a restore), each within its allowance. The long tests
+  passes. To keep the iOS job short, `DeviceRevocationTests` is one launch; `ImportExportTests` is three (import with a
+  lock during the review; export, its report and a lock; a backup and its restore), each within its allowance. The
+  export and the backup were one test until it ran 439 s of its 600 on a good CI run and out of time on a slow one:
+  every query walks the app's whole accessibility tree, one to two seconds on a CI simulator and, while the
+  simulator's own services were crashing, 17 to 28 s four times running; the test made 331 of them. So the helpers
+  count queries: an element in view costs `reveal` two (a snapshot for its frame, then whether it can be hit) where
+  it cost five or six, and `enter` ends its text with Return on iOS, so no keyboard is left over the next field to be
+  found and dismissed (a dozen queries each time). A stalled query is also an error of its own: after three
+  30-second attempts XCUITest records "Failed to get matching snapshots: Timed out while evaluating UI query." as a
+  failure of the test (the tour failed that way looking for a Settings row, the app idle, nothing it checks wrong).
+  So every read the helpers make, and the lookup that begins a tap or typing, goes through `UIQuery.tolerating`
+  (`Apps/UITests/Shared/UIQuery.swift`: `isPresent`, `canBeHit`, `appears(within:)`, `disappears(within:)`,
+  `enterText`, and `click` on iOS): that one message is taken as expected and the read made again, at most twice,
+  with a `UI-test note:` line each time; any other failure is recorded as ever, and a query still unanswered after
+  the retries fails the test saying so. `app:diagnose` prints the 150 lines of the session log before a query's
+  timeout, which is where XCUITest says what it saw while it waited. The long tests
   (the tour, import and export, sharing, devices, the quarantine) print `STEP <time> [<test>] <step>` before each step
   (`XCTestCase.step`), which `app:diagnose` gathers at the end of a failed job's log (below). Sheets the account screens open close by clearing
   their presenting state, not through `dismiss`, which did not close a sheet over a sheet on macOS. The macOS window
@@ -161,8 +182,8 @@ with password re-entry, import of 1PUX/CSV fixtures.
   changes", "… sharing", "… member trust", "… hosts a merge would add", "… security report", "… import, export and
   restore", and the wording suites; with `WatchwordKitTests` "Vault session: held-aside versions and the lock
   signal"). The adversarial area "account screens" (`AdversarialAccountScreenTests`) attacks them: a pasted
-  fingerprint code taken for a comparison, a look-alike host from an import file, a shared vault renamed "Personal",
-  a device named to pass for this one; and "shared vaults through the session" has the member list after a relaunch
+  fingerprint code taken for a comparison, a look-alike host from an import file, a shared vault an administrator
+  renamed "Personal" (and a member refused), a device named to pass for this one; and "shared vaults through the session" has the member list after a relaunch
   with a substituted key (`06-adversarial-review.md` §Q). What only an XCUITest checks is that the views lay the models
   out and pass the taps on.
 - Accessibility audit (`XCUIApplication.performAccessibilityAudit()`) runs on every screen.
@@ -183,9 +204,11 @@ job, runs it with the other UI tests, and a flow that breaks fails it there.
   its password filled in by the generator), `item-list`, `item-detail` (password hidden), `item-detail-revealed`,
   `trash-confirmation`, `locked`, `unlock-failed`, `settings`, `item-list-conflict` (the badge after a concurrent
   rename), `conflict-resolution`; then the account screens: `vault-list`, `vault-new`, `vault-detail` (not shared
-  yet), `invite-fingerprint` (the other person's safety number, before anything can be sent), `invite-code`,
-  `vault-members` (owner and member after the acceptance), `own-safety-number` (the number and the QR code),
-  `accept-invitation`, `quarantine` (a held-aside version with its item, vault and device), `security-report` (a
+  yet), `invite-start` (what a vault sharing code session asks of both), `invite-sharing-code` (the eight digits and
+  their QR code), `invite-their-code` (typing the six digits on their screen), `invite-own-code` (this device's six
+  and the role), `invite-sent`, `vault-members` (owner and member after the acceptance), `own-full-code` (the full
+  vault sharing code and its QR code), `accept-number`, `accept-codes`, `accept-confirm` (their invitation arrived,
+  asked before joining), `accept-invitation` (the fallback: pasting), `quarantine` (a held-aside version with its item, vault and device), `security-report` (a
   breached password reused by two items, after Check Now), `import`, `import-review` (a duplicate waiting for a
   choice), `import-merge` (the `www` host and the sign-in details a merge would add, none accepted, the password
   hidden), `import-done`, `export` (the standing plaintext warning), `export-report`, `restore-review` (the date the
@@ -342,6 +365,12 @@ specification, plus vectors from independent Python implementations for HPKE wit
   timeout locks; a committed password change reports success even if the vault locks; a planted
   vault-key row does not block unlock; a planted trigger, view, table or index makes the store refuse
   to open; erasing leaves no ciphertext in the write-ahead log; SQLite refuses oversized values.
+- Added by the audit of 2026-11-17 (§Z): an app killed while the biometric prompt is up has still
+  used an attempt (`killedDuringThePrompt`, Z7: three prompts that never return, each from a new
+  launch, then no prompt and the password; a prompt that ends in the key takes its attempt back).
+  Suite "Vault session: a lock during the account's objects" gains three cases (Z4): a lock while a
+  password unlock waits on the Keychain, while a quick unlock writes its state, and while a granted
+  vault key is being stored. Each trapped before.
 
 ### 6.3 AutoFill matching (milestone 2/5)
 - Service identifiers with user-info (`https://amazon.com@evil.example/`), ports, trailing dots,
@@ -409,6 +438,55 @@ against `CredentialProviderModel` with `FakeCredentialVault`:
   their pushed segments are rejected by remaining members.
 - Read-only member's writes are rejected by the transport fake and never merged.
 - Two admins remove each other concurrently → deterministic outcome, no vault lock-out.
+- Vault sharing codes (ADR 0010, its security analysis), "sharing and membership": an adversary in the middle of two
+  sessions it runs back to back, in either interleaving, gets codes that do not match and evidences nothing
+  (`middle`); a directory that lies to one side (`directoryLiesToOneSide`); a bundle published after a device fixed
+  its own (`bundleFetchedLater`); a reply replaced after the reveal, never read and never revealed for
+  (`replyReplacedAfterTheReveal`); a reveal planted early (`earlyReveal`); a reply and a commitment with its reveal
+  replayed from another session (`replay`); a sniper answering first (`sniping`); three wrong codes and input that
+  is not a code (`wrongCodes`); ten minutes without progress (`timing`); the same account on both ends
+  (`sameAccount`); a scan of another account or other keys (`wrongScans`); evidence and an invitation used for another
+  account or session, forged or altered (`evidenceStaysInItsSession`); junk under a session's names
+  (`junkOnTheBoard`). "Shared vaults through the session": a lock while a step waits on the board reveals and pins
+  nothing (`lockMidSession`, which failed before the lock was checked ahead of the reveal); two steps at once
+  (`oneStepAtATime`); an administrator's invitation accepted only once the owner is checked by the invitee
+  (`noVouching`); a directory that changes the invitee's keys after the session (`directoryChangesAfterTheSession`);
+  an invitation planted in a session's slot (`plantedInvitation`); a "keys changed" warning settled only to keys the
+  chain lists (`keysChangedSettledOnlyToListedKeys`); a joiner's scan pinned only after the starter's reveal and the
+  person's yes to the account named, and nothing pinned by an ending, a spoiled reveal or a lock
+  (`scannedJoinWaitsForRevealAndYes`, V18; "Screen models: sharing" `scanNamesTheAccountFirst`); a shared vault whose
+  ledger no longer restores (the owner's pin deleted) unavailable, never the member's own: no write, rename, share,
+  acceptance, publication, snapshot or collection, nothing taken in, restored once the owner is checked
+  (`unrestoredSharedVaultIsUnavailable`, V19; "Screen models: sharing" `unrestoredSharedVaultOnScreen`).
+  A lock while a joiner waits on the board publishes no reply (`lockWhileJoining`, V9's other half); an end while a
+  start or a join waits on the board is not undone (`endWhileStartingOrJoining`, V20), and a step of a replaced session
+  reveals nothing (`replacedSessionRevealsNothing`, V20). A taken invitation slot leaves the invitation to hand over
+  as text and a retry invites nobody again (`invitationSlotTaken`, V22; "Screen models: sharing"
+  `undeliveredInvitationAsText`). A joiner never answers one number twice, across Start Over and a lock, so a fresh
+  commit buys the middle no second try (`noSecondAnswerToOneNumber`, V23). No pin is replaced from a session while a
+  shared vault here cannot be restored (`noPinReplacedWhileAVaultIsUnrestored`, V28). With no member-key comparison on the current head
+  no other member's object verifies (`noComparisonNoVerification`, V29). A shared vault whose `.ledger` and `.owner`
+  rows are deleted (A8, after a rotation) stays shared and closed: no write, rename, deletion, move in, share, record
+  or publication, nothing sealed under any key, and set up again it seals under the chain's key
+  (`deletedLedgerRowsKeepTheVaultShared`, V31, the security-audit branch's Z41 ported); the owner's own deleted state
+  (`ownersDeletedSharingState`) and a member's second device (`newDeviceHoldsTheVaultClosed`) likewise; "crypto core"
+  `grantedKeyWrapClass` (the wrap authenticates whether a key arrived by grant). Rows planted in the sharing state close
+  no vault, the Personal one included (`plantedRowsCloseNothing`, V32). A ledger that does not verify is `notSetUp`
+  and set up again from the account's marker with every item kept, and only the owner of an unavailable vault is
+  refused a pin replacement (`damagedLedgerIsSetUpAgain`, `pinReplacementScopedToTheOwner`, V33; "Screen models:
+  sharing" `damagedSharedVaultSetUpAgainOnScreen`). A load that read the pins before a new pin settles nothing
+  (`staleLoadSettlesNothing`, V36). An invitation issued by a session that is then replaced is kept and delivered by a
+  later session (`invitationOutlivesItsRun`, V35). "Screen models: sharing" `accountCheckOnEveryStep`: the starter's
+  step at the joiner's scan confirmation shows the account check the scan names (V34). UI tests (drafted, not yet run
+  on a Mac): `testJoinByScanningTheirScreen` (iOS) reaches the joiner's scan confirmation (V37). After the merge with
+  the security-audit branch (V38): `ownersDeletedSharingState` finishes the owner's share from the listed chain (Z50,
+  Z122) as well as by invitation; a device enrolled after a rival marker reached the account follows neither owner
+  (`laterDeviceFollowsNeitherMarker`, V39, the review's M1); an owner's rotated vault with its marker rows deleted and
+  the marker withheld stays shared and closed, and two key IDs mark a vault shared (`rotatedOwnersVaultWithoutMarker`,
+  `moreThanOneKeyIDMarksAVaultShared`, V40); a chain that names no granted key held is not joined
+  (`stalePrefixIsNotJoined`, V41); with no marker no pin is replaced on a session's word (`noMarkerNoPinReplacement`,
+  V42); a kept invitation is delivered only in its role while the chain lists the invitee
+  (`keptInvitationFollowsTheChain`, V43). A value no stream will carry here counts for a description only as an administrator's (`uncarriedDescriptionNeedsTheRole`, V48), one who holds the role now: a demoted administrator's does not, even under a key rotated after the cut (`demotedAdministratorsUncarriedDescription`, V50).
 - A later format (ownership transfer, `02-architecture.md` §8.9): a record of a later format version, or of this one
   with an unknown operation, signed by the owner as of the record it follows, stops the chain there in every order
   and batching and after a smaller listing, and the device proposes, plans and writes nothing; the same bytes signed
@@ -432,6 +510,395 @@ one per sync, with one stash write for the pass (`flood`); an entry kept from a 
 snapshots or the hand-on of its work (`revokedAuthorsStashDoesNotStopSnapshots`), nor does a trusted insider's
 (`handOnDespiteStash`); A8 planting a stash row with an item deletion, or one over the caps, erases nothing and the
 stash is rebuilt (`plantedStash`). With real keys ("sync with real keys"): a stash row planted in the local state — unsigned, garbage-signed, or another vault's genuine row — is never processed (`plantedStashRow`).
+The end-to-end audit of 2026-11-17 (`06-adversarial-review.md` §Z, Z20 to Z29; `AdversarialSyncAuditTests.swift` in
+"sync log" unless another suite is named). The state row (A8, "sync with real keys"): a planted erasure signs no
+tombstone and erases nothing, and the replay puts the row back (`plantedErasure`); a planted merged vector mutes no
+other device (`plantedMergedVector`); a row signed for another vault, or edited after signing, is no state
+(`stateRowOfAnotherVault`); every field of the state is in what is signed (`SyncStateAuthenticationTests`). Snapshots
+("shared vaults through the session"): a member's snapshot claiming every stream at 2^48 is refused and mutes no device
+(`memberSnapshotCoverage`), its tombstone erases nothing (`memberSnapshotTombstone`), and the owner's snapshot's
+tombstone is judged like a segment's (`ownerSnapshotTombstoneIsJudged`, `snapshotTombstonesAreJudged`); a vault with a
+judge still crosses the gap collection left before it was shared, at a replay too
+(`snapshotsBridgeWhatWasCollectedBeforeSharing`); in any vault a snapshot's coverage of the reader's own stream does
+not move its numbering (`coverageOfOwnStream`), and a number no reader lists is never published at
+(`exhaustedStream`). A device's own stream: an unsigned object named far ahead, or just ahead, in it moves nothing and
+loses no edit (`junkFarAheadInOwnStream`, `junkJustAheadInOwnStream`); an own segment that cannot be read yet holds
+publishing back and no collected number is reused (`unreadableOwnSegment`); a planted version in the device's own
+name does not mark its unpublished edit as sent (`plantedOwnVersionDoesNotSuppressPublishing`). One key space: a record
+ID another vault holds costs one entry, in a segment and in a snapshot (`collisionCostsOneEntry`,
+`collisionInSnapshot`, `crossVaultRecordID`). The jump ceiling: a device joining from a snapshot is not cut off by a
+jump every earlier device accepted (`lateJoinerAcrossAJump`), and a version met before the ones below it is merged
+once they have been (`jumpThatIsOnlyAnOrderOfReading`). The quarantine: capped per vault and per writing device, each
+entry kept once, at a replay too (`quarantineIsCapped`, `heldAsideSegmentsAreCapped`, and `quarantineLookupAndUsage`
+for both stores, the SQLite one on a Mac); a device that kept a version aside writes no snapshot covering it
+(`quarantineWithholdsSnapshot`). Version columns at their last value (A8; "account enrolment and device registry" and
+"sync with real keys"): typed errors, never a trap (`headerRowAtTheLastVersion`, `directoryRowAtTheLastVersion`,
+`fetchedDeletionOverTheLastVersion`, `metadataRowAtTheLastVersion`). Not an adversary's: a lock as a deletion commits
+loses no tombstone, and one before it deletes nothing (`DeletionLockRaceTests`).
+The review of those fixes (`06-adversarial-review.md` Z30 to Z39; `AdversarialSyncReviewTests.swift` in "sync log",
+`AdversarialSharedVaultOwnStreamTests.swift` in "shared vaults through the session"). A device's own stream in a
+shared vault: a member's segment far ahead in it, or at the last number, does not move its numbering
+(`memberPlantAheadInOwnStream`), and a read-only member's object there holds back nothing, deletions in other vaults
+included (`readOnlyMemberPlantInOwnStream`). The hold: an unfetchable name far ahead does not mute a device whose
+stream shows its own (`unfetchableNameFarAheadInOwnStream`), and a device whose state is behind its collected stream
+does not publish over a collected number while a trusted snapshot covers more of it
+(`olderStateUnderACoveringSnapshot`).
+A lock before the retry of an out-of-reach version does not leave it out (`lockBeforeTheRetry`); a retried version whose
+merge fails stops nothing (`retriedEntryThatDoesNotMerge`). The owner's snapshot's tombstone naming a member's device is
+judged against that device's stream (`ownerSnapshotTombstoneNamingAMember`); a planted deletion in the device's own
+name marks nothing as sent (`plantedOwnDeletionDoesNotSuppressPublishing`). The quarantine: a version it could not keep
+withholds snapshots and is offered again when there is room (`droppedVersionIsRemembered`), sizes near the integer
+limit read as full (`quarantineSizesNearTheLimit`), and a failing store stops the sync instead of refusing an object
+(`storageFailureStopsTheSync`). The withheld snapshot is combined and worded (`SyncReportCombinationTests`,
+`WordingTests.snapshotWithheldForReview`), and the two fields added to the state are signed, and only when set
+(`SyncStateAuthenticationTests`).
+The review of the second round (`06-adversarial-review.md` Z135 to Z143; `AdversarialSyncFollowUpTests.swift` in "sync
+log", `AdversarialSharedVaultFollowUpTests.swift` in "shared vaults through the session"). Collection: a name planted far
+ahead in a device's own stream is not kept in place of its head (`plantedNameIsNotTheNewestToKeep`), collection stops at
+a segment missing from the listing (`collectionStopsAtAGap`), deletes lowest first and stops at a delete that fails
+(`collectionOrderAndAFailedDelete`). The hold: a snapshot's claim about a stream that lists nothing holds nothing back
+(`claimAboutAStreamWithNothingListed`), and a claim ends with its signer (`claimEndsWithItsSigner`). Shared vaults: a
+deletion claiming the edits of a member who has never published erases nothing, from the owner's snapshot or a writer's
+segment (`claimAboutAMemberWhoNeverPublished`); a read-only member's segment in another member's stream is stepped over
+and nothing of it kept (`readOnlyMemberPlantIsSteppedOver`), and a taken place is worded
+(`WordingTests.ownStreamHeldBack`). What this device published: a planted deletion for a record it does not hold yet
+marks nothing as sent (`plantedDeletionBeforeTheRecordExists`). The jump ceiling: failed retries do not lift it
+(`failedRetriesDoNotLiftTheCeiling`), and a version a snapshot carries ahead of the ones below it is merged by the retry
+(`jumpInsideASnapshot`). The quarantine: a version its store refuses to keep is counted and remembered
+(`refusedByTheStoreIsADrop`), a revoked device's dropped version holds no snapshot back
+(`droppedVersionOfARevokedDevice`). Local state: a staged object past the listed bounds is dropped
+(`stagedPastTheBounds`), and a store that fails while staging stops the sync (`stagingFailureStopsTheSync`).
+The review of the third round (`06-adversarial-review.md` Z144 to Z149; `AdversarialSyncEngineReviewTests.swift` in "sync
+log", `AdversarialSharedVaultEngineReviewTests.swift` in "shared vaults through the session",
+`AdversarialVaultSyncEngineReviewTests.swift` in "sync with real keys"). Shared vaults: the items a revoked device
+edited stay visible and converge on a device of its account enrolled after the revocation, on a member who joins after
+it and on a device whose stream index was rebuilt (`revokedDeviceWorkStaysVisible`, Z144); a read-only member's segment
+at segment 1 of a writer's stream does not take the stream, and the writer is told (`readOnlyMemberPlantAtSegmentOne`,
+`WordingTests.ownStreamHeldBack`, Z146). The hold for this device's own stream: a junk name where a snapshot's claim
+points does not hold back a device that never published (`junkNameWhereAClaimPoints`), a restored state whose head is
+missing from the listing does not publish over a collected number (`restoredStateWithItsHeadMissing`), a store emptied
+of the vault publishes on (`emptiedStoreDoesNotHold`), and `claimEndsWithItsSigner` now holds a device whose head is
+missing (Z145). The quarantine: a version refused for a crowded digest is not offered again at every sync, only once
+something has left the quarantine (`crowdedDigestDoesNotReplayEverySync`, Z147), and the two state fields that carry
+this and the collected floor are signed only when set (`SyncStateAuthenticationTests`). The deletion gate: a move's copy
+known only by a planted tombstone still holds its original's deletion back (`plantedTombstoneForAMovesCopy`, Z148). A version kept after this device's own deletion holds nothing back; restored and edited it holds the others back where its vault is not published, and goes out behind its tombstone where it is (`keptVersionBehindOwnDeletion`, V44, V46).
+Collection: a name planted below what a device collected does not stop it collecting
+(`plantedNameBelowTheCollectedRun`, Z149).
+The review of the fourth round (`06-adversarial-review.md` Z150 to Z156; `AdversarialSharedVaultEngineRound4Tests.swift`
+in "shared vaults through the session", the end of `AdversarialSyncEngineReviewTests.swift` in "sync log", and the
+stream index suite `SharedStreamIndexTests`). A read-only and a removed member each revoke a device ID of another
+member's, one that has published and one that has not: neither stops being read, nor its own device syncing
+(`memberRevokesAnotherMembersDevice`, Z150). An owner's stream whose first segment is withheld from a joiner is not
+taken for one collected before sharing, and judging again when it arrives agrees with every other device
+(`ownerStreamMissingItsFirstSegment`), while a stream a snapshot covers still is (`collectedOwnerStream`, Z151). A
+read-only member's plant at segment 1 of a writer's stream does not take it when the member is promoted, the key is
+rotated, and the promoted member's later work counts (`promotionAfterAPlant`; whose segment names a stream, in any
+arrival order, `namingSegmentsComeFirst`, Z152). A revocation learnt after a version was held aside for that device
+admits it, and the vault settles (`revocationLearntAfterTheHold`, Z153). A segment's acknowledgement does not hold back
+a device of a vault that keeps its whole log (`acknowledgementInAWholeLog`, Z154). A read-only member's flood of
+segments into its own device's stream is not recorded, and a plant the victim steps over is recorded once the victim
+publishes above it (`readOnlyFloodIsNotRecorded`, Z155). The deletion gate of Z148 opens once the copy is published
+(`plantedTombstoneForAMovesCopy`, Z156). Since Z157 the Z150, Z152 and Z155 tests check the rule that replaced
+theirs: a revocation of another member's device ID retires nothing because no registry but its own account's counts
+it; a planted segment verifies nowhere before or after a promotion, and no rotation follows one; a read-only member's
+flood is passed over and never recorded.
+The review of the fifth round (`06-adversarial-review.md` Z157 to Z161; `AdversarialSharedVaultStreamIdentityTests.swift`
+and the end of `AdversarialSharedVaultEngineRound4Tests.swift` in "shared vaults through the session", the end of
+`AdversarialSyncEngineReviewTests.swift` in "sync log", `DeviceIdentifierTests` in the crypto tests and the stream index
+suite). Device IDs commit to their account: known answers from Python's `hashlib`, and a registry counts in a shared
+vault only the devices whose IDs commit to it, another account's listing of one (under its own key or the device's)
+counting for nothing (`knownAnswers`, `committedDevicesOnly`, Z157). A stream holds one account's segments in any order
+of arrival (`oneAccountPerStream`). A writer's segment in a promoted member's stream verifies nowhere, before and after
+a rotation, on the victim's device and others, and versions that saw the victim's edits count there
+(`plantInAPromotedMembersStream`, round 5's M1); a removed member's plant at a new device's segment 1 and revocation of
+its ID retire it nowhere, and its work arrives once the object is gone (`removedMemberRevokesANewDevice`, M2); the
+Z46, Z51, Z120, Z137 and Z146 tests (`segmentsInAnotherMembersStream`, `streamOwnerForSomeoneWhoJoinedAfterARotation`,
+`anotherAccountsSegmentIsNeverRecorded`, `replayRequestedDuringAReplay`, `readOnlyMemberPlantIsSteppedOver`,
+`readOnlyMemberPlantAtSegmentOne`) check that another account's object squats like junk, says so, loses nothing and is
+stepped over by nobody. A device restored to an older state in a vault that keeps its whole log publishes above what
+its own account's other device merged, never at a number that device read, and a member's claim moves nothing
+(`restoredStateAboveItsOwnAccountsWitness`, Z159). What an owner's collected stream carried of one record bounds no
+claim about another (`collectedOwnerStream`, Z160). A registry that cannot be read takes nothing out and settles
+nothing (`unreadableRegistrySettlesNothing`, Z161).
+The review of the sixth round (`06-adversarial-review.md` Z162 to Z166; `AdversarialSharedVaultDeviceIdentityTests.swift`
+in "shared vaults through the session", the end of `AdversarialAccountReviewTests.swift` in "account enrolment and
+device registry", the end of `AdversarialSyncEngineReviewTests.swift` in "sync log", `DeviceIdentifierTests` and the
+stream index suite). A device whose ID does not commit accepts no invitation, writes and moves nothing into a shared
+vault, publishes nothing there and says so (`nonCommittingDeviceTakesNoPart`); a copy an earlier build published there
+holds the original's deletion back, so the account's other device keeps the original (`moveByANonCommittingDevice`,
+round 6's L-M1); a device of an account from before IDs committed does not share (`legacyDeviceDoesNotShare`); an
+identity whose ID does not commit is neither approved nor enrolled as (`approvalRefusesNonCommittingIdentity`,
+`enrolmentRefusesNonCommittingIdentity`, Z162). A device that published above a witnessed floor merges its own
+segments below it once a lagging listing shows them (`ownSegmentsBelowTheFloorMergeWhenListed`, Z163). The member whose
+object holds a device's next number is named, junk names nobody (`plantInAPromotedMembersStream`,
+`removedMemberRevokesANewDevice`, Z164). An ID two registries list counts in neither in either order
+(`listedTwiceCountsNowhere`), and a stream forgotten leaves the index of a device that never recorded it
+(`forgottenStream`, Z165). The review of the seventh round (Z167 to Z169): such a device restored onto other hardware
+keeps the move's deletion parked, reported, until the copy is moved out from the new ID, which then goes out first
+(`restoredNonCommittingMove`, Z167); the package's test hooks are refused outside their file and test support
+(`test_unsafe_tripwire.py`, Z168); a device key that cannot be read for a moment refuses as a retry and publishes
+nothing that sync (`unreadableDeviceKey`, `deviceKeyUnreadable`, Z169). The review of the eighth round (Z170 to
+Z172): a second restore keeps the deletion parked (`twiceRestoredNonCommittingMove`, Z170); the original deleted again
+while its move's deletion is parked does not go out, and the report names the copy (`deletionWhileParked`, Z170,
+Z171); the notice names the copy, its vault and the way out (`copiesReachedNobody`, wording, Z171); the tripwire
+refuses a hook split over lines, backticked, unapplied, the session's state and the initialiser, and a new line in a
+defining file (`test_unsafe_tripwire.py`, Z172). The review of the ninth round (Z173 to Z178): a writing member's
+clock claim, or a value relabelled, naming another account's non-committing ID holds none of its deletions back
+(`clockClaimHoldsNothingBack`, Z173); a lock while the report is made names no copy, and a directory that cannot be read
+then keeps the report (`lockWhileReporting`, `unreadableDirectoryWhileReporting`, "Vault session: the copies nobody
+received, in the sync report", Z174, Z175); a lock clears the Devices screen's summary (`syncSummaryClearedOnLock`,
+Z176); parked deletions that cannot be read fail a restore's registration rather than stranding
+(`parkedDeletionsUnreadableAtRegistration`, Z177); a copy of an allowed line in its file is refused
+(`test_unsafe_tripwire.py`, Z178). The review of the tenth round (Z179 to Z184): a writing member's version superseding,
+or deletion claiming, the values of a copy under this account's unreceived ID is held aside and the copy and its parked
+deletion stay (`supersedingClaimOverAnUnreceivedCopy`, `erasureClaimOverAnUnreceivedCopy`, Z179); a clock claim naming
+this device's own non-committing ID holds none of its deletions back (`clockClaimNamingThisDevice`, Z180); a restore's
+move of its old ID's deletions that fails once is made again at the next unlock, or at a sync, publishing nothing until
+it is complete, and a move record the session did not sign moves nothing (`interruptedDeviceMigration`,
+`incompleteMigrationPublishesNothing`, `plantedMigrationMovesNothing`, "account enrolment and device registry", Z181;
+`migrationRoundTrip`, store contract); a failed registration leaves no device key behind
+(`parkedDeletionsUnreadableAtRegistration`, Z182); a lock after the sync but before its summary is stored leaves none
+(`lockBeforeSummaryLeavesNone`, `lockSignalGeneration`, "Screen models: devices", Z183); the empty state the move saves
+verifies (`migratedStateIsSigned`, Z184). The review of the eleventh round (Z185 to Z190): a restore's deletion in a
+shared vault held closed is parked, the move completes and the device publishes in its other vaults, and the parked
+deletion goes out once the vault opens (`restoreWithASharedVaultHeldClosed`, "shared vaults through the session", Z185;
+`deviceMigrationIncomplete`, wording); an account write that does not name the migration keeps it, and a password
+change across a completed move does not bring it back (`migrationKeptByOtherWrites`, `migrationWriteWithoutAccount`,
+store contract; `passwordChangeKeepsACompletedMove`, Z186); a version 1 database opens as version 2 with its rows
+(`upgradeFromVersion1`, "SQLite record store", Mac only, Z187); a summary made across a lock nobody has announced yet
+is dropped (`unheardLockLeavesNoSummary`, `lockSignalMark`, Z188); a registration that fails before its commit leaves
+no device key (`failedRegistrationLeavesNoKey`, Z189); the unlock's retry of the move carries a private vault's
+deletion (`unlockRetryReadsMarkersFirst`, Z190). The review of the twelfth round (Z191 to Z196): a restore's
+unpublished edit and deletion in a shared vault reach the vault's members, and stay on the restored device through a
+replay (`restoredEditAndDeletionReachMembers`, "shared vaults through the session", Z191; `ItemReattributionTests`,
+"Item reattribution"); a restore's unpublished move into a shared vault held closed keeps the original until the
+copy is carried and published, naming it meanwhile, and the person can stop waiting for a vault that will not open
+(`restoredMoveIntoAClosedVault`, `stopWaitingForRestoredWork`, Z192; `restoredWorkWaiting`, wording;
+`everyFieldIsCovered`, `laterFieldsOnlyWhenSet`, "Sync state authentication"); a registration interrupted by an unlock
+leaves no registered device without its key (`registrationDuringRegistration`, "account enrolment and device
+registry", Z193); a deletion parked for want of a key is reported held back (`restoreWithASharedVaultHeldClosed`,
+Z194). The review of the thirteenth round (Z197 to Z202): a restore's carry never rewrites another device's stamps and
+keeps what another device saw of the old ID as that ID's (`neverRewritesAnotherDevice`, `linesRaiseTheBound`, "Item
+reattribution", Z197), and its laws hold under random and every small history (`reattribution` in
+`LongRunningItemMergeLawTests`: commutes with merges, idempotent, keeps supersession and coverage, never rewrites a
+third device from a bound read too low, and with old hardware going on, the carry, its later version and any other
+converge in every order and hold every value; `LongRunningItemMergeExhaustiveTests`, each pair of a last-device
+version and another's); a restore from a backup older than the device's last publish, with its state or with it
+edited, brings back nothing it replaced (`restoreFromALaggingBackup`, Z198); the person stops the wait through the
+notice's action, and work left in a vault the account was removed from is kept here and holds nothing back
+(`stopWaitingForRestoredWork`, `restoredWorkInAVaultLeft`, "shared vaults through the session"; `restoredWorkAction`,
+wording, Z199); the hold survives a damaged state (`restoredWorkSurvivesAnEditedState`, Z200); a registration from a
+stale account record does not register over the one that finished, and a refused one happens at the next sync
+(`registrationFromAStaleAccount`, `registrationAtTheNextSync`, "account enrolment and device registry";
+`updateNamesTheDevice`, store contract, Z201); and a version kept after a device's own deletion in a vault deleted
+elsewhere holds nothing back (`keptAfterOwnDeletionInADeletedVault`, "Vault session: vaults across devices", Z202).
+The review of the fourteenth round (Z203 to Z207): a pending deletion planted in the state file for a move's copy does
+not open Z148's gate (`plantedPendingDeletionForAMovesCopy`, "sync with real keys", Z203); the carry renames the backup
+before anything pulled is merged into it, and the law tests draw the restored ID at random (`reattribution`), the
+exhaustive exploration below and above every device, which "two devices, every history from a fresh item" must meet
+as a field order's tie (Z204); Stop Waiting is one action per vault that will not open here, refused for one that opens
+(`restoredWorkAction`, wording; `publishingHeldForTheCarryIsNamed`, `stopWaitingForRestoredWork`, Z205); an ID planted
+in an unverified state as a restore's earlier ID is not another account's device (`plantedChainIDOfAnotherAccount`,
+Z206); and a vault whose publishing waits for the carry is named until the carry is done
+(`publishingHeldForTheCarryIsNamed`, "shared vaults through the session"; `publishingHeldForCarry`, wording, Z207).
+The review of the fifteenth round (Z208 to Z215), all in "shared vaults through the session": a member's claim, in a
+downloaded and not yet judged version, to have seen the earlier ID's work does not stop the carry, which counts only
+that ID's own stream (`inflatedClaimInAStagedSegment`, with a control, Z208); a carry that does not finish keeps the
+replay pass from merging into its vault (`replayWaitsForTheCarry`, Z209); the session carries before it merges, for
+three device IDs whose order makes the two orders differ, every device ending with `R(a) ⊔ b` computed by `ItemMerge`
+(`carryBeforeTheMergeKeepsTheFieldOrder`, which fails with the session's order reverted, Z210); a sibling device named
+in an edited state as an earlier ID keeps its published work, with its stream withheld too
+(`plantedChainIDOfASiblingDevice`, Z211); a lock at each read of a carried record stops the sync without a trap and
+loses nothing (`lockDuringTheCarry`, Z212); and each Stop Waiting action names its vault (`restoredWorkAction`,
+wording, Z215).
+The review of the sixteenth round (Z216 to Z221), in "shared vaults through the session": a sibling device enrolled
+before a restore, named in an edited state of the restored device as an earlier ID, keeps its published work, with its
+stream withheld too, since the chain comes from the move's signed chain row and never from a state that does not verify
+(`plantedChainIDOfASiblingEnrolledBeforeARestore`, Z216; `restoredWorkSurvivesAnEditedState` keeps Z200's hold from
+that row); and the lock test lands a lock inside each read or record of the vault's pending deletions and inside the
+carry's commit of a row whose record also has a tombstone to rewrite (`lockDuringTheCarry`, which traps with either
+re-read replaced by keys held across the suspension, Z217). Merged into the branch with conflict copies, "sync log":
+in a vault with a judge a staged name with conflict copies, and every later segment of its author's stream, counts
+for nothing as carried, as the merge refuses that name (`stagedCopiesCountForNothingWithAJudge`, Z221); so does a
+position past a forked name the judged download refused, at once and one sync after an unjudged staging
+(`refusedForkCountsNothingAfterIt`, `refusedForkCountsNothingOnTheNextSync`, V56). In "shared vaults through the
+session": the stream index counts for the carry only as far as a merge reaches, so a restore's work that only a forked
+name of its earlier ID carried reaches a member who saw the fork first (`forkedNameOfTheEarlierIDCountsForNothing`,
+V56); a move made again after its vault's state was damaged keeps an earlier restore's work there
+(`moveMadeAgainKeepsAnEarlierRestoresWork`, V57); and a placeholder of the earlier ID's first segment at the first
+sync after a restore from a lagging backup, with the backup's state as it was and edited, renames nothing that ID
+published (`placeholderAtTheFirstCarryRenamesNothing`, V58). In "sync log": a staged snapshot that covers a refused
+forked name lets the reach pass it, as the merge does (`stagedSnapshotCoverPassesARefusedName`, V58); junk names with
+copies ahead of a forked name do not get one copy of it merged in a judged vault
+(`junkCopiesAheadOfAForkDoNotGetItMerged`, the review's PoC), and with the sync's bound of copies spent such a vault
+leaves the name unfetched, counts nothing past it, and refuses it at the next sync with budget
+(`spentBudgetLeavesAForkUnfetched`, V59). Each fails at the commit before its fix, or, where it names what that
+commit lacks, with the fix reverted (`refusedForkCountsNothingAfterIt` and the V58 and V59 tests).
+The review of the fifth merge into this branch (V60 to V65): in "shared vaults through the session", a sync while a
+restore's move waits for sharing leaves the vault's state for the move, and Stop Waiting is refused then
+(`downloadWhileTheMoveWaitsLeavesTheState`, V60), and a junk copy beside the earlier ID's first segment with the bound
+of copies spent makes the carry wait rather than rename (`spentBoundAtTheFirstCarryRenamesNothing`, V62); in "sync
+log", a judged vault does not merge a forked name whose other copy is listed and unread
+(`unreadCopyOfAForkIsNotMerged`, V61), a junk copy beside a genuine name with the bound spent makes no stop
+(`junkCopyBesideAGenuineNameMakesNoStop`, V62), and names with copies a stream waits on are examined in name order
+(`junkAheadByNameSpendsTheBoundInOneOrder`, V64). Each fails at 121589c (the last unless the hash order happens to fall
+right in both of its cases, about 16 runs in 289), and with its fix reverted.
+The review of the seventeenth round (Z222 to Z228), in "shared vaults through the session": a restore's uncarried copy
+holds deletions back after its vault's state is damaged however sharing came to be configured, before the unlock that
+made the move, after it, while locked before a password or a quick unlock, and with the chain row lost after the move
+(`restoredChainWhateverSharingWasConfigured`, five cases, the four late ones failing before the row was filled in from
+verified states, Z222); a chain row signed for a sibling device, for the earlier ID itself, for another vault or by or
+for another account, or unsigned, edited, under another row's magic, or not in its one form, names nothing
+(`restoredChainRowRefusesEveryOtherBinding`, which fails with the row's device binding removed, Z223); a crash between a
+started-over state and its chain row, with the other vault's carry then removing the earlier ID, leaves the chain naming
+it (`restoredChainRowWrittenBeforeTheState`, which fails without the row written before the state, Z224); and a store
+restored twice keeps its first restore's uncarried copy held, both where the middle ID's state does not verify in the
+backup and where the second restore's first attempt at the move failed and its state was then damaged
+(`restoredTwiceAfterADamagedState`, both failing before the move found the rows its chain row names, Z225, Z226;
+V57's `moveMadeAgainKeepsAnEarlierRestoresWork` above is the same bug, and both tests now run over the one fix).
+The review of the eighteenth round (Z229 to Z233), in "shared vaults through the session": a store restored twice
+whose middle ID's state does not verify keeps its first restore's uncarried copy held when sharing is configured only
+after the unlock, with a sync in between: the move waits, publishing nothing, and `configureSharing` makes it
+(`restoredTwiceWithSharingConfiguredLate`, which fails at round 17's end: the move finished without the chain row and
+the waiting sync deleted the original on the other device, Z229).
+The review of the nineteenth round (Z234 to Z238): in "shared vaults through the session", Stop Waiting is refused while
+the move waits and the first restore's copy stays held (`stopWaitingRefusedWhileTheMoveWaits`, Z234); an ordinary move
+finishes without sharing, at its first attempt and when made again over a first attempt's states
+(`ordinaryMoveFinishesWithoutSharing`, and `.afterTheUnlock` of `restoredChainWhateverSharingWasConfigured` checking the
+record at the unlock, which fail with either of `moveAwaitsSharing`'s checks removed, Z235); a chain row the sharing
+store fails to read fails the move, which the next sync makes (`unreadableChainRowFailsTheMove`, Z236); in "account
+enrolment and device registry", a sync during the unlock's move does not make it again or publish, and a move from an
+account read before it finished changes nothing (`moveIsMadeOnceAtATime`, Z237); and the notice's wording
+(`deviceMigrationIncomplete` in `WordingTests`, Z238). All but Z235's fail at 54ce459.
+The review of the twentieth round (Z239 to Z244): in "shared vaults through the session", an ordinary restore's move
+finishes and its deletions go out while every chain row read fails, reading none
+(`ordinaryMoveWithEveryChainRowUnreadable`), and so do a never-restored device's deletions
+(`deletionsGoOutWithEveryChainRowUnreadable`), both failing at 1b228ab (Z239); where the row is the only record of a
+restore's uncarried copy, a row that cannot be read holds the deletions back and is reported, and the Personal vault's
+row is not read on the way (`unreadableChainRowHoldsWhereItIsTheOnlyRecord`, pinning the gate's fail-closed read, which
+no test did, Z239, Z240); a move that keeps failing on a row it needs is reported at each sync and made once the row
+reads (`lastingChainRowFailureIsReported`, Z240); `configureSharing` during a waiting move's read still makes it
+(`configureSharingDuringAWaitingMoveMakesIt`, Z241); Stop Waiting is refused for a move recorded in the store after the
+session read the account (`stopWaitingRereadsTheAccountBeforeItsSave`), and for a pending move before the vault's own
+reasons (in `stopWaitingRefusedWhileTheMoveWaits`, Z244). In "account enrolment and device registry", a lock and unlock
+during the unlock's move still has it made (`turnedAwayMoveIsMadeAfterwards`, Z241). The two Z241 tests fail with
+their fix reverted; the Stop Waiting and gate tests pin behaviour that was already right, each failing with the check
+it pins removed. The notices' wording is in `WordingTests` (`deviceMigrationIncomplete`, `restoredChainUnreadable`,
+Z240, Z243). Merged into this branch, Z234's Stop Waiting tests and V60's `downloadWhileTheMoveWaitsLeavesTheState`
+pin the same refusal (one implementation, PR #23's) and are all kept; only V60's pins the download's guard.
+The review of the twenty-first round (Z245 to Z252), in "shared vaults through the session": a vault directory listing
+that fails as a restore's chain is read holds the deletions back where the chain row is the only record of a copy
+(`directoryListingFailingInTheChainHolds`, the review's PoC, failing only the chain's own listing; Z245), and so does an
+item listing that fails as the gate reads this device's own rows (`itemListingFailingInTheGateHolds`, Z246); a move
+turned away by one waiting for sharing is made again even when a caller holding another record asked last
+(`turnedAwayMoveIsMadeFromTheStoresRecord`; that it is the store's record, not the holder's, is pinned since Z259), and
+a move that fails keeps its failure when such a caller asked meanwhile (`turnedAwayMoveKeepsTheFailure`, Z247; it passes
+with the failure dropped, since the rerun throws again, so the kept failure is pinned only since Z259); Stop Waiting
+reads no chain row for a vault that is not shared or whose state verifies, and throws, writing nothing, on a row it
+needs and cannot read (`stopWaitingReadsTheChainOnlyWhereItDecides`, failing with the read unguarded, eager or read as
+empty; Z248). All five fail at 131dd94. A sync begun locked saves no vault state across the unlock that registers a
+restored device, whether the move waits for sharing or is made there (`lockedSyncAcrossTheUnlocksRegistration`, Z249):
+it passes at 131dd94 and fails with a download that saves its state (PR #22's shape) or with the per-vault branch
+reading the keys late. `restoredChainUnreadable` in `WordingTests` checks the notice no longer says the device was
+restored (Z250).
+Merged into this branch, where the download saves what it learnt of conflict copies, Z249's scenario with one listed
+name whose copy cannot be read is `lockedSyncWithAnUnreadCopyAcrossTheUnlocksRegistration` (the review of the sixth
+merge's PoC, both halves; V66): at the merge (8a2cfb8) the download's save, signed for the new ID, replaced the damaged
+state under the waiting move or the state the move had just saved, the copy was not recorded, the hold ended and the
+other device lost the original. `syncStateWritesAreCheckedAtSigning` pins each clause of the check made as a sync's
+state or stash is signed (begun locked, another device ID, a lock and unlock since); with that check disabled it fails,
+and the first test fails only at its probe that nothing may be signed while the move waits. PR #23 ported that test
+with the mechanism (Z253); merged, the two copies were identical and one is kept, in
+`AdversarialSharedVaultLockedSyncTests.swift`. The review of the seventh merge found the bindings themselves unpinned
+(V66): PR #23's `lockAndUnlockAcrossAPush` and `lockAndUnlockBeforeAStashSave` (Z257, below) pin them here too, and
+`lockAndUnlockAcrossADownloadThatSavesCopies` pins this branch's own path, a download that saves what it examined of
+copies in a sync begun unlocked and locked and unlocked as it lists the vault. With the engines' store unbound the three
+fail (4, 1 and 2 issues), with `saveState` unchecked the same three (4, 1, 1), and with `signedStash` unchecked the
+stash test (1). `deviceMigrationIncomplete` in `WordingTests` checks that the error no longer promises the next sync,
+and says when the move is tried again (V69).
+The review of the twenty-second round, and of PR #22's seventh merge (Z253 to Z261). In "shared vaults through the
+session": a sync begun locked writes nothing as a restored store's earlier ID while the unlock registers it, whether the
+registration is under way at the sync's own registration step or the keys arrive just before the decision
+(`lockedSyncDecidesOnTheAccountAfterItsAwaits`, the review's PoC and a second landing; five issues each at 5b43bc5, two
+each with `mayWrite`'s new clauses removed); a sync during a pending move takes nothing out
+(`pendingMoveTakesNothingOut`, whose failing state reads stop the take-out on their own since Z258, so the gate is
+pinned by `pendingMoveOnAChainRowTakesNothingOut`, Z263); no state is signed while the move waits (in
+`lockedSyncAcrossTheUnlocksRegistration`); `syncStateWritesAreCheckedAtSigning` pins each clause of the signing check;
+a release of parked deletions, and a chain row, are signed only for a sync still entitled to
+(`releaseIsCheckedAtSigning`, Z256, failing with the release's check removed and with the chain row's). In "sync with
+real keys", each layer of `SyncStateWrites` alone (Z257): `lockAndUnlockAcrossAPush` fails with
+the engines' store unbound and with the state's check removed, and records the cost (the next sync's
+`ownStreamConflict`, recovered by the one after); `lockAndUnlockBeforeAStashSave` fails with the stash's check removed.
+One failed state read anywhere in a restored device's sync still carries its work before the vault merges
+(`carryWaitsForAFailedStateRead`, twelve reads, Z254), a vault whose re-record failed merges nothing first
+(`unrecordedVaultWaitsForTheCarry`), and a failed read at the take-out takes nothing out
+(`takeOutWaitsForAFailedStateRead`, ten reads, Z258); each fails with its fix reverted. A move made again keeps an
+unreadable chain row over a later lock (`turnedAwayMoveKeepsTheUnreadableRowOverALock`), keeps a failure when the
+attempt made again waits for sharing (`turnedAwayMoveKeepsAFailureWhenTheNextWaits`, `z247-keep`), and is made from the
+store's record, not the holder's (`turnedAwayMoveIsMadeFromTheStoreNotTheHolder`, `z247-reread`; Z259); a vault state
+that cannot be read as the chain is read holds and is not reported as a chain row (`stateReadFailingInTheChainHolds`,
+`z245-state` and `z245-rowonly`, Z260). Each fails with the part it pins undone.
+The review of the twenty-third round (Z262 to Z266). In "shared vaults through the session": a take-out that fails on
+its state read in a sync where a replay was owed is not settled away by that replay, and a demoted member's late write
+merged before the demotion was known is taken out in the same sync (`takeOutThatFailedIsNotSettledAway`, the review's
+PoC; fails at 4bf9f9d, the late write kept, Z262); a sync while a restore's move waits on an unreadable chain row takes
+none of the earlier ID's rows out (`pendingMoveOnAChainRowTakesNothingOut`, the review's PoC; fails with the take-out's
+`writing` gate removed, two issues, Z263); an unlocked sync held back by this device's own key reports why
+(`ownDeviceKeyWait`: `.registering` in `lockedSyncDecidesOnTheAccountAfterItsAwaits`, `.unreadable` in
+`unreadableDeviceKey`, which also checks that a key read that throws makes no device key, Z264, Z265). In
+`WordingTests`, `ownDeviceKeyWait` and `ownDeviceKeyWording` check that neither state says "when you unlock" and that
+each says it is tried again (Z264). Merged into the hygiene branch: `storeResetWithTheKeyUnreadable` (`WordingTests`)
+checks that a sync stopped at a reset store with the key unreadable says the reset first and the key beside the
+question, with no notice saying changes were downloaded, and that the upload's refusal is a retry (V70); and in
+"shared vaults through the session" `takeOutThatFailedAtTheHeadItLastSawIsNotSettledAway` pins `takeOutsOwed` where
+S65's `takenOutAgainst` still names the current head, which the relaunched PoC above does not (Z262's merge note).
+The review of the twenty-fourth round (Z267 to Z272, with Z271, found merging round 24 into PR #22). In "shared vaults
+through the session" (`AdversarialSharedVaultOwedTakeOutTests`): a sync whose two take-outs fail (the sharing pass's and
+the replay loop's, scripted) publishes nothing, holds every deletion, names the vault, and a relaunch takes the late
+write out (`replayLoopTakeOutThatFailsHoldsDeletions`; fails with `try?` in `prepareSharedReplay` or the hold removed,
+Z267, Z268); an owed take-out found at the judged basis asks for the replay that rebuilds what it took out
+(`owedTakeOutAtTheJudgedBasisReplays`, Z269); an owed vault's first pass publishes nothing, with a replay owed and
+without, and it publishes again once a take-out finishes (`owedTakeOutPublishesNothingFirst`, Z270); a replay's take-out
+that fails after a first pass that published holds deletions (`replayTakeOutFailsAfterAPassThatPublished`, Z270); a held
+key with a registration under way reports `.registering` (`heldKeyWhileRegistering`, Z272). In "account enrolment and
+device registry", `incompleteMigrationPublishesNothing` checks `movePendingWhileUnlocked` (Z271). In `WordingTests`,
+`takeOutUnfinished` (Z268, Z270), `movePendingWhileUnlocked` and `ownDeviceKeyWording` (Z271).
+Merged into the hygiene branch: `owedTakeOutPublishesNothingInItsReplay` ("shared vaults through the session") checks
+that a vault still owed after its replay's take-out decided nothing (the registry unreadable for that moment) publishes
+nothing in the replay, is named and holds the deletion, and publishes again once a take-out finishes (Z270's merge
+note); `storeResetOverAMovePendingAndAnUnfinishedTakeOut` (`WordingTests`) pins the headline's precedence, a reset store
+over a move pending over the key's wait, with `takeOutUnfinished` beside the reset (Z271's).
+The review of the twenty-fifth round (Z273 to Z278). In "shared vaults through the session": a take-out that took a row
+out and threw, the basis since come back to the judged head, is replayed after a relaunch and the item rebuilt
+(`partialTakeOutReplaysAfterARelaunch`, the real take-out over `ListingFailingStore`; fails at 2476dc7, Z274); a vault
+owed while its index is rebuilt publishes and settles (`owedWhileRebuildingIsNotWedged`; fails with the rebuilding
+guard's clearing of the owed entry removed, Z275); the owed take-out tests assert `takeOutUnfinishedSentNothing` and the
+notice's `changesWait` (Z273). In `WordingTests`, `takeOutUnfinished` and `takeOutUnfinishedAfterSending` (Z273), and
+`deletionsHeldBackWording` (Z278). The replay's publishing while owed (Z276) has no test on PR #23, whose guard is
+unreachable without a hook in `Sources/`; on this branch `owedTakeOutPublishesNothingInItsReplay` above pins it.
+The review of the twenty-sixth round (Z279). `partialTakeOutReplaysAfterARelaunch` pins that the take-out nulls the
+judged head before its first row goes, not that it saves it at once: there the sync's after-logs pass saves the vault,
+nil head included, so a take-out that only nulled it passes too. The immediate save matters only where the process ends
+between the take-out and the end of that sync, which no test reaches without simulating a kill (a sync cut short by
+the transport does not stand for one: the ledger the sharing pass ingested is unsaved too, so the relaunch's basis is
+not the old head anyway); it is argued by reading. So is the same save before the take-out withdraws pending deletions
+(Z57's withdrawal): `deletionUnpublishedAtDemotion` ("shared vaults through the session") runs it, a withdrawal with no
+row taken out, and passes with it, but pins only the withdrawal.
+Review of this branch's eighth merge (V71): a rotation carried on after a take-out that did not finish leaves its
+reseal for the next sync, the record and the revocation going out, and completes there with every record under the new
+key, nothing missing meanwhile (`rotationAfterAnUnfinishedTakeOutResealsAtTheNextSync`, "shared vaults through the
+session", routine and removal; fails before the fix, the item missing).
+Pinned since that review (V72): a vault owed only from its replay on is named, holds the deletion and is said to have
+sent changes (`vaultOwedOnlyFromItsReplayIsNamed`), an owed replay holding a new item is not said in the generic notice
+(`owedReplayHoldsANewItemInItsOwnWords`), and the upload after a reset is refused while a registration is under way
+(`reuploadRefusedWhileRegistering`, "sync with real keys").
+Review of this branch's ninth merge (V75): a person's rotation carried out while an automatic sync is under way is
+reported, not thrown as `syncInProgress`, and the next sync replays what its reseal took out and leaves every record
+under the new key (`rotationWhileASyncIsUnderWayIsReported`, "shared vaults through the session"; fails without the
+fix, the error thrown). The replay's `publishedIn` insert and Z279's save are pinned by nothing (by reading, V75).
+`LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
+in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
+the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
 
 **Implemented in milestone 3, the item's own metadata** (`AdversarialItemMergeTests`, suite "Adversarial: sync log,
 item metadata"; the adversary is an insider device, or from milestone 4 a vault member, A4, who can seal any payload
@@ -500,7 +967,31 @@ member's late title, whose knowledge an unaware member's rename on top of it car
 member's rename on top of it carried (S46), and a permanent deletion of a copy that held a late write (S45); and
 (`AdversarialSharedVaultTakeOutHygieneTests.swift`) the hygiene report of an item a take-out rebuilt (S47). Each is merged by a
 device the store had not shown the record, written on top of, and counts on no device once it is shown, the two
-devices holding the same item. Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
+devices holding the same item. For F4.7 and the review of its rule (`06-adversarial-review.md` §T,
+`AdversarialSharedVaultRenameTests.swift`), each failing without its fix: a read-write member's rename, plain, above
+the owner's later one and labelled as the owner's revision, held aside everywhere with the name unchanged and the
+member's items counting (S53); a demoted administrator's late rename taken out again on the device that merged it and
+on their own, the name they chose with the role kept; the same late name stored again by an unaware member's device
+as its own row; an owner's, an administrator's and a promoted member's renames converging on every device, with the
+session's refusals; a name written before its author's promotion, judged alike on every device at each head (S58);
+an older name sealed again above the current one by a member and by a former administrator, and a description dated
+above its row (S54); a name labelled as an administrator's revision and sealed by a member for a device that joined
+after a rotation (S55); a former author publishing their own name again late to such a device (S56); what such a
+device shows across another member's demotion, across the author's, and after the next rotation (S57); a device shown
+a demotion before the stream it bounds (`demotionHeardBeforeTheNamesItBounds`); a late name on the device of an
+administrator who joined after a rotation and learns of the demotion as it rotates, taken out before the re-seal
+(S59, `lateRenameSealedAgainWhileRotating`); a read-write member's re-seal after a rotation, which owes nothing it
+never seals (S60, `readWriteMemberResealsWithoutTheDescription`); a member's snapshot carrying a description row
+labelled as the owner's rotation re-seal, refused on a newcomer's device (S61, `forgedDescriptionInAMembersSnapshot`),
+and S61's second route, the same row one version up in a later segment of the owner's device's stream, published by a
+device the member enrolled under that device's ID, which renames the vault everywhere if a segment's signer is not
+asked for the role (S67, `forgedDescriptionInALaterSegmentOfTheOwnersStream`);
+a forged rename at the version ceiling, after which an administrator's rename and a member's item still land
+everywhere (S62, `forgedRenameAtTheCeiling`); a replay that saw the head move settling the head it began with
+(S65, `replaySettlesTheHeadItBeganWith`), and the same race through `syncAll` with the head moving between the take-out
+and the replay, where a demoted member's late write merged earlier would otherwise stay (S67,
+`headMovedBeforeTheReplayThroughSyncAll`); and a member's deletion of the description, which erases it nowhere
+(`descriptionDeletedByAMember`, a property that held before the rule). Below them, `ItemMergeWriterTests` (`WatchwordSyncTests`) checks that each of those
 parts names its writer and that a merge's attributed parts are exactly its inputs', and
 `LongRunningLateWriteSimulationTests` checks, over random histories, that a device that held late versions aside as
 they came and devices that merged them and rebuilt from what counts hold the same item, with nothing late in it and
@@ -510,6 +1001,76 @@ no honest version held aside. Scenarios S3 and S4 through the session are
 published, planned or left, the owner's device stopped too, a member who may still write merged; and, in this suite
 (`AdversarialSharedVaultLaterFormatTests.swift`), a later record the store shows before the record it follows, offered
 again until it stops the chain, and later records signed by a member or by nobody, which leave the vault writable.
+From the end-to-end audit (`AdversarialSharedVaultShownKeysTests.swift`, Z40): a key directory that changes its answer
+between the safety number shown and the pin, for each kind of evidence and for each entry point (`verifyContact`,
+`invite`, `acceptInvitation` with a chain the store's own bundle signed, and the two screens' full-code fallback, which
+replaced the comparison toggle at the merge with ADR 0010: V15, V38);
+nothing is pinned, wrapped or joined. A shared vault with no ledger on the device
+(`AdversarialSharedVaultWithoutLedgerTests.swift`, Z41): a member's second device after a rotation (no write, rename,
+second genesis or vault deletion, nothing of its own in the log, then the invitation accepted there and the next item
+sealed under the chain's key); the owner's second device, told by the marker, joining its own chain with the key the
+directory gave it; a read-only member's device whose ledger, owner row or owner's pin was deleted; the store
+withholding the marker while serving the granted key; a marker row deleted from the file and one planted; a sharing
+state that cannot be read at unlock; and an invitation naming another owner refused on a second device. In "crypto
+core", that the class of a vault key's wrap is authenticated (`grantedKeyWrapClass`). "Screen models: sharing" has the
+vault's label and the accept screen setting it up. Sharing a vault that already holds work
+(`AdversarialSharedVaultExistingVaultTests.swift`, Z42): one that two devices of the owner wrote to, where nothing is
+held aside on the owner's device or an invitee's; and one whose log was compacted, which is refused. An addition and
+the removal that undid it losing a fork together (Z43): through the session
+(`AdversarialSharedVaultUndoneAdditionTests.swift`: the addition not replayed, no second grant, nothing sealed again
+towards the key the outsider holds, the key reported and then rotated by the administrator's own next syncs, and what
+the administrator wrote under the losing branch's key reaching the others, Z47), and in the ledger
+(`AdversarialSharingUndoneAdditionTests.swift`, "sharing and membership": order and restart, a routine rotation ending
+it, an addition that lost alone, a branch that added the member again); `LongRunningMembershipForkTests` compares
+`exposedKeyHolders` across orders and batches with the rest. The deletion paths
+(`AdversarialSharedVaultDeletionPathTests.swift`, Z44): a read-only member's permanent deletion, purge and move out,
+each refused with nothing queued, then allowed once the member may write; and a move whose copy was written after a
+demotion, whose deletion waits until the person discards the held-aside copy. A vault the account left
+(`AdversarialSharedVaultFormerMemberTests.swift`, Z45): still a member and still on the share until the rotation, then
+listed for what it is, not given to AutoFill, unwritable, and removed from the device by the person without anything
+published; and a vault with no ledger not given to AutoFill. A stream's owner
+(`AdversarialSharedVaultStreamOwnerTests.swift`, Z46): a member's device enrolled under the owner's device ID writing
+into the owner's stream over an unpublished edit, held aside on the owner's device and everyone's, the stream carrying
+on. "Screen models: sharing" has the texts (`sharingStatementsAreTrue`) and the left vault on screen.
+From the review of those fixes (Z48 to Z59; each failed first unless its row in `06-adversarial-review.md` says
+otherwise): a second device that cannot name a vault's owner and is offered an invitation naming someone else, the
+held key that stands in for a grant only in one's own vault, and markers that disagree
+(`AdversarialSharedVaultOwnerUnknownTests.swift`, which also records Z49's owner's-other-device residual as a known
+issue); a share cut short after the marker, a genesis record the store lost, rows planted in the sharing state, and
+the owner's other device taking a vault up by sharing it (`AdversarialSharedVaultInterruptedShareTests.swift`); a
+stream's owner on a device that joined after a rotation, and the replay when an earlier segment changes it
+(`AdversarialSharedVaultStreamOwnerReviewTests.swift`), with "Shared vaults: the stream index"
+(`SharedStreamIndexTests`, `WatchwordKitTests`) for the index itself: order of arrival, refiling, unopened segments
+and their completion, and the saved form. A key a dead branch says was handed out, a demoted administrator's branch
+that removes and re-adds, and what is kept (`AdversarialSharingUndoneAdditionTests.swift`, Z53). The deletion gate
+(`AdversarialSharedVaultDeletionGateTests.swift`): an entry planted under this device's name that must not stop its
+deletions (Z54), and a second replay in one sync that must not publish the deletion a move's held-aside copy is
+waiting on (Z55). A log the account's other device compacted after the vault was shared, which holds nothing of the
+owner's aside and stops the first invitation, and the marker published before the chain
+(`AdversarialSharedVaultLateCompactionTests.swift`, Z56), with the ledger's "its owner's alone" in "sharing and
+membership". A deletion unpublished at a demotion, withdrawn and not published at the promotion
+(`AdversarialSharedVaultDeletionGateTests.swift`), and a left vault's removal from a device that holds unsynced work
+of its own, refused until the number is acknowledged (`AdversarialSharedVaultFormerMemberTests.swift`), with the
+confirmation's text in "Screen models: sharing" (Z57). Claims of rows Z40 to Z47 that had no test of their own (Z58,
+which also lists those still without one): every remaining write path under `ledgerUnavailable`, a marker outliving
+its device's revocation and a newly enrolled device before its first sync
+(`AdversarialSharedVaultClosedWritePathTests.swift`); the whole-log check by the device's own sync state; the
+deletion gate's first clause; a key no record introduced; and, in "sharing and membership", both sides of an
+invitation refusing evidence for a bundle other than the one shown.
+From the second review of those fixes (Z59, then Z120 to Z125; each failed first unless its row says otherwise): a
+member's new device led into another owner's chain, which never seals the account's items under that chain's key
+whether the store then hands it the directory whole, the real key alone, or the real key alone with the other chain
+naming its ID; a vault whose owner the account's devices disagree about held closed on both, ledger or not, across a
+restart; and a device whose directory listing names the vault, or that has not listed it yet, refusing a stranger's
+invitation (`AdversarialSharedVaultImpostorChainTests.swift`, Z59). A replay asked for during a replaying pass, driven
+through sessions with an insider and a withholding store, and a chain that lists only its owner judged on a member's
+device (`AdversarialSharedVaultReplayTests.swift`, Z120, Z124). The deletion gate with the saved index, or the set
+itself, gone (`AdversarialSharedVaultDeletionGateTests.swift`, Z121), with the rows' saved form in "Shared vaults: the
+stream index". The owner's other device taking up the listed chain without a sync, on every platform
+(`AdversarialSharedVaultInterruptedShareTests.swift`, Z122). What `unsharedWork` counts, in "Shared vaults through
+VaultSession" (`SharedVaultUnsharedWorkTests.swift`, Z123). Z48's `markShared` refusing a second owner and a revoked
+device's marker starting no dispute (`AdversarialSharedVaultOwnerUnknownTests.swift`, Z125). Not tested: a quarantine
+read that fails at the deletion gate (Z121).
 
 **Implemented in milestone 4, protocol core** (`AdversarialSharingTests`, suite "Adversarial: sharing and
 membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
@@ -537,8 +1098,11 @@ membership", real Ed25519, HPKE and AES-GCM; each test names its adversary):
   version of its own before it knew (refused everywhere for the work it carries); objects claiming places in the
   former member's own stream that the cut covers; a stream prepared in advance of which the removing device was
   shown only the end; part of a stream withheld from a member who joins later (delays, never widens); a cut on a
-  record that ends no permission, a cut altered or over its bound; a removal displaced by a fork, whose cut still
-  governs while it is owed; a former administrator's cut on a dead branch built from a genuine leave request.
+  record that ends neither a permission nor an administrator's role, a cut altered or over its bound; a removal
+  displaced by a fork, whose cut still governs while it is owed; a former administrator's cut on a dead branch built
+  from a genuine leave request; and for the vault's name (F4.7), a demoted administrator's branch from before the
+  demotion, an altered cut, and an administrator who is not the owner ending another's role, none of which moves
+  which descriptions count (`administratorStandingFollowsTheOwnersRecord`).
 - *Fork and rollback*: a store serving an older chain; a saved ledger truncated, spliced, altered byte by byte or
   planted; a store showing two halves of a household different branches; a former administrator's rewrite fed a
   page, or an object, at a time in any order; a record signed on a stale head and released after the chain was built
@@ -588,7 +1152,10 @@ read-only writes refused by the transport fake), and anything that depends on th
 - CXF payloads with unknown types, duplicate IDs, and oversized blobs.
 
 Done in milestone 7, as "Adversarial: import parsers" (`AdversarialInterchangeTests`, adversary A7), with
-every case above and the attacks a parser author would add to them:
+every case above and the attacks a parser author would add to them (and, from review §Z, a file whose small rows
+store as large items failing on the import-wide stored-size budget, Z81, which the fuzz harness's `check` asserts
+too; dates beyond the clock and an archive's AutoFill state, Z85, are in "Adversarial: interchange through the
+session"):
 
 - ZIP: twenty-four escaping member names (four of them hiding a separator before a combining mark, which a
   check by characters does not see), in an archive whose wanted member is a good one; undecodable and empty
@@ -670,7 +1237,16 @@ Done with the session wiring (`02-architecture.md` §14.1), as "Adversarial: enc
 - No plaintext export and no archive without the account password; a preview's drafts gone with a lock, and
   neither `importAdditions` nor `commitImport` reaching them after the next unlock.
 
-Still to come: that the file is written with the protection class §14 names (the app's part).
+- An archive this app wrote restores past 50,000 items and with an item between 768 KiB and 1 MiB stored, and
+  what a restore would still not bring back is found when the archive is made (`WatchwordInterchangeTests`: "Items
+  from an encrypted Watchword archive"; `WatchwordKitTests`: "the archive's limits are the vault's and the format's
+  own", Z82); a staged export left by a process that died is removed by the next launch's sweep, and by every lock
+  whatever the model remembers ("Screen models: staged files", Z80); the plaintext export's bytes are the session's
+  `SecureBytes` (Z83); only the person's own trash is left out of a plaintext export ("Export reports", Z87).
+
+Still to come: that the file is written with the protection class §14 names (the app's part, *Mac only*), and that
+the sweep at termination runs (by hand: stage an export, quit or kill the app with the mover up, relaunch, and list
+the container's `tmp`).
 
 ### 6.6 Hygiene (milestone 6)
 - HIBP responses with padding, missing padding, non-hex lines, huge bodies, HTTP 429/5xx; the
@@ -730,7 +1306,9 @@ with this device's ID but another device's secret, is never the raw key, and a s
 another device's or account's key nor under another name; a ledger and range planted from another account's device
 under this device's names, for an item given the same ID and version, are not believed; a holder of the account's
 keyset that knows this device's ID can neither open its ledger nor plant one saying a breached password is clear
-(L1); and an older ledger of this device's own, put back, defers no check (L3). Functional: "Vault session: hygiene" (reports, reuse, an edit due at once, rows the
+(L1); an older ledger of this device's own, put back, defers no check (L3); a range cached for one vault does
+not answer a check in another, so a member's probe items always go to the network (Z88); and sealed range records
+have one length whatever their range holds (Z89). Functional: "Vault session: hygiene" (reports, reuse, an edit due at once, rows the
 sync engine wrote reconciled, the ledger and cache surviving a relaunch, eviction and erasure with the account,
 the device secret kept in the Keychain and its loss making the sealed records open as nothing).
 
@@ -836,11 +1414,30 @@ parser cannot read is refused, and the `host` fuzz target checks the same agreem
 view: there is no call that releases after a refusal, which `AdversarialAutoFillRequestTests` checks request by
 request (§6.3).
 
+*At the session and screen model (review findings Z61, Z62, Z65):* F11.7 is enforced in
+`VaultSession.save`, which refuses a host a save adds that resembles a saved site, or cannot be read
+by eye, unless the caller names it as confirmed; `AdversarialItemEditorTests` ("Adversarial: account
+screens") holds the refusal, the question naming the site and the item, and that an ordinary host asks
+nothing. An import entry that would hide or stand beside a saved account, in any vault, or name a
+look-alike, is refused at commit without a decision (`AdversarialImportTakeoverTests`, "Adversarial:
+interchange through the session"), and `InterchangeScreenTests` drives the screen model. Look-alikes are
+judged against `SavedSites`, the gate's own view (`MergeHostTests`: a trashed item, a policy-refused scope
+or a member's item scoped to the look-alike recognises nothing).
+
+*From the review of those fixes (Z70 to Z79):* every other write path that adds a host is held the same way, in
+the session: a merge's accepted hosts (`AdversarialImportReviewTests`, "a merge that adds a host taking over
+another saved login…"; the merge screen's second confirmation in "Adversarial: account screens"), a copy or move
+out of a shared vault (`AdversarialSharedVaultTransferTests`), the credential-vault save
+(`AdversarialAutoFillPublicSurfaceTests`), trashed import entries and look-alikes within one entry
+(`AdversarialImportReviewTests`), and only the item's own trust domain vouches for a host being added
+(`AdversarialAutoFillReviewTests`). The keyboard's suggestions are withdrawn where the two trust classes meet at a
+host, and a member's passkey beside the person's own is not suggested (`AdversarialAutoFillReviewTests`); every
+write made for a remote party has the item budget (`AdversarialLargeBlobTests`, `PasskeyRequestTests`).
+
 *Still to come:* a UI test that the AutoFill extension presents no override affordance on a
-suspicious host, and that adding a mismatched host as a scope requires the confirmation in F11.7
-(both milestone 5; the second was planned for milestone 2, but the mismatch it confirms is first
-observable from the extension). Milestone 2 enforces F11.2 at the vault boundary instead:
-`VaultSession.save` refuses over-broad scopes whatever the UI sends.
+suspicious host, and one that drives the editor's F11.7 dialog and the import's concern section on a
+Mac (milestone 5). Milestone 2 enforces F11.2 at the vault boundary: `VaultSession.save` refuses
+over-broad scopes whatever the UI sends.
 
 ### 6.8 Fuzzing (nightly)
 - libFuzzer harnesses for the envelope decoder, CBOR item decoder, CSV parser, 1PUX JSON mapper,
@@ -850,7 +1447,9 @@ Done in milestone 7: the `Fuzz/` package builds one executable, `WatchwordFuzz`,
 selected by `WATCHWORD_FUZZ_TARGET`: `csv`, `password-csv`, `inflate`, `zip`, `1pux`, `1pux-archive`, `cxf`,
 `amplify`, `envelope` (`Envelope.parse`), `sync-payload`, `signed-object`, `host` (`HostNormalizer` and the
 import's scope derivation), `otpauth`, `passkey` and `archive` (`AccountArchive.parse`, everything checked before a key
-is derived; its seed is the archive an independent implementation wrote). Each target runs a parser over arbitrary bytes and then checks
+is derived; its seed is the archive an independent implementation wrote), and since ADR 0010 a sixteenth,
+`sharing-code` (what a vault sharing code session reads from the camera, a keyboard or the board: `ScannedSharingCode`,
+`FingerprintCode`, typed numbers and codes, and the three board messages, each held to its one spelling). Each target runs a parser over arbitrary bytes and then checks
 what must hold of anything it accepted (a CSV file re-reads as itself, an export re-imports and names no
 host that no exported item was scoped to, an inflated
 stream is within its caps, every imported scope passes `ScopePolicy`, every one-time-password and passkey
@@ -905,6 +1504,73 @@ an insider device in hands that do not know the password.
   to list it — none opens, no vault is listed or written under a key that is not its own, the items are reported
   unreadable, and the next sync restores the genuine wraps from the transport.
 
+Added by the audit of 2026-11-17 (`AdversarialAccountForkTests.swift`, the same suite; `06-adversarial-review.md` §Z,
+Z1 to Z8), the adversary being a device revoked with a password change, a registered device in hands that know a
+retired password, and A8:
+
+- Password changes that are not the person's (Z1, Z8): a change made with the retired password under a new salt,
+  sealing a back-dated revocation of the revoker, is refused when the retired password is typed, followed by
+  nothing under `ignoringPasswordChange`, and described to the person (who made it, what it revokes); a chain of
+  four changes under one device's name leaves the genuine one reachable by unlock and by enrolment; a change whose
+  own history revokes the device is refused there; with four devices claiming a change, none of them registered
+  before the checkpoint the device follows, the unlock reports that and the genuine one is followed by naming its
+  device from an unlocked session; a fork made with a retired
+  password does not open a device that follows the new one, and is followed only from an unlocked session.
+- The list of pending changes (Z2): 96 planted credential entries, half without a valid signature of the previous
+  generation's enrolment key, cannot keep the genuine change off it, over four seeds, asserting that sixteen sort
+  first.
+- A pending change outlives the file (Z3): with the candidate header's row deleted, that and the credential
+  entry, a registry row the anchor names, or the header withheld on the transport, the retired password and quick
+  unlock are refused; a sync restores what was taken and the new password is followed. The anchor's encoding
+  round-trips its pending changes, reads the form from before it recorded any, and refuses anything else.
+- Which vault is the Personal one (Z5): the account row redirected to another vault with the real one kept in view
+  by a planted directory row, the same with the header row removed, and with the header row replaced by another
+  account's, are each refused at a password unlock and at a quick unlock; a key that arrived by grant is never
+  the Personal vault's key, on a store with neither header nor anchor.
+- Another member's registry (Z6), through two sessions sharing a vault (`AdversarialSharedVaultMemberDevicesTests.swift`,
+  suite "shared vaults through the session"): a member's laptop, revoked with a password change, forks the member's
+  registry two generations long and writes into the vault as the member; the owner, who had followed the genuine
+  change forward from where it first anchored, and another member who sees both branches at once, alike read
+  neither contested device (Z12), keep what the laptop wrote while it was the member's and report it; comparing
+  safety numbers again settles nothing, and the saved anchor stays where it was (Z11). And as a function over
+  `RegistryFixture`: the member's own change followed when it is all there is; a forged branch two generations long
+  ignored and reported once the genuine one is anchored at first sight; both arriving together followed by neither,
+  with only the uncontested device counting; the forged branch alone followed and then held to, the genuine one
+  reported; a disagreement settled by an earlier version not reported again and a new entry reported; a second
+  genesis entry neither replacing nor removing the anchored one, and two anchoring neither; the saved anchors
+  refused whole on any edit, another vault's ID or another key.
+
+Added by the review of those fixes (`AdversarialAccountReviewTests.swift`, the same suite unless named;
+`06-adversarial-review.md` §Z, Z9 to Z17):
+
+- A header ahead of the anchor (Z9): the revoked device's change, made with the retired password and written into a
+  laptop's file as its own header, is refused when that password is typed, whether or not the laptop had been told
+  of the genuine change; with `ignoringPasswordChange` it opens and follows nothing, a sync moves nothing, and the
+  new password still reaches the genuine change. A password change and an adoption interrupted between commit and
+  pin are completed from the intent (a fork made with the retired password then stays a fork; a pending list does
+  not outlive the adoption that followed it); an intent the file does not bear out is dropped if nothing was
+  committed and is no licence if a planted header is there; the anchor's third form round-trips an intent and reads
+  its second.
+- Another member's registry (Z10, Z12): one refresh follows at most eight of a 20-change chain and the pin carries
+  the rest over three refreshes; a lock while the replay is held off the actor takes effect at once and the replay
+  is dropped ("shared vaults through the session"); a branch followed forward from the base loses its standing when
+  a sibling arrives later beyond the base, the tip being kept; nine competing changes hold every device in question;
+  the saved pins' second format carries the base, the first reads with the base at the tip.
+- The way out of too many pending changes (Z13): seventeen puppets registered with the retired password, each with
+  a two-step chain, neither fill the lock screen's three attempts nor push the genuine change off the list, which
+  holds all eighteen authors, sealed first, sixteen described and the rest on request.
+- Following a change (Z14): from a quick-unlocked session it takes the password the device follows (a wrong or
+  retired one is refused and nothing moves); keys replaced meanwhile end with the new Account Unlock Key resident; a
+  lock while a candidate's key is derived, from a follow or at the lock screen, takes effect at once and adopts
+  nothing.
+- Claims nothing held before (Z17): the flag tries no candidate; a sync keeps one header per author, its newest; a
+  follow fetches a header no sync kept; sync's merge-and-publish gate asks the anchor when the file and the
+  transport have lost the change (the test fails with that term removed); in "unlock and quick unlock", each quick
+  unlock that opens the keyset takes its attempt back, and a released key that opens nothing destroys the
+  enrolment.
+- Tracked, as known issues: member pins deleted from the file are anchored again from the transport, base and all
+  (Z15); a header name created first by someone else keeps the genuine header off the store (Z16).
+
 Registry rules themselves, including the back-dating case the suite found, are in `WatchwordCryptoTests`
 "Device registry" (among them `puppets`: entries relying on a registration that can never count — forged, by the
 revoked device, sealed as void by a checkpoint, two puppets deep, or an enrolment under the revoked device's own
@@ -938,8 +1604,93 @@ other does, and reported as not required on Linux, where they cannot compile.
   writing the sync folder: a stream directory replaced by a link is neither listed, read nor written through under
   coordination; planted placeholders outside the layout are not objects, and one beside a present object changes
   nothing; an oversized object is refused. "Coordinated iCloud Drive transport" adds a read held past its deadline by
-  another writer, given up as that object's failure alone. Not covered: `NSFileVersion` conflicts and downloads by
-  iCloud itself, which need a ubiquity container.
+  another writer, given up as that object's failure alone. Renamed copies (`N 2.wwe`) planted beside an object are
+  handed over as bytes, with a link, a directory and an oversized file among them counted and never read or deleted
+  through; "Coordinated iCloud Drive transport" runs the copies contract and an engine reading the genuine object
+  from behind a junk file under coordination. Not covered: `NSFileVersion` conflict versions and downloads by iCloud
+  itself, which need a ubiquity container.
+- **Conflict copies** (architecture §7.5; portable, Linux). *Transports* ("Conflict copies: transports"):
+  `SyncTransportContract.singleCopies` on every transport and `heldCopies` on the in-memory, directory and simulated
+  ones; only an exact `<name> <n>` (2 to 64) is a copy; a copy whose object is gone is still listed; a link or
+  directory under a copy's name is counted and never followed; a copy known only by its iCloud placeholder
+  (`.N 2.wwe.icloud`) is counted once, with or without its downloaded file, and read as unread, and an inexact one is
+  nothing (R18, `duplicatePlaceholder`, `duplicatePlaceholderAlone`, `inexactDuplicatePlaceholders`). *State* ("… what is staged and remembered"): staged
+  copies round-trip and a hostile row is no object; "Collecting a device's own objects": a deletion refused for one
+  object is reported and tried again, never the sync's end (SR23, `refusedDeletionIsOneObjectsFailure`); the state's new fields (`unreadCopies` and their turns among them, R17, R19) survive encoding and an older row.
+  *Engine* ("… the engine"): junk beside an object; the object behind a junk current file; no copy verifying refused
+  alone; two verifying copies merged, in either order to the same items; a late copy; the forked author's hand-on;
+  acknowledgements by minimum; snapshot copies; both bounds; a judge refusing a fork, at download and from an edited
+  staging row; a copy that verifies and does not open stopping the position whole. *Adversarial*: "sync log"
+  (`AdversarialSyncConflictCopyTests`: planted junk of five kinds, the genuine object hidden, two verifying forks
+  reaching devices past the position, a flood, a shared vault's fork, a copy planted in the staging area, a copy
+  that cannot be read yet, read once it can be and never collected before, R11, `unreadableCopyReadLater`; junk under
+  names a device waits on, which no longer keeps a late copy from being read, R13,
+  `junkUnderWantedNamesStarvesNothing`; copies that never become readable under many merged names, which no longer
+  keep a late fork from being read and are still looked at, R17, `unreadableCopiesStarveNothing`; more such names than
+  the bound covers, which take turns so a fork under the last of them is read, and whose changing counts bring none
+  forward, R19, `unreadNamesTakeTurns`) and "sync
+  with real keys" (planted copies while locked and after unlock; a really signed fork merged by every device and
+  handed on). `LongRunningSyncSimulationTests` plants junk copies and forked copies of a device's newest segment and
+  still converges, loses nothing, and leaves no hand-on owed.
+- **Starting again after a reset** (architecture §7.10; portable, Linux). *Engine* ("Store reset: the engine",
+  over the fakes): no sync, replay included, uploads again what the store held; a store never set up is not a
+  reset; one device hands on everything and a new device reads all of it, with sequence numbers and state kept;
+  asked twice it hands on once; a device whose stream another device's snapshot covered still notices its own
+  newest segment gone (SR19, `coveredStreamStillNoticesAReset`); a device holding only a revoked device's work,
+  handed on in a snapshot the store lost, is asked and writes nothing unasked (SR27, `revokedWorkIsAskedAbout`); an offline device that holds more is asked, and its new edits wait behind a gap
+  until it answers; two devices in either order, and at once without seeing each other's snapshot, converge; a
+  device whose own stream another device's upload stands for is still asked about a third stream; a second reset is
+  noticed by the missing snapshot, and no snapshot name is used twice; a pending deletion and a merged erasure
+  travel; the quarantine and the stash stay (a stash narrows the snapshot's coverage to the uploader's own stream);
+  a vault that keeps its whole log refuses; an honest store with snapshots, collection and a restored state file
+  never raises the question; a snapshot a device owes is never named like one it wrote before (R15,
+  `owedSnapshotNamesAreNotReused`); a replay is postponed offline and rebuilds from the snapshot afterwards; the state's
+  new fields survive encoding and an older row. *Session* ("Store reset: the session", real sessions, both kinds of
+  reset — the transport saying so, and a store merely emptied): nothing uploaded unasked, locked or not, new edits
+  included; a store that never held the account publishes; after the call a brand-new device enrols and reads every
+  vault, a deleted vault and a trashed item as such; a stale plan, a locked vault and a revoked device are refused;
+  two devices in either order converge; an offline device returning is asked and merges; a deletion made before the
+  reset is not undone; a shared vault is refused by name and does not keep the question open. *Screens* ("Screen
+  models: after the sync storage was reset"): the notice and headline, the question's wording (counts, deleted and
+  shared vaults), Not Now, Upload Again, a stale question renewed, a lock dropping the question, the refusals, and a
+  success notice that asks only after the vaults the upload was for, so a shared vault waiting for its key does not
+  hold it back (SR28, `successAsksOnlyTheUploadedVaults`).
+  *Automatic syncing* ("Automatic sync outcome"): at a reset store, of either kind, every sync the policy starts is
+  a failure it backs off from, and no number of them uploads anything or starts the store again.
+  *Adversarial*: "sync log" (`AdversarialSyncStoreResetTests`: an emptied store with a replay planted in the state
+  file; a device's own objects deleted one by one; resets repeated after every upload; a store rolled back to an
+  older copy; a whole-log vault with a judge asked to hand on), "sync with real keys"
+  (`AdversarialVaultStoreResetTests`: nothing put back unasked under either kind of reset; a reset only claimed;
+  repeated resets reusing no name; an old copy of the store put back; the quarantine and an unpublished deletion; a
+  shared vault never uploaded from one member's device; a lock while the store is started again, and an upload
+  stopped part-way, which asks again until the device has handed on: SR21, `lockWhileStartingAgain`,
+  `uploadStoppedPartWay`; and a restore onto other hardware, whose device move keeps what the installation knew, V49:
+  into a store the person emptied it asks and publishes nothing, then hands on everything on the yes,
+  `restoredIntoEmptiedStoreAsks`; a never-synced installation restored publishes, `neverSyncedRestorePublishes`; an
+  upload stopped part-way before the backup still asks after the move, `interruptedUploadAsksAfterMove`; and the upload
+  is refused while the move is incomplete, V51, `reuploadRefusedDuringMove`, and while this device's own key cannot be
+  read or is absent, V70, `reuploadRefusedWhileTheKeyIsUnreadable` (which also reports the key beside the question,
+  `ownDeviceKeyWait`) and `reuploadRefusedWithoutAKey`, or while a registration is under way, V72,
+  `reuploadRefusedWhileRegistering`; once the moved installation has handed
+  on and that snapshot was collected, a later reset another device answers ends here without asking, V52,
+  `movedThenHandedOnAsksOnlyOnce`) and "account enrolment and device registry"
+  (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a
+  revoked device cannot answer and stays revoked; a password change survives). The signed state's layout where a
+  restore's entries and the reset's fields meet is pinned byte for byte, failing for a layout that kept the pre-merge
+  form verifying ("Sync state authentication", `restoredAndResetFieldsApart`, V55). `LongRunningSyncSimulationTests`
+  resets the store mid-run and still converges. Mac only, drafted and not compiled: "CloudKit transport" (the zone
+  recreated by `startStoreAgain` alone, left alone when it exists and found by a zone fetch and a one-record
+  `BEGINSWITH` query, never `TRUEPREDICATE` (SR20), deleted first after a key reset that only the records answer, the
+  zone's metadata still fetching as the fake now models it (SR26), under each of three readings of how a query reports
+  the reset, for every query, only one asking for encrypted fields, or per record (`ResetReporting`, SR29), saved even
+  when that deletion finds no zone (SR20), nothing decided on a probe query that fails after the zone fetched or on an
+  empty zone (SR29), nothing created offline) and its adversarial suite (a faked reset repeated; no deletion of a zone
+  that answers; a zone another device started again between the two looks, and a reset flag the second look
+  contradicts, are not deleted, SR30; a reset reported per record stops a listing, SR29). "Pending downloads"
+  (`PendingDownloadsTests`, portable, runs on Linux): a version download is asked for once while it waits and at most
+  the capacity at once (R20). Not covered: a
+  vault too large for one snapshot (`ReuploadRefusal.tooLarge` needs 64 MiB of records), CloudKit itself, and the
+  SwiftUI alert.
 - **"Adversarial: Apple adapters: CloudKit transport"** (`AdversarialCloudKitTransportTests`, Mac, over the fake
   database). A1 as the CloudKit store: records whose `name` disagrees with their ID, or whose names are outside the
   layout, are not listed and are refused when fetched; a payload in a plain field is never read, two payloads are
@@ -953,6 +1704,20 @@ other does, and reported as not required on Linux, where they cannot compile.
 - **Not adversarial, Linux:** "Automatic sync outcome" (a vault throttled is a throttled sync, and one sync asks the
   transport once; the longest wait wins; sharing failures count), "Sync transport failures" (`transportStopped`), "Sync
   store marker".
+
+### 6.11 Manual cases (real devices)
+
+What no runner can check is written down as cases a person runs, in `docs/manual-tests/` (one file per area, each
+case a heading and numbered steps whose **Expected** lines are the checks): Face ID and Touch ID with the Secure
+Enclave, what the Keychain keeps on one device and a restored backup does not carry, exported files and the
+`.watchwordbackup` type as the Files app and Finder treat them, the Emergency Kit on paper, what the app
+switcher shows, the camera scanning a vault sharing code on iPhone and iPad (`camera-scanning.md`: the permission,
+the live camera only, a code that is not Watchword's, the stand-in absent from a release build), and a vault sharing
+code session between two people (`vault-sharing-code.md`: what each reads and types, a wrong code, the ten-minute
+limit, a lock mid-session, VoiceOver reading the digits; it needs the sharing board's production adapter, which does
+not exist yet, so until then it runs as far as the cases say). A feature that adds something only a person can check adds its cases in the same pull request;
+they are run before a release and after any change to the adapters or screens they name. They are not a gate: no
+CI job reads them.
 
 ## 7. CI implementation
 
@@ -977,7 +1742,16 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   not be able to smuggle through; the BMP reader), the `app:screenshots` task with stand-ins for `mise`, `xcrun`
   and `sips` (what it writes, announces and summarises when a capture fails), and the two inline scripts of
   `screenshots.yml`, read out of the file and run against a stand-in `gh` and `curl` (who can start a capture, what
-  the comment job will and will not post or link, and which comment it will overwrite) [`lint`, `test:scripts`].
+  the comment job will and will not post or link, and which comment it will overwrite). Since the audit of
+  2026-11-17 (`06-adversarial-review.md` §Z) the script tests also hold the supply-chain gates themselves, each run
+  as it is in a scratch directory: `audit:actions` over every spelling of `uses:` a grep did not read; the
+  adversarial-suite check over logs in which a suite is missing, skipped, or named only inside another's name;
+  `audit:mise-pins`; the dependency tripwire with a stand-in `swift` (the `Apps/project.yml` allowlist over each
+  planted bypass, and a manifest that reads its environment or leaves Swift 6 mode); the app tasks with a stand-in
+  `xcodebuild` that checks packages out with real git (no build unless the checkouts are the pinned commits,
+  unchanged; every call given the source-packages directory; a Release product holding a Debug-only marker); and `cloud-setup.sh` with stand-ins for `curl` and `gpg`
+  (a tarball that does not verify installs nothing and tries nothing else). The job then runs the two audits that
+  need no build [`lint`, `test:scripts`, `audit:actions`, `audit:mise-pins`].
 - `app-tests`: `xcodebuild test` for the macOS app and the iOS simulator on `xcode-27`: one leg for macOS, and the
   iOS UI tests split over four legs that run side by side, because one simulator running them all took longer than a
   job may: the tour; `ImportExportTests`; `VaultSharingTests` and `DeviceRevocationTests`; and the rest (the other
@@ -993,13 +1767,23 @@ run, and its strict build skips with a warning on a compiler older than Swift 6.
   missing `Apps/project.yml` fails `app:generate` [`app:test macos`, `app:test ios`]. The macOS scheme includes the app-hosted
   `WatchwordKeychainTests` bundle, unentitled, so it compiles and its round trip skips; the signed
   run is local only (`app:test-keychain`, §6.2), because CI has no provisioning profile.
+- `release-build`: both apps in the Release configuration, which no other job compiles, one leg each for macOS and
+  the iOS simulator. The task fails on a build error and then if the app bundle or its embedded AutoFill extension
+  contains the text of a Debug-only UI-test facility (`--uitest`, `WATCHWORD_UITEST_PASSWORD`, the Settings section
+  and the "Lock now" button): the evidence that the `--uitest` switch of §5 does not ship. Each marker must still be
+  in the sources, and a script test holds that each is used only inside `#if DEBUG`. The same search must find one
+  literal the app always compiles in (the positive control), or it has shown nothing. Not yet run on a Mac
+  [`app:release macos`, `app:release ios`].
 - `security-nightly.yml`: scheduled fuzzing, long randomised sync simulations and the action
-  pinning audit [`fuzz`, `test:long`, `audit:actions`].
+  pinning audit again [`fuzz`, `test:long`, `audit:actions`].
 
 - `required` (`Required checks`): needs every job above and fails unless each succeeded. Branch
   protection requires this one check (`08-repository-hardening.md` §5), so every job above blocks a
-  merge, including every app-test leg (a matrix job's result is all its legs'), and a runner bump or a regrouping
-  that renames a matrix leg needs no protection change.
+  merge, including every package-test, app-test and release-build leg, and a runner bump or a regrouping
+  that renames a matrix leg needs no protection change. Legs are judged one by one from the API listing of the run
+  attempt's jobs, not from `needs.*.result`, which read `success` for a matrix job with a leg cancelled before it ran
+  (`06-adversarial-review.md` Z119); a leg not finished, not listed or not expected fails it. Its inline script is
+  tested by `test:scripts` [`Tests/ScriptTests/test_required_checks.py`].
 
 - `screenshots.yml`: not a gate. On the `screenshots` label (and each push while a pull request carries it), a
   same-repository head commit whose message has a line that is exactly `[screenshots]`, or a dispatch, it runs the

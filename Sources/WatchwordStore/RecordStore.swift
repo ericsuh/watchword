@@ -1,6 +1,15 @@
 import Foundation
 import WatchwordEnvelope
 
+/// An error of the local storage itself (a database that cannot be read or written, a row that cannot be what was
+/// written), as opposed to one about what a record says. The sync engine stops a sync on one (`SyncEngine.isFatal`)
+/// rather than refusing the object it was working on, which would stop that object's stream for a failure of the
+/// disk. `RecordStoreError` is one, and so are the SQLite connection's failures, which the SQLite stores throw as
+/// they come (review finding Z39).
+public protocol StorageFailure: Error {}
+
+extension RecordStoreError: StorageFailure {}
+
 public enum RecordStoreError: Error, Equatable, Sendable {
     /// `AccountWrite.create` on a store that already holds an account. Creating an account must never overwrite the
     /// wrapped keyset of an existing one: that would destroy the vault.
@@ -33,6 +42,20 @@ public enum AccountWrite: Sendable, Hashable {
     case update(AccountRecord, expectedKeysetVersion: UInt64)
 }
 
+/// How a commit changes the account record's `migration` (review of round 11, Z186). The account row is written whole, so
+/// a writer that read it before an `await` and writes it back for another reason (a password change) would otherwise
+/// write the migration it read: bring back a move that was cleared meanwhile, which then ran again, or clear one recorded
+/// meanwhile. By default the stored value is kept, whatever the record passed says; only the two writes that mean to
+/// change it say so.
+public enum MigrationWrite: Sendable, Hashable {
+    /// The migration the store holds stays; for `AccountWrite.create`, where there is none, the record's own is written.
+    case keep
+    /// Written: the commit that names a new device ID records the move from the old one (Z181).
+    case set(DeviceMigration)
+    /// Removed: the move is complete, or was not this session's.
+    case clear
+}
+
 /// What a writer read, and so what the store must still hold for its change to apply.
 public enum RecordExpectation: Sendable, Hashable {
     /// No record under the key.
@@ -44,6 +67,9 @@ public enum RecordExpectation: Sendable, Hashable {
 /// One atomic change to the store.
 public struct StoreChange: Sendable, Hashable {
     public var account: AccountWrite?
+    /// What becomes of the account record's `migration`: kept unless the change says otherwise (`MigrationWrite`).
+    /// Anything but `.keep` needs an account in the store or written by this change.
+    public var migration: MigrationWrite
     public var upserts: [StoredRecord]
     public var deletions: [RecordKey]
     /// Deletions that apply only if the record is still at the given version.
@@ -53,16 +79,23 @@ public struct StoreChange: Sendable, Hashable {
     /// between (the person saving the same item while sync merges it) is not silently overwritten by a version that
     /// happens to be higher (docs/02-architecture.md §7.1).
     public var expectations: [RecordKey: RecordExpectation]
+    /// The device ID the stored account record must still name for the change to apply (`accountVersionConflict`
+    /// otherwise): a registration that read the record before an `await` names the ID it replaces, so that one finished
+    /// meanwhile under another new ID is not replaced in its turn (review of round 13, L-b).
+    public var expectedDeviceID: UUID?
 
     public init(
-        account: AccountWrite? = nil, upserts: [StoredRecord] = [], deletions: [RecordKey] = [],
-        conditionalDeletions: [RecordKey: UInt64] = [:], expectations: [RecordKey: RecordExpectation] = [:]
+        account: AccountWrite? = nil, migration: MigrationWrite = .keep, upserts: [StoredRecord] = [],
+        deletions: [RecordKey] = [], conditionalDeletions: [RecordKey: UInt64] = [:],
+        expectations: [RecordKey: RecordExpectation] = [:], expectedDeviceID: UUID? = nil
     ) {
         self.account = account
+        self.migration = migration
         self.upserts = upserts
         self.deletions = deletions
         self.conditionalDeletions = conditionalDeletions
         self.expectations = expectations
+        self.expectedDeviceID = expectedDeviceID
     }
 
     /// Every key this change deletes.
@@ -100,7 +133,10 @@ extension StoreChange {
                 throw RecordStoreError.accountVersionConflict
             }
         case nil:
-            break
+            if migration != .keep, currentAccount == nil { throw RecordStoreError.accountVersionConflict }
+        }
+        if let expectedDeviceID, currentAccount?.deviceID != expectedDeviceID {
+            throw RecordStoreError.accountVersionConflict
         }
         for (key, expected) in conditionalDeletions where try existingVersion(key) != expected {
             throw RecordStoreError.versionConflict(recordID: key.recordID)
@@ -124,10 +160,26 @@ extension StoreChange {
         }
     }
 
-    var newAccount: AccountRecord? {
+    /// The account record to store once `validate` has passed, `currentAccount` being what the store holds: the one
+    /// this change writes, or the current one where only its migration changes, with the migration `migration` says;
+    /// `nil` where the account row is left as it is.
+    func accountToStore(currentAccount: AccountRecord?) -> AccountRecord? {
+        var record: AccountRecord
         switch account {
-        case .create(let record), .update(let record, _): return record
-        case nil: return nil
+        case .create(let written): record = written
+        case .update(let written, _):
+            record = written
+            record.migration = currentAccount?.migration
+        case nil:
+            guard migration != .keep, let currentAccount else { return nil }
+            record = currentAccount
         }
+        switch migration {
+        case .keep: break
+        case .set(let written): record.migration = written
+        case .clear: record.migration = nil
+        }
+        return record
     }
+
 }

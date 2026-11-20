@@ -1,7 +1,9 @@
 import Foundation
+import WatchwordEnvelope
 import WatchwordKit
 import WatchwordModel
 import WatchwordPresentation
+import WatchwordStore
 import WatchwordSync
 import WatchwordTestSupport
 
@@ -51,4 +53,44 @@ struct TwoDevices {
         try await first.session.sync()
         return TwoDevices(transport: transport, first: first, second: second)
     }
+}
+
+/// Counts the locks a `LockSignal` reported to it.
+@MainActor
+final class LockProbe: LockSensitive {
+    private(set) var drops = 0
+
+    func dropOnLock() { drops += 1 }
+}
+
+/// A record store that counts its reads of a vault's records and, once armed, locks a session at the `n`-th read from
+/// then and waits there until `until` holds (the lock's signal has reached the screen models), so that a lock lands
+/// at a chosen point of a model's work. Otherwise an `InMemoryRecordStore`.
+actor LockingStore: RecordStore {
+    private let base = InMemoryRecordStore()
+    private(set) var reads = 0
+    private var armed: (read: Int, session: VaultSession, until: @Sendable () async -> Bool)?
+
+    func resetCount() { reads = 0 }
+
+    func arm(atRead read: Int, _ session: VaultSession, until: @escaping @Sendable () async -> Bool) {
+        reads = 0
+        armed = (read, session, until)
+    }
+
+    func loadAccount() async throws -> AccountRecord? { try await base.loadAccount() }
+    func record(_ key: RecordKey) async throws -> StoredRecord? { try await base.record(key) }
+
+    func records(in vaultID: UUID, kind: EnvelopeKind) async throws -> [StoredRecord] {
+        reads += 1
+        if let armed, armed.read == reads {
+            self.armed = nil
+            await armed.session.lock()
+            for _ in 0..<10_000 where !(await armed.until()) { await Task.yield() }
+        }
+        return try await base.records(in: vaultID, kind: kind)
+    }
+
+    func commit(_ change: StoreChange) async throws { try await base.commit(change) }
+    func eraseAll() async throws { await base.eraseAll() }
 }

@@ -73,19 +73,24 @@ public struct TestVault: Sendable {
 
     /// Another device of this vault's account, enrolled the way a real one is (PRD F5.2): this device publishes the
     /// account header, the device registry and the vault directory with a sync, and the new one joins from the
-    /// transport alone, with the account password and the Secret Key off the Emergency Kit. `deviceID` names the new
-    /// device, so a test can address its stream. Returned locked, as a device is until someone unlocks it.
+    /// transport alone, with the account password and the Secret Key off the Emergency Kit. Its ID commits to the
+    /// account under its key, as every production device's does (`DeviceIdentifier`, Z157); `deviceID` names the new
+    /// device instead, so a test can address its stream, and such a device counts for nothing in a shared vault.
+    /// `syncState` is its sync state store (a test's hook over one); a fresh in-memory one by default.
+    /// Returned locked, as a device is until someone unlocks it.
     public func enrolledDevice(
-        deviceID: UUID, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
-        password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil
+        deviceID: UUID? = nil, over transport: any SyncTransport, clock: FakeClock? = nil, seed: UInt64? = nil,
+        password: String = TestVault.password, name: String = "", hygiene: HygieneSettings? = nil,
+        syncState: (any SyncStateStore)? = nil
     ) async throws -> TestVault {
         try await session.sync()
-        let kit = try await session.emergencyKit()
+        let kit = try await session.emergencyKit(password: password)
         // Each device its own randomness, and so its own signing key: the registry refuses one key for two devices.
         let ownSeed =
-            seed ?? deviceID.uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
+            seed ?? (deviceID ?? UUID()).uuidString.utf8.reduce(UInt64(13)) { ($0 &* 1_099_511_628_211) ^ UInt64($1) }
         let device = TestVault(
-            clock: clock ?? self.clock, sync: SyncSettings(state: InMemorySyncStateStore(), transport: transport),
+            clock: clock ?? self.clock,
+            sync: SyncSettings(state: syncState ?? InMemorySyncStateStore(), transport: transport),
             seed: ownSeed, deviceName: name, hygiene: hygiene)
         try await device.session.enrol(
             password: password, secretKey: kit.secretKey, accountID: kit.accountID, assigningDeviceID: deviceID)
@@ -99,6 +104,31 @@ public struct TestVault: Sendable {
         TestVault(
             store: store, keychain: keychain, biometrics: biometrics, clock: clock, appVersion: appVersion,
             sync: sync, seed: seed, deviceKeys: deviceKeys)
+    }
+
+    /// A copy of this device's record store and sync state as they are now, for a later restore onto other hardware
+    /// (review of round 13): what a backup of the App Group container holds, and nothing of the Keychain. `nil` unless
+    /// both are the in-memory ones.
+    public func backup() async -> (store: InMemoryRecordStore, state: InMemorySyncStateStore)? {
+        guard let records = store as? InMemoryRecordStore, let state = sync?.state as? InMemorySyncStateStore,
+            let account = await records.loadAccount()
+        else { return nil }
+        let rows = await records.allRecords
+        let store = InMemoryRecordStore()
+        await store.tamper(account: account)
+        for row in rows { await store.tamper(row) }
+        let copy = InMemorySyncStateStore()
+        let vaults = Set(rows.map(\.vaultID)).union([account.accountID, account.personalVaultID])
+        for vaultID in vaults {
+            if let saved = await state.loadState(vaultID: vaultID) { await copy.tamper(saved) }
+            for deletion in await state.pendingDeletions(vaultID: vaultID).values {
+                await copy.addPendingDeletion(deletion)
+            }
+            for entry in await state.quarantined(vaultID: vaultID) { await copy.quarantine(entry, vaultID: vaultID) }
+            for object in await state.staged(vaultID: vaultID) { await copy.stage(object) }
+            if let stash = await state.stash(vaultID: vaultID) { await copy.tamperStash(stash, vaultID: vaultID) }
+        }
+        return (store, copy)
     }
 
     /// Loses this device's signing key, as a store restored onto other hardware does (Keychain items never leave a

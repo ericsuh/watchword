@@ -4,6 +4,7 @@ import WatchwordCrypto
 import WatchwordEnvelope
 import WatchwordMatching
 import WatchwordModel
+import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
 
@@ -139,14 +140,46 @@ public actor VaultSession: SharesExecutor {
     var keys: UnlockedKeys?
     var account: AccountRecord?
     var lockEpoch: UInt64 = 0
+    /// The lock epoch in which the installed keys were opened with the account password (creation, enrolment, a
+    /// password unlock); `nil` after a quick unlock. Only `unconfirmedEmergencyKit` reads it (Z86).
+    var passwordEnteredEpoch: UInt64?
     private var lastActivity: Date?
     private var backgroundedAt: Date?
     /// Lamport high-water mark per vault, so one record with an absurd version cannot freeze writes elsewhere.
     var highestVersionSeen: [UUID: UInt64] = [:]
+    /// Per vault, the names the latest download in this session that listed the vault found it does not merge past
+    /// for their copies (`SyncReport.copyStops`): where a restore's carry, and the hold and the records that answer
+    /// to it, stop counting the earlier ID's stream as published (`mergeReach(in:of:)`, a merge review of round 17,
+    /// V58). Remembered only for that: a download makes them again, and a name not remembered (none downloaded in
+    /// this session yet) stops nothing, as a position not downloaded yet does not. Names of objects, no secret.
+    var downloadCopyStops: [UUID: Set<SyncObjectLocation>] = [:]
+    /// Per vault, the names that same download left unfetched for want of its bound of copies (`SyncReport.copyWaits`,
+    /// a merge review of the hygiene branch, V62): a stop for the hold and the records (which then hold or record
+    /// more), and, where one would bound a restore's carry, a reason for the carry to wait for the next sync.
+    var downloadCopyWaits: [UUID: Set<SyncObjectLocation>] = [:]
     /// Whoever asked to be told of every lock (`lockEvents()`), by a number of their own.
     var lockListeners: [Int: AsyncStream<Void>.Continuation] = [:]
     var nextLockListener = 0
     var syncInFlight = false
+    /// A registration of this installation is between its first await and its end (`registerThisDevice`): another,
+    /// begun by an unlock or a sync meanwhile, would make a second device key over the first and register an ID whose
+    /// key the first's failure then deleted (review of round 12, L1). One at a time.
+    var registrationInFlight = false
+    /// A restore's move of its earlier device ID's sync state is between its first await and its end
+    /// (`completeDeviceMigration`): another, begun by an unlock, a sync or `configureSharing` meanwhile from an account
+    /// read before the first cleared its record, would start each vault's state over after the engine had published
+    /// there (review of round 19, Z237). One at a time.
+    var migrationInFlight = false
+    /// A caller of `completeDeviceMigration` was turned away while a move was in flight: the move under way is made
+    /// once more when it ends (review of round 20, Z241), from the account the store holds then, never the caller's,
+    /// which may be older (review of round 21, Z247), so that the caller's attempt is not lost.
+    var migrationAskedAgain = false
+    /// The shared vaults whose take-out (`takeOutWhatNoLongerCounts`) began for a judged basis it had still to act on
+    /// and did not finish (it threw: a sync state that could not be read, the store, the quarantine). Until one ends
+    /// normally, no replay settles the vault's basis (`sharedEngineDidRun`): settled, every later take-out returned at
+    /// its first guard, and what it should have taken out, a demoted member's late write merged before the demotion was
+    /// known, stayed current here for good (review of round 23, Z262).
+    var takeOutsOwed: Set<UUID> = []
     /// The device registry as last evaluated from the local store; `nil` whenever it may have changed.
     var registryView: RegistryView?
     /// Registry entries fetched from the transport and found worth nothing (they can never count, or wait on a
@@ -160,6 +193,20 @@ public actor VaultSession: SharesExecutor {
     package nonisolated let executorOwner = SerialExecutorOwner()
     /// Shared vaults: settings, ledgers, plans, proposals and stream indexes (VaultSession+Sharing.swift).
     var sharing = SharingRuntime()
+    /// The vault sharing code session running, if any (ADR 0010; `VaultSession+SharingCode.swift`). In memory only,
+    /// and dropped by `lock()`.
+    var sharingCodeRun: SharingCodeRun?
+    var sharingCodeGeneration: UInt64 = 0
+    /// Numbers this device answered as a joiner, with when, for `SharingCodeLimits.answeredMemory`: not dropped by
+    /// `lock()` or by ending a session, so that a board that serves a fresh commit under a number already answered
+    /// cannot turn one starter session into several tries (docs/06-adversarial-review.md, V23). Public values only.
+    var answeredSharingNumbers: [String: Date] = [:]
+    /// Invitations `inviteThroughSharingCode` issued (the invitee added, the grant published) and has not delivered,
+    /// by vault and invitee, outside any one run (review finding V35): a run replaced or dropped after `invite` returned
+    /// (Start Over, another window, a lock) must not lose the invitation, or the invitee is added with no way to join
+    /// and a retry is refused (`memberAlreadyPresent`). An invitation names only the vault and its owner: nothing
+    /// secret, and kept in memory only.
+    var issuedSharingInvitations: [IssuedInvitationKey: Invitation] = [:]
     /// An import read but not yet committed: drafts with every secret in the file, dropped by `lock()` (§14.1).
     var pendingImport: PendingImport?
     /// Bumped by every preview and `discardImport()`, so a preview still being read when either runs is dropped.
@@ -167,6 +214,12 @@ public actor VaultSession: SharesExecutor {
     /// Tests only: called inside every step `awayFromSession` runs, off the actor, before the step itself, so a test
     /// can hold one there and show that `lock()` does not wait for it. `nil` in production.
     var awayWorkHook: (@Sendable (AwayWork) -> Void)?
+    /// Tests only: this session stands in for an adversary's modified client (A4, A5), which would not refuse to
+    /// write, accept or publish in a shared vault as a device whose ID does not commit to its account (review finding
+    /// Z162). The refusals are client rules; what other devices do with such a device's objects is what the
+    /// adversarial suites check. `false` in production, and settable only from this package
+    /// (`playModifiedClient()`).
+    var playsModifiedClient = false
 
     /// Production passes `SystemRandomNumberGenerator()`; only tests inject anything else (CLAUDE.md).
     public init(
@@ -201,7 +254,13 @@ public actor VaultSession: SharesExecutor {
     /// The configured sync state store, behind the wrapper that signs pending deletions as they are recorded and
     /// ignores any that does not verify (`AuthenticatedSyncState`).
     var syncState: (any SyncStateStore)? {
-        syncSettings.map { AuthenticatedSyncState(base: $0.state, session: self) }
+        syncState(within: nil)
+    }
+
+    /// `syncState`, with the states and stashes it saves bound to what one sync began with (`SyncStateWrites`, review
+    /// of round 22, Z253): signed only while that sync is still entitled to write them.
+    func syncState(within writes: SyncStateWrites?) -> (any SyncStateStore)? {
+        syncSettings.map { AuthenticatedSyncState(base: $0.state, session: self, writes: writes) }
     }
 
     // MARK: - State
@@ -260,6 +319,8 @@ public actor VaultSession: SharesExecutor {
         let epoch = lockEpoch
 
         let accountID = UUID.random(using: &random)
+        // This device's key first, so that its ID can commit to the account under it (review finding Z157).
+        let device = try await deviceKeys.createDevice(accountID: accountID)
         let secretKey = SecretKey.generate(using: &random)
         defer { secretKey.zeroise() }
         let kdf = try kdfParameters()
@@ -275,7 +336,7 @@ public actor VaultSession: SharesExecutor {
 
         let record = AccountRecord(
             accountID: accountID,
-            deviceID: UUID.random(using: &random),
+            deviceID: device.id,
             personalVaultID: personalVaultID,
             personalVaultKeyID: vaultKey.key.keyID,
             kdf: kdf,
@@ -319,8 +380,11 @@ public actor VaultSession: SharesExecutor {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
         }
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: true)
         try? await refreshSigningKey(account: record, keys: newKeys)
+        // Which vaults are shared, read before anything picks a key for one (VaultSession+SharedMarker.swift). Last:
+        // nothing after it reads `newKeys`, which a lock during the read would have zeroised.
+        await loadSharedMarkersIfNeeded(force: true)
         return kit
     }
 
@@ -332,14 +396,53 @@ public actor VaultSession: SharesExecutor {
         let expected = record.keysetVersion
         record.emergencyKitConfirmedAt = await clock.now()
         try await store.commit(StoreChange(account: .update(record, expectedKeysetVersion: expected)))
-        account = record
+        account = await keepingStoredMigration(record)
     }
 
-    /// The Emergency Kit again, for printing a replacement. Requires the vault to be unlocked.
-    public func emergencyKit() async throws -> EmergencyKit {
+    /// `record`, just committed with its migration kept (`MigrationWrite.keep`), as the store now holds it: with the
+    /// migration the store holds now, read again after the commit, never the one `record` was read with before its
+    /// awaits, which a move completed meanwhile cleared (review of round 11, Z186). Where the store cannot be read, the
+    /// migration this session caches: the two writes that change it cache it as they commit (`registerThisDevice`,
+    /// `completeDeviceMigration`), so that copy is the stored one but for a write outside this session (review of
+    /// round 12).
+    func keepingStoredMigration(_ record: AccountRecord) async -> AccountRecord {
+        var record = record
+        if let stored = try? await store.loadAccount(), stored.accountID == record.accountID {
+            record.migration = stored.migration
+        } else if let cached = account, cached.accountID == record.accountID {
+            record.migration = cached.migration
+        }
+        return record
+    }
+
+    /// The Emergency Kit again, for printing a replacement (PRD F5.1). The account password is asked for in the same
+    /// call and re-derived under the stored header (`verifyAccountPassword`), as for an export: the Secret Key is the
+    /// one secret that still matters once the device is back in its owner's hands, and an unlocked session (quick
+    /// unlock included) must not hand it to whoever holds the device (Z86). Throws `CryptoError.authenticationFailed`
+    /// for a wrong password.
+    public func emergencyKit(password: String) async throws -> EmergencyKit {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        let record = try await verifyAccountPassword(password, since: epoch)
+        return try await currentEmergencyKit(record, since: epoch)
+    }
+
+    /// The kit the person has not yet confirmed saving, shown again after an unlock without asking for the password
+    /// twice (F5.1: the kit until it is confirmed). Only while the account records no confirmation *and* this
+    /// session's keys were opened with the account password (account creation, enrolment or a password unlock);
+    /// otherwise, quick unlock included, `accountPasswordRequired`, and `emergencyKit(password:)` is the way (Z86).
+    /// The confirmation flag is a plain column, so a file edited to clear it gains a quick-unlocked holder nothing.
+    public func unconfirmedEmergencyKit() async throws -> EmergencyKit {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        guard record.emergencyKitConfirmedAt == nil, passwordEnteredEpoch == epoch else {
+            throw VaultError.accountPasswordRequired
+        }
+        return try await currentEmergencyKit(record, since: epoch)
+    }
+
+    private func currentEmergencyKit(_ record: AccountRecord, since epoch: UInt64) async throws -> EmergencyKit {
         guard let bytes = try await keychain.read(.secretKey(accountID: record.accountID), prompt: "") else {
             throw VaultError.secretKeyMissing
         }
@@ -408,6 +511,9 @@ public actor VaultSession: SharesExecutor {
             // device already follows means the file was rolled back to a password the person retired.
             do {
                 try await refuseRolledBackHeader(record)
+                // And which vault is the Personal one is what the header seals under this key, not what the row
+                // says (Z5).
+                try await requirePersonalVaultBinding(record, unlockKey: unlockKey)
             } catch {
                 opened.keyset.zeroise()
                 throw error
@@ -426,36 +532,47 @@ public actor VaultSession: SharesExecutor {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
         }
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: true)
         // Best effort: a Keychain hiccup here must not turn a correct password into a failed unlock.
         try? await refreshQuickUnlock(after: now, account: record)
         try? await refreshSigningKey(account: record, keys: newKeys)
         do {
             try await reconcileAccountObjects(account: record, keys: newKeys)
         } catch VaultError.accountHeaderRolledBack {
-            // The one failure that is not best effort: the file holds a header from before a password change this
+            // A failure that is not best effort: the file holds a header from before a password change this
             // device had already followed (A8). The password that opened it is not the account's any more.
             lock()
             throw VaultError.accountHeaderRolledBack
+        } catch VaultError.personalVaultMismatch {
+            // Nor is this one: the row's Personal vault stopped being the one the header seals (Z5).
+            lock()
+            throw VaultError.personalVaultMismatch
         } catch {
             // Sync says why (`deviceRegistryUnavailable`); the person keeps access to their vault.
         }
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
+        // The chain rows a restore's move could not write without sharing configured (Z222).
+        if let account = try? await loadAccount() { await backfillRestoredChains(account: account, since: epoch) }
         try? await purgeExpiredTrash()
     }
 
-    /// Derives the AUK and opens the keyset: under an account header for a password changed on another device, if
-    /// the password opens one (which adopts it), otherwise under the header this device has.
+    /// Derives the AUK and opens the keyset: under the header this device has, and only if the password does not
+    /// open that, under an account header for a password changed on another device (which adopts it).
+    ///
+    /// The order is the point (review finding Z1). This device's own header is the one thing here that an
+    /// adversary did not write, so the password is tried against it first, and no derivation under parameters
+    /// someone else chose runs ahead of it. If it opens while a change made elsewhere is pending, the password is
+    /// the one that was retired: refused (`passwordChangedOnAnotherDevice`), never adopted as a "change" that
+    /// happens to use the same password (a revoked device that knew it can publish exactly that). With
+    /// `ignoringPasswordChange` it unlocks and no candidate is so much as read. Otherwise each device that published
+    /// a pending change gets one attempt, on its newest header; a change that branches off *before* the credentials
+    /// this device follows is not tried from the lock screen at all (`followPasswordChange`).
     private func openAccount(
         password: String, secretKey: SecretKey, account record: AccountRecord, ignoringPasswordChange: Bool
     ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord) {
-        let candidates = await candidateHeaders(record)
-        var attempts = 0
-        for candidate in candidates.pending where attempts < Self.maximumHeaderAttempts {
-            attempts += 1
-            if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
-                return adopted
-            }
-        }
+        let epoch = lockEpoch
         do {
             let unlockKey = try deriveUnlockKey(password: password, secretKey: secretKey, account: record)
             let keyset: Keyset
@@ -465,43 +582,80 @@ public actor VaultSession: SharesExecutor {
                 unlockKey.zeroise()
                 throw error
             }
-            guard candidates.pending.isEmpty || ignoringPasswordChange else {
+            do {
+                // A header from before a change this device already followed is refused as that, whatever else.
+                try await refuseRolledBackHeader(record)
+                if !ignoringPasswordChange, await passwordChangePending(record) {
+                    throw VaultError.passwordChangedOnAnotherDevice
+                }
+            } catch {
                 unlockKey.zeroise()
                 keyset.zeroise()
-                throw VaultError.passwordChangedOnAnotherDevice
+                throw error
             }
             return (unlockKey, keyset, record)
         } catch CryptoError.authenticationFailed {
-            // Not this device's password. One of a branch the person may have chosen elsewhere?
-            for candidate in candidates.forked where attempts < Self.maximumHeaderAttempts {
-                attempts += 1
-                if let adopted = try await adopt(candidate, password: password, secretKey: secretKey, account: record) {
+            // Not this device's password. The person who did not make the change never follows one by accident.
+            guard !ignoringPasswordChange else { throw CryptoError.authenticationFailed }
+            let pending = await candidateHeaders(record).pending
+            for candidate in pending.prefix(Self.maximumHeaderAttempts) {
+                if let adopted = try await adopt(
+                    candidate, password: password, secretKey: secretKey, account: record, since: epoch,
+                    lockError: .lockedDuringUnlock)
+                {
                     return adopted
                 }
             }
+            // More devices have published a change than were tried: the password may open one of the others.
+            if pending.count > Self.maximumHeaderAttempts { throw VaultError.tooManyPasswordChangesPending }
             throw CryptoError.authenticationFailed
         }
     }
 
     /// Tries `password` against a candidate header. If it opens the keyset — the same keyset, for the same personal
     /// vault — the person has confirmed that password change on this device: the header becomes this device's, and
-    /// the registry is followed along its credential entry from now on. Returns `nil` if it does not open.
+    /// the registry is followed along its credential entry from now on. Returns `nil` if it does not open, or if
+    /// the registry does not replay along it.
+    ///
+    /// A change whose own history revokes this device is refused with `passwordChangeRevokesThisDevice` (Z1):
+    /// following it would have this device hold itself revoked and its revoker's entries as final, on the word of
+    /// whoever wrote the branch.
+    ///
+    /// The derivation, under the candidate's parameters (up to the ceiling, its author's choice), runs off the actor
+    /// (`AwayWork.candidateDerivation`, review finding Z14), so `lock()` never waits for it; a lock meanwhile zeroises
+    /// what it derived and throws `lockError`.
     private func adopt(
-        _ candidate: AccountHeaderObject, password: String, secretKey: SecretKey, account record: AccountRecord
+        _ candidate: AccountHeaderObject, password: String, secretKey: SecretKey, account record: AccountRecord,
+        since epoch: UInt64, lockError: VaultError
     ) async throws -> (unlockKey: EncryptionKey, keyset: Keyset, account: AccountRecord)? {
-        guard let view = try? await registry(record),
-            let unlockKey = try? TwoSecretKeyDerivation.accountUnlockKey(
-                password: password, secretKey: secretKey, accountID: record.accountID, parameters: candidate.kdf,
-                salt: candidate.salt, keyID: candidate.unlockKeyID)
-        else { return nil }
-        guard
-            let keyset = try? Keyset.unwrap(
-                candidate.wrappedKeyset, accountID: record.accountID, with: unlockKey,
-                recordVersion: candidate.keysetVersion)
-        else {
-            unlockKey.zeroise()
-            return nil
-        }
+        guard let view = try? await registry(record) else { return nil }
+        guard epoch == lockEpoch else { throw lockError }
+        let accountID = record.accountID
+        let derived = await awayFromSession(
+            .candidateDerivation, unlessLockedSince: epoch,
+            discarding: {
+                $0?.unlockKey.zeroise()
+                $0?.keyset.zeroise()
+            },
+            { () -> (unlockKey: EncryptionKey, keyset: Keyset)? in
+                guard
+                    let unlockKey = try? TwoSecretKeyDerivation.accountUnlockKey(
+                        password: password, secretKey: secretKey, accountID: accountID, parameters: candidate.kdf,
+                        salt: candidate.salt, keyID: candidate.unlockKeyID)
+                else { return nil }
+                guard
+                    let keyset = try? Keyset.unwrap(
+                        candidate.wrappedKeyset, accountID: accountID, with: unlockKey,
+                        recordVersion: candidate.keysetVersion)
+                else {
+                    unlockKey.zeroise()
+                    return nil
+                }
+                return (unlockKey, keyset)
+            })
+        guard let derived else { throw lockError }
+        guard let opened = derived else { return nil }
+        let (unlockKey, keyset) = (opened.unlockKey, opened.keyset)
         let rows = try await store.records(in: record.accountID, kind: .deviceRegistry)
         guard (try? candidate.openBinding(with: unlockKey)) == record.personalVaultID,
             (try? keyset.publicKeyBundle().signingKey) == view.state.accountSigningKey,
@@ -512,6 +666,11 @@ public actor VaultSession: SharesExecutor {
             unlockKey.zeroise()
             keyset.zeroise()
             return nil
+        }
+        guard followed.state.standing(of: record.deviceID) != .revoked else {
+            unlockKey.zeroise()
+            keyset.zeroise()
+            throw VaultError.passwordChangeRevokesThisDevice
         }
         var updated = record
         updated.kdf = candidate.kdf
@@ -524,22 +683,116 @@ public actor VaultSession: SharesExecutor {
             let existing = try await store.record(Self.headerKey(record.accountID))
             let stale = try await store.records(in: record.accountID, kind: .accountHeader)
                 .filter { $0.recordID != record.accountID }.map(\.key)
-            try await store.commit(
+            let row = Self.headerRow(
+                candidate, recordID: record.accountID, version: try Self.version(replacing: existing))
+            try await commitOwnStep(
                 StoreChange(
-                    account: .update(updated, expectedKeysetVersion: record.keysetVersion),
-                    upserts: [
-                        Self.headerRow(
-                            candidate, recordID: record.accountID, version: (existing?.version ?? 0) + 1)
-                    ], deletions: stale))
-            try await pinRegistry(followed, accountID: record.accountID)
+                    account: .update(updated, expectedKeysetVersion: record.keysetVersion), upserts: [row],
+                    deletions: stale),
+                credential: candidate.credentialID, header: row, accountID: record.accountID)
+            // Committed: if this pin cannot be written, the intent written before the commit completes it.
+            try? await pinRegistry(followed, accountID: record.accountID)
         } catch {
             unlockKey.zeroise()
             keyset.zeroise()
             throw error
         }
+        updated = await keepingStoredMigration(updated)
         account = updated
         registryView = nil
         return (unlockKey, keyset, updated)
+    }
+
+    /// Commits a step of this device's own that moves it to `credential` (an adoption or a password change), with
+    /// the intent written to the Keychain first (review finding Z9, `RegistryAnchor.Intent`): a header row ahead of
+    /// the anchor is this device's own only where the Keychain named it. If the intent cannot be written nothing is
+    /// committed; if the commit fails the intent is taken back (and would be dropped at the next read anyway).
+    func commitOwnStep(_ change: StoreChange, credential: ObjectDigest, header: StoredRecord, accountID: UUID)
+        async throws
+    {
+        guard let previous = await readAnchor(accountID) else { throw VaultError.deviceRegistryUnavailable }
+        var intended = previous
+        intended.intent = RegistryAnchor.Intent(credential: credential, header: ObjectDigest(hashing: header.envelope))
+        try await writeAnchor(intended, accountID: accountID)
+        do {
+            try await store.commit(change)
+        } catch {
+            try? await writeAnchor(previous, accountID: accountID)
+            throw error
+        }
+    }
+
+    /// Follows a password change made on `device`, from an unlocked session: the way to follow a change the lock
+    /// screen does not try (review findings Z1, Z8).
+    ///
+    /// That is a change that branches off *before* the credentials this device follows: two devices changed the
+    /// password at once and the person is bringing this one over to the other, or it was made with a password since
+    /// retired. From the lock screen such a change would let anyone who knows a retired password, and holds a
+    /// registered device to publish the fork from, open this device with it; here they must also give `current`, the
+    /// password this device follows now, re-derived under the stored header as `changePassword` does (review finding
+    /// Z14): an unlocked session alone, or one opened by quick unlock, is not enough. It is also how a pending change
+    /// is reached when more devices have published one than an unlock tries (`tooManyPasswordChangesPending`):
+    /// unlock with `ignoringPasswordChange`, then name the device. The header is fetched from the transport if a
+    /// sync has not kept it.
+    ///
+    /// `password` is the one that change set. On success this device follows it: the old password is wrong from
+    /// now on, and quick unlock is enrolled again under the new credentials if it was enrolled. Both derivations run
+    /// off the actor; a `lock()` meanwhile wins.
+    public func followPasswordChange(by device: UUID, current: String, password: String) async throws {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        // The password this device follows now, under the header it has, not anything in memory.
+        let record = try await verifyAccountPassword(current, since: epoch)
+        let secretKey = try await storedSecretKey(accountID: record.accountID)
+        defer { secretKey.zeroise() }
+        let view = try await registry(record)
+        _ = try requireKeys(since: epoch)
+
+        let held = await candidateHeaders(record)
+        var candidates = (held.pending + held.forked).filter { $0.author == device }
+        if candidates.isEmpty, let transport = syncSettings?.transport {
+            let changes =
+                Self.changesByAuthor(view.state.pendingCredentials + view.state.forkedCredentials)
+                .first { $0.author == device }?.changes ?? []
+            for change in changes.prefix(Self.maximumHeaderAttempts) {
+                if let header = await fetchCandidateHeader(
+                    for: change, account: record, view: view, transport: transport)
+                {
+                    candidates.append(header)
+                    break
+                }
+            }
+        }
+        guard !candidates.isEmpty else { throw VaultError.noPasswordChangeToFollow(device) }
+        // At most one change of that device's that follows this device's credentials and one that forks from them.
+        for candidate in candidates.prefix(Self.maximumHeaderAttempts) {
+            _ = try requireKeys(since: epoch)
+            guard
+                let adopted = try await adopt(
+                    candidate, password: password, secretKey: secretKey, account: record, since: epoch,
+                    lockError: .locked)
+            else { continue }
+            // The same keyset under a new Account Unlock Key: the copy just opened is not needed.
+            let adoptedKeyset = adopted.keyset.symmetricKey.keyID
+            adopted.keyset.zeroise()
+            // Committed: this device follows the change whatever became of the session meanwhile. The keys resident
+            // now may be another object than when this began (a vault created or a key received meanwhile); what
+            // must match is the keyset (Z14), and the retired Account Unlock Key never stays.
+            guard epoch == lockEpoch, let now = keys, !now.keyset.isZeroised,
+                now.keyset.accountID == record.accountID, now.keyset.symmetricKey.keyID == adoptedKeyset
+            else {
+                adopted.unlockKey.zeroise()
+                return
+            }
+            keys = UnlockedKeys(
+                accountUnlockKey: adopted.unlockKey, keyset: now.keyset, vaultKeys: now.vaultKeys)
+            now.accountUnlockKey.zeroise()
+            try? await refreshQuickUnlock(after: await clock.now(), account: adopted.account)
+            guard epoch == lockEpoch, let installed = keys else { return }
+            try? await reconcileAccountObjects(account: adopted.account, keys: installed)
+            return
+        }
+        throw CryptoError.authenticationFailed
     }
 
     /// Quick unlock (PRD F5.3, F5.4): the policy must allow it, then the Keychain must release the Local Unlock Key
@@ -554,8 +807,9 @@ public actor VaultSession: SharesExecutor {
             throw VaultError.quickUnlockRefused(.notEnabled)
         }
         // The password was changed on another device: the key this device would release opens credentials that are
-        // no longer the account's. Destroyed, like any refused enrolment; the new password re-enrols.
-        if !(await candidateHeaders(record)).pending.isEmpty {
+        // no longer the account's. Destroyed, like any refused enrolment; the new password re-enrols. Asked of the
+        // Keychain's anchor and the registry's entries, not of whether the change's header is in the file (Z3).
+        if await passwordChangePending(record) {
             try await suspendQuickUnlock(accountID: accountID, forget: false)
             throw VaultError.quickUnlockRefused(.credentialsChanged)
         }
@@ -580,12 +834,19 @@ public actor VaultSession: SharesExecutor {
         // passcode fallback, the system prompt retries a face or finger internally and a run of failures usually
         // ends in Cancel (`errSecUserCanceled`), not in `errSecAuthFailed`; counting only the latter would let
         // someone who can clear the OS lockout with the device passcode keep trying indefinitely (F5.4).
+        //
+        // And it counts **before the prompt is shown** (review finding Z7): the attempt is written to the Keychain
+        // first and taken back only once the key the prompt released has opened the keyset. A count made after the
+        // read returned was never made if the app was killed while the prompt was up, so that same person could
+        // present a face until the prompt was about to give up, kill the app, and start again without limit. The
+        // price is that a crash or a kill during the prompt counts as a failed attempt, and three send the person
+        // back to the password.
+        state.failedAttempts += 1
+        try await saveQuickUnlockState(state, accountID: accountID)
         let releasedKey: SecureBytes?
         do {
             releasedKey = try await keychain.read(.quickUnlockKey(accountID: accountID), prompt: prompt)
         } catch let error as KeychainError where error == .authenticationFailed || error == .userCancelled {
-            state.failedAttempts += 1
-            try await saveQuickUnlockState(state, accountID: accountID)
             if state.failedAttempts >= configuration.quickUnlock.maximumFailedAttempts {
                 try await suspendQuickUnlock(accountID: accountID, forget: false)
             }
@@ -627,10 +888,15 @@ public actor VaultSession: SharesExecutor {
             try? await suspendQuickUnlock(accountID: accountID, forget: true)
             throw error
         }
+        // The chain opened: the attempt counted before the prompt is taken back. If that cannot be written it stays
+        // counted, which is the direction to fail in.
+        state.failedAttempts = 0
+        try? await saveQuickUnlockState(state, accountID: accountID)
         let newKeys: UnlockedKeys
         do {
             do {
                 try await refuseRolledBackHeader(record)
+                try await requirePersonalVaultBinding(record, unlockKey: unlockKey)
             } catch {
                 keyset.zeroise()
                 throw error
@@ -644,18 +910,23 @@ public actor VaultSession: SharesExecutor {
             newKeys.zeroise()
             throw VaultError.lockedDuringUnlock
         }
-        install(newKeys, at: now)
-        state.failedAttempts = 0
-        try? await saveQuickUnlockState(state, accountID: accountID)
+        install(newKeys, at: now, withPassword: false)
         try? await refreshSigningKey(account: record, keys: newKeys)
         do {
             try await reconcileAccountObjects(account: record, keys: newKeys)
         } catch VaultError.accountHeaderRolledBack {
             lock()
             throw VaultError.accountHeaderRolledBack
+        } catch VaultError.personalVaultMismatch {
+            lock()
+            throw VaultError.personalVaultMismatch
         } catch {
             // As after a password unlock: sync reports a registry it cannot use.
         }
+        // Which vaults are shared (VaultSession+SharedMarker.swift); until this has been read, every vault but the
+        // Personal one is held closed.
+        await loadSharedMarkersIfNeeded(force: true)
+        if let account = try? await loadAccount() { await backfillRestoredChains(account: account, since: epoch) }
     }
 
     /// Derives AUK. `KDFParameters.validate()` runs inside, before any work (SEC5, SEC9).
@@ -678,6 +949,34 @@ public actor VaultSession: SharesExecutor {
             recordVersion: account.keysetVersion)
     }
 
+    /// Requires the Personal vault the account row names to be the one the account header seals under `unlockKey`
+    /// (review finding Z5). Call once the keyset has opened under that key and before any key is installed.
+    ///
+    /// `personal_vault_id` and `personal_vault_key_id` are plain columns of a file that is A8's. Nothing sealed held
+    /// them at unlock, so one edit made a shared vault the "Personal" one: the default for new items, for AutoFill's
+    /// saved logins and for new passkeys, never shared and never deleted in the session's eyes, with every later
+    /// save sealed under a key that vault's other members hold. The header's binding has named the Personal vault
+    /// under the AUK all along (enrolment and adoption read it); this is the same check at every unlock.
+    ///
+    /// The header must be this account record's own (the unlock key ID the row names) and its binding must open.
+    /// With no header row at all the check has nothing to stand on: that is refused wherever the Keychain holds a
+    /// registry anchor, which every account that has a header has, and let through only for an account that has
+    /// neither (made before the registry existed, or a store restored onto other hardware with its header row
+    /// removed). That is a residual, not a safe state (review finding Z16): such a store starts a registry at its
+    /// first sync if the transport holds no header for the account (`startRegistryIfAccountPredatesIt`), and the
+    /// header it then makes seals whichever Personal vault the row names.
+    func requirePersonalVaultBinding(_ account: AccountRecord, unlockKey: EncryptionKey) async throws {
+        guard let row = try await store.record(Self.headerKey(account.accountID)) else {
+            if await readAnchor(account.accountID) == nil { return }
+            throw VaultError.personalVaultMismatch
+        }
+        guard !unlockKey.isZeroised else { throw VaultError.lockedDuringUnlock }
+        guard let header = try? AccountHeaderObject.parse(row.envelope), header.accountID == account.accountID,
+            header.unlockKeyID == account.unlockKeyID,
+            (try? header.openBinding(with: unlockKey)) == account.personalVaultID
+        else { throw VaultError.personalVaultMismatch }
+    }
+
     /// Unwraps the key of every vault in the directory. Identities come from the storage location (each row), never
     /// from the wraps (§4). Only the personal vault's current key is required. Any other wrap that fails to open (a
     /// row planted in the file) is skipped, so one bad row cannot block every unlock. A failure of the required key
@@ -689,7 +988,7 @@ public actor VaultSession: SharesExecutor {
         do {
             var rows = try await store.records(in: account.personalVaultID, kind: .vaultKeyWrap)
             for index in try await store.records(in: account.accountID, kind: .vaultDirectory)
-            where index.recordID != account.personalVaultID {
+            where index.recordID != account.personalVaultID && index.envelope.first != Self.sharedMarkerTag {
                 rows += try await store.records(in: index.recordID, kind: .vaultKeyWrap)
             }
             var vaultKeys: [UUID: VaultKey] = [:]
@@ -704,9 +1003,15 @@ public actor VaultSession: SharesExecutor {
                     continue
                 }
             }
-            guard vaultKeys[account.personalVaultKeyID] != nil else {
+            guard let personalKey = vaultKeys[account.personalVaultKeyID] else {
                 for key in vaultKeys.values { key.zeroise() }
                 throw VaultError.vaultKeyMissing(vaultID: account.personalVaultID)
+            }
+            // The key the row names must be a key of the Personal vault, and one of the account's own making: a key
+            // that reached the account by another member's grant is a shared vault's, whatever the row says (Z5).
+            guard personalKey.vaultID == account.personalVaultID, !personalKey.arrivedByGrant else {
+                for key in vaultKeys.values { key.zeroise() }
+                throw VaultError.personalVaultMismatch
             }
             return UnlockedKeys(accountUnlockKey: unlockKey, keyset: keyset, vaultKeys: vaultKeys)
         } catch {
@@ -715,14 +1020,22 @@ public actor VaultSession: SharesExecutor {
         }
     }
 
-    func install(_ newKeys: UnlockedKeys, at now: Date) {
+    func install(_ newKeys: UnlockedKeys, at now: Date, withPassword: Bool) {
         keys = newKeys
+        passwordEnteredEpoch = withPassword ? lockEpoch : nil
+        // Ledgers loaded before a lock stay loaded: the keys their vaults may use are chosen again (Z59).
+        withholdUnvouchedKeys()
         lastActivity = now
         backgroundedAt = nil
         startHygiene()
     }
 
     // MARK: - Lock (PRD F5.5)
+
+    /// How many times the session has locked: moved inside `lock()` itself, before anyone listening to `lockEvents()`
+    /// hears of it, so work outside the session that must not keep what it made across a lock compares it after its
+    /// awaits (review of round 11, Z188; `LockSignal.Mark`).
+    public var lockCount: UInt64 { lockEpoch }
 
     /// Zeroises every key. Safe to call at any time, including while another operation is in flight: that
     /// operation then fails with `locked` or `lockedDuringUnlock`.
@@ -731,6 +1044,8 @@ public actor VaultSession: SharesExecutor {
         keys?.zeroise()
         keys = nil
         pendingImport = nil
+        sharingCodeRun = nil
+        sharingCodeGeneration &+= 1
         backgroundedAt = nil
         // After the keyset is zeroised, never before (§13.8): nothing the engine does can keep the keys resident.
         stopHygiene()
@@ -880,8 +1195,12 @@ public actor VaultSession: SharesExecutor {
             return nil
         }
         defer { bytes.zeroise() }
-        // Not secret, and decoded from a device-only Keychain item; a malformed one is treated as absent.
-        return try? JSONDecoder().decode(QuickUnlockState.self, from: Data(bytes.unprotectedCopy()))
+        // Not secret (the AUK in it is sealed under the Local Unlock Key), and decoded from a device-only Keychain
+        // item; a malformed one is treated as absent. One copy, straight from protected storage, wiped once decoded
+        // (review §Z, Z98).
+        var data = Data(bytes)
+        defer { data.resetBytes(in: data.startIndex..<data.endIndex) }
+        return try? JSONDecoder().decode(QuickUnlockState.self, from: data)
     }
 
     private func saveQuickUnlockState(_ state: QuickUnlockState, accountID: UUID) async throws {
@@ -999,21 +1318,24 @@ public actor VaultSession: SharesExecutor {
             let candidates = try await store.records(in: record.accountID, kind: .accountHeader)
                 .filter { $0.recordID != record.accountID }.map(\.key)
             rows.append(Self.registryRow(credential, account: record))
-            rows.append(
-                Self.headerRow(header, recordID: record.accountID, version: (existing?.version ?? 0) + 1))
-            try await store.commit(
+            let headerRow = Self.headerRow(
+                header, recordID: record.accountID, version: try Self.version(replacing: existing))
+            rows.append(headerRow)
+            try await commitOwnStep(
                 StoreChange(
                     account: .update(updated, expectedKeysetVersion: record.keysetVersion), upserts: rows,
-                    deletions: candidates))
+                    deletions: candidates),
+                credential: credentialID, header: headerRow, accountID: record.accountID)
         } catch {
             newUnlockKey.zeroise()
             throw error
         }
+        updated = await keepingStoredMigration(updated)
         account = updated
         registryView = nil
         // The new password is committed: from here on, report success whatever happens to the session. Telling the
         // person "nothing changed" now would leave them believing the old password still works (F10.2). If the
-        // anchor cannot be written now, the next unlock moves it: the header that opens names the credential.
+        // anchor cannot be written now, the intent written before the commit moves it at the next read (Z9).
         try? await writeAnchor(
             RegistryAnchor(
                 genesis: view.state.genesis, credential: credentialID, generation: updated.credentialGeneration,
@@ -1105,20 +1427,70 @@ public actor VaultSession: SharesExecutor {
     /// An update must be made from the stored version: a draft whose `version` is not the stored item's (a sync
     /// merged another device's edit while the editor was open) is refused with `versionConflict`, and the editor
     /// reopens the item (Y29).
+    ///
+    /// **A look-alike host is added only by name (PRD F11.7; review finding Z61).** Every host the draft adds to the
+    /// item's scopes (all of them, for a new item) is judged against what is saved, as the gate would judge a page
+    /// (`SavedSites`): one that resembles a saved site without being it, or that cannot be verified by eye, is
+    /// refused with `VaultError.hostsNeedConfirmation` unless it is in `confirmingHosts`. Adding a host is the one
+    /// way a refusal in the extension is ever turned into a fill, so the check is here, below every screen: the
+    /// editor shows the confirmation the error describes (the site as it resolves, what it resembles, the item) and
+    /// saves again naming the hosts the person confirmed.
     @discardableResult
-    public func save(_ draft: Item) async throws -> Item {
+    public func save(_ draft: Item, confirmingHosts: Set<String> = []) async throws -> Item {
         // A draft made from an earlier version than the stored one would be stamped as an edit that had seen
         // everything since, and replace it (Y29): refused, for the editor to reopen the item.
-        try await save(draft, expecting: .versionIfPresent(draft.version))
+        try await save(draft, expecting: .versionIfPresent(draft.version), confirmed: .hosts(confirmingHosts))
     }
 
-    func save(_ draft: Item, expecting expectation: WriteExpectation) async throws -> Item {
+    /// Who answers for the hosts a save adds.
+    enum AddedHosts {
+        /// The person confirmed these by name; any other look-alike refuses the save. The AutoFill model names the
+        /// host its sheet warned about (`saveCredentialItem(_:replacingVersion:confirmingHosts:)`); no caller answers
+        /// for every host (review finding Z78).
+        case hosts(Set<String>)
+    }
+
+    /// The hosts `draft` would add to its item's scopes that need the person's confirmation by name: empty when the
+    /// save would go through as it is. What `save` refuses with, for an editor that asks before it saves.
+    public func hostsNeedingConfirmation(in draft: Item) async throws -> [HostConfirmation] {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        var held = Set<String>()
+        if let row = try await store.record(RecordKey(recordID: draft.id, kind: .item)) {
+            held = Set(try openItem(row, keys: try requireKeys(since: epoch)).scopes.map(\.host))
+        }
+        let added = draft.scopes.filter { !held.contains($0.host) }
+        guard !added.isEmpty else { return [] }
+        let sites = try await savedSites().prepared()
+        _ = try requireKeys(since: epoch)
+        let inSharedVault = sites.sites.sharedVaults.contains(draft.vaultID)
+        var needed: [HostConfirmation] = []
+        for scope in added {
+            let others = draft.scopes.filter { $0.host != scope.host }
+            if case .needsConfirmation(let resembles) = sites.standing(
+                ofNewHost: scope.host, beside: others, inSharedVault: inSharedVault, inVault: draft.vaultID)
+            {
+                needed.append(HostConfirmation(host: scope.host, resembles: resembles))
+            }
+        }
+        return needed
+    }
+
+    func save(
+        _ draft: Item, expecting expectation: WriteExpectation, confirmed: AddedHosts = .hosts([])
+    ) async throws -> Item {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
             } catch let error as ScopeValidationError {
                 throw VaultError.scopeRejected(error)
             }
+        }
+        if case .hosts(let confirmedHosts) = confirmed {
+            let unconfirmed = try await hostsNeedingConfirmation(in: draft).filter {
+                !confirmedHosts.contains($0.host)
+            }
+            guard unconfirmed.isEmpty else { throw VaultError.hostsNeedConfirmation(unconfirmed) }
         }
         return try await write(id: draft.id, vaultID: draft.vaultID, creating: draft, expecting: expectation) {
             item, existing, now in
@@ -1175,11 +1547,17 @@ public actor VaultSession: SharesExecutor {
     }
 
     /// Permanently deletes a trashed item. Items not in the trash are refused, so one call cannot destroy data.
+    ///
+    /// A deletion is a write: in a shared vault it needs `writePermission` like any other (F4.5), and in one with no
+    /// ledger on this device it is refused (review findings Z41, Z44). A deletion made while this account may not
+    /// write would take effect here, and wait, signed, to be published the day it may.
     public func deletePermanently(id: UUID) async throws {
         let item = try await item(id: id)
         guard item.isTrashed else { throw VaultError.itemNotTrashed(id) }
         _ = try requireKeys()
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
+        try await checkSharedWrite(item.vaultID, account: record)
+        _ = try requireKeys()
         // Conditional on the version just read, so a restore that lands in between is not silently undone. The item's
         // synced scan results go with it (§13.9).
         try await writer(for: record).commit(
@@ -1199,11 +1577,21 @@ public actor VaultSession: SharesExecutor {
             return now.timeIntervalSince(trashedAt) >= VaultConfiguration.trashRetention
         }
         guard !expired.isEmpty, let record = try await loadAccount() else { return }
+        // Not in a shared vault this account may not write to now (read-only, a removal owed, a later format, no
+        // ledger on this device): the purge is a deletion like any other (Z44), and there the trash is other
+        // members' to empty.
+        var writable: [UUID: Bool] = [:]
+        for vaultID in Set(expired.map(\.vaultID)) {
+            writable[vaultID] = (try? await checkSharedWrite(vaultID, account: record)) != nil
+        }
+        let purged = expired.filter { writable[$0.vaultID] == true }
+        guard !purged.isEmpty else { return }
+        _ = try requireKeys()
         try await writer(for: record).commit(
             StoreChange(
-                deletions: try await scanStatusKeys(of: expired.map(\.id)),
+                deletions: try await scanStatusKeys(of: purged.map(\.id)),
                 conditionalDeletions: Dictionary(
-                    uniqueKeysWithValues: expired.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
+                    uniqueKeysWithValues: purged.map { (RecordKey(recordID: $0.id, kind: .item), $0.version) })))
     }
 
     /// Read-modify-write of one item: the version moves forward and the record is sealed under the vault's current

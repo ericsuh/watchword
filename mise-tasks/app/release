@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#MISE description="Build the iOS and/or macOS app in the Release configuration and fail if the product holds a Debug-only UI-test facility"
+#MISE depends=["app:generate"]
+#USAGE arg "[platform]" default="all" help="Which app to build and inspect" {
+#USAGE   choices "ios" "macos" "all"
+#USAGE }
+#USAGE flag "--derived-data <dir>" default=".build/app-release" help="Where the builds go, as <dir>/<platform>; each run replaces them"
+#
+# The release-build CI job. Everything a UI test relies on is compiled only `#if DEBUG`: the `--uitest` switch with its
+# in-memory store and Keychain, the KDF floor and no auto-lock, `UITestPeer` and the password it reads from the
+# environment, the stand-in file sources and the Settings section that drives them. That they are absent from a build
+# that ships was asserted by comments alone: every scheme and every CI leg built Debug, so Release was never compiled,
+# and a spec edit or an XcodeGen default that defined DEBUG there would have shipped the switch with every check green
+# (docs/06-adversarial-review.md Z105). This task compiles Release, which also finds a Release-only build error before
+# a release does, and then reads the product.
+#
+# What it reads for is text those facilities cannot be built without. Each marker must still be in the sources, or the
+# list has gone stale and the search proves nothing. A marker is searched for as bytes anywhere in the app bundle, the
+# embedded AutoFill extension included. One limit: the optimiser can build a string of 15 bytes or fewer in registers,
+# so a short literal need not appear as bytes in an arm64 binary. `--uitest` is that short; the other markers are not,
+# and `--uitest-appearance=`, which holds it, is long enough. The long markers are the evidence.
+set -euo pipefail
+# shellcheck source=signing.sh
+source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
+# shellcheck source=packages.sh
+source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"
+
+markers=(
+  "--uitest"
+  "WATCHWORD_UITEST_PASSWORD"
+  "UI test: another device"
+  "Lock now (UI test)"
+)
+# The positive control: text the app always compiles in, which the same search must find in the same binary. Without
+# it, "none of the markers" is also what a search reports of an executable it cannot read (compressed, encrypted, or
+# with its literals somewhere this does not look), and of a build that produced the wrong thing. It is the message
+# AppEnvironment gives when the App Group container is missing: a plain string literal on the path every launch
+# takes, long enough to be stored as bytes, and not in the Info.plist or the extension. It is looked for in the app
+# outside its embedded extension, which has no such literal of its own to show.
+control="Watchword cannot reach its shared storage"
+derived="$usage_derived_data"
+
+for marker in "${markers[@]}" "$control"; do
+  if ! grep -rqF -e "$marker" --include='*.swift' Apps/Shared; then
+    echo "::error::\"$marker\" is no longer in Apps/Shared, so what a Release build shows of it proves nothing: update the markers and the control in mise-tasks/app/release with the code they stand for"
+    exit 1
+  fi
+done
+
+build() { # build <scheme> <destination> <derived data> <build settings...>
+  local scheme="$1" destination="$2" data="$3"
+  shift 3
+  rm -rf "$data" # an earlier product must not be what is inspected
+  xcodebuild build -project Apps/Watchword.xcodeproj -scheme "$scheme" -destination "$destination" \
+    -configuration Release -derivedDataPath "$data" "${package_arguments[@]}" "$@"
+}
+
+inspect() { # inspect <platform's name> <derived data>: 0 if the Release app holds no marker
+  local name="$1" products="$2/Build/Products" apps app found status=0
+  apps=$(find "$products" -maxdepth 2 -type d -name Watchword.app 2> /dev/null || true)
+  if [ -z "$apps" ] || [ "$(printf '%s\n' "$apps" | wc -l | tr -d ' ')" -ne 1 ]; then
+    echo "::error::Expected one Watchword.app under $products for $name, found: ${apps:-none}"
+    return 1
+  fi
+  app="$apps"
+  if [ -z "$(find "$app" -type d -name '*.appex')" ]; then
+    echo "::error::$app holds no app extension: the AutoFill extension was not built into it, so it was not inspected"
+    return 1
+  fi
+  found=$(LC_ALL=C grep -rlaF -e "$control" "$app" | grep -v '\.appex/' || true)
+  if [ -z "$found" ]; then
+    echo "::error::The Release build of $name does not contain \"$control\", which every build of the app does: this search cannot read $app, so finding no marker in it would prove nothing"
+    return 1
+  fi
+  for marker in "${markers[@]}"; do
+    found=$(LC_ALL=C grep -rlaF -e "$marker" "$app" || true)
+    if [ -n "$found" ]; then
+      echo "::error::The Release build of $name contains \"$marker\", which only Debug builds may (the UI-test switch):"
+      echo "$found"
+      status=1
+    fi
+  done
+  [ "$status" -ne 0 ] || echo "Release build of $name: none of the ${#markers[@]} Debug-only markers in $app (the control was found)"
+  return "$status"
+}
+
+resolve_packages
+failed=""
+case "$usage_platform" in
+  ios | all)
+    build Watchword-iOS 'generic/platform=iOS Simulator' "$derived/ios" "${ios_signing[@]}"
+    inspect iOS "$derived/ios" || failed="$failed iOS"
+    ;;
+esac
+case "$usage_platform" in
+  macos | all)
+    build Watchword-macOS 'platform=macOS' "$derived/macos" "${macos_signing[@]}"
+    inspect macOS "$derived/macos" || failed="$failed macOS"
+    ;;
+esac
+check_resolved_packages "After building" || failed="$failed packages(not the pinned commits)"
+
+if [ -n "$failed" ]; then
+  echo "::error::Release builds failed inspection:$failed"
+  exit 1
+fi

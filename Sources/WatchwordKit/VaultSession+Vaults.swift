@@ -19,14 +19,29 @@ public struct VaultInfo: Sendable, Hashable, Identifiable {
     public var isPersonal: Bool
     /// Deleted, here or on another device. Listed only on request, for what the deletion left in it.
     public var isDeleted: Bool
+    /// The vault is shared (governed by a membership chain) and this device holds no verified ledger for it: its
+    /// account's other device shared or joined it, or the saved ledger no longer loads. Held closed here until this
+    /// device accepts the vault's invitation itself (or, where only the owner's pin is gone, the owner is checked
+    /// again): readable, but nothing is written, sealed, published or deleted (docs/02-architecture.md §8.10; review
+    /// finding Z41, V31).
+    public var isSharedUnavailable = false
+    /// Accounts other than this one read this vault, and those who may write there can add and change its items: it
+    /// is governed by a membership chain, as far as anything this device holds says so (`isMarkedShared`; true of an
+    /// unavailable vault too, and of every vault but the Personal one until the account's markers are read). The one
+    /// fact AutoFill reads to tell a vault of the person's own from one a member writes (review finding Z60).
+    public var isShared = false
+    /// The account's own devices disagree about whose this vault is (review finding Z59; `SharedVaultStatus`): held
+    /// closed (`isSharedUnavailable` is true too), on every device of the account, and nothing in this version ends
+    /// it. The items can be read and copied into a vault of the person's own.
+    public var isOwnerDisputed = false
 }
 
 /// A vault's own description, sealed under the vault key as a `.vaultMetadata` record whose record ID is the vault's
 /// (docs/02-architecture.md §5, §7.7). A vault's name is as private as an item's title.
 ///
-/// It merges as a last-writer-wins register on (version, device): a name is one short value, and of two renames made
-/// at once one is kept. Nothing else about a vault lives here — which vaults exist, and their keys, are the vault
-/// directory's.
+/// It merges as a last-writer-wins register on the stamp of the write that chose it (`descriptionStamp`): a name is
+/// one short value, and of two renames made at once one is kept. Nothing else about a vault lives here — which vaults
+/// exist, and their keys, are the vault directory's.
 public struct VaultMetadata: Codable, Hashable, Sendable {
     public var vaultID: UUID
     public var name: String
@@ -36,8 +51,17 @@ public struct VaultMetadata: Codable, Hashable, Sendable {
     public var version: UInt64
     /// The write that chose this description, when the row was sealed again rather than written (a rotation's
     /// re-seal, a password change, the merge of two copies at one version); `nil` means the row's own version and
-    /// device. A shared vault's judge attributes the description to it (review finding S37).
+    /// device. A shared vault's judge attributes the description to it (review finding S37), and counts it only as
+    /// the work of an account that was the vault's owner or an administrator (§8.7): every path that stores a
+    /// description again keeps this, so that sealing one again never makes it the sealer's.
     public var writtenBy: Revision? = nil
+
+    /// The stamp of the write that chose this description, read from the row that carries it: `writtenBy`, or the
+    /// row's own version and device. What the description's last-writer-wins merge orders by, and what a shared
+    /// vault's judge attributes it to.
+    public func descriptionStamp(carriedBy row: StoredRecord) -> Revision {
+        writtenBy ?? Revision(version: row.version, device: row.deviceID)
+    }
 }
 
 public enum VaultMetadataCodec {
@@ -128,7 +152,8 @@ extension VaultSession {
         let rows = try await store.records(in: account.accountID, kind: .vaultDirectory)
         guard !rows.isEmpty else { return result }
         let view = try? await registry(account)
-        for row in rows where row.recordID != account.personalVaultID {
+        // A shared marker's row is a fact about a vault, not a vault (VaultSession+SharedMarker.swift).
+        for row in rows where row.recordID != account.personalVaultID && row.envelope.first != Self.sharedMarkerTag {
             let isDeleted = view.map { Self.isVerifiedDeletion(row, accountID: account.accountID, view: $0) } ?? false
             result[row.recordID] = DirectoryEntry(isDeleted: isDeleted)
         }
@@ -203,7 +228,10 @@ extension VaultSession {
 
     func currentVaultKey(_ vaultID: UUID, keys: UnlockedKeys, account: AccountRecord) -> VaultKey? {
         // A shared vault's key is the one its membership chain names (VaultSession+Sharing.swift).
-        if let shared = sharedCurrentKey(vaultID, keys: keys) { return shared }
+        // A shared vault with no ledger here has none (Z41).
+        if let shared = sharedCurrentKey(vaultID, keys: keys, personalVaultID: account.personalVaultID) {
+            return shared
+        }
         return Self.currentKeyID(for: vaultID, among: Array(keys.vaultKeys.values), personal: account).flatMap {
             keys.vaultKeys[$0]
         }
@@ -252,6 +280,9 @@ extension VaultSession {
             self.keys = UnlockedKeys(
                 accountUnlockKey: keys.accountUnlockKey, keyset: keys.keyset, vaultKeys: vaultKeys)
         }
+        // A key of a vault this device holds a ledger for is used only once that ledger hands it to this account
+        // (review finding Z59): the next sync's `admitVaultKeys` shows each from its grant.
+        withholdUnvouchedKeys()
     }
 
     // MARK: - Vault metadata
@@ -275,6 +306,11 @@ extension VaultSession {
         // A vault's name: private, but not key material.
         let metadata = try VaultMetadataCodec.decode(plaintext.unprotectedCopy())
         guard metadata.vaultID == row.vaultID, metadata.version == row.version else {
+            throw VaultError.recordMismatch(row.recordID)
+        }
+        // A row carries a description written at or below its own version: the merge orders descriptions by that
+        // stamp, so one dated above its row would outrank renames the engine's version checks (U5) never saw.
+        if let writtenBy = metadata.writtenBy, writtenBy.version > row.version {
             throw VaultError.recordMismatch(row.recordID)
         }
         highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
@@ -306,24 +342,44 @@ extension VaultSession {
     public func vaults(includingDeleted: Bool = false) async throws -> [VaultInfo] {
         let epoch = lockEpoch
         _ = try requireKeys()
+        await loadSharedVaultsIfNeeded()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
         let directory = try await vaultDirectory(account)
         var rows: [UUID: StoredRecord] = [:]
         for vaultID in directory.keys {
             rows[vaultID] = try await store.record(RecordKey(recordID: vaultID, kind: .vaultMetadata))
         }
+        var leftovers: Set<UUID> = []
+        for vaultID in directory.keys where membershipEnded(vaultID, account: account) {
+            if !(try await store.records(in: vaultID, kind: .item)).isEmpty { leftovers.insert(vaultID) }
+        }
         let keys = try requireKeys(since: epoch)
         var result: [VaultInfo] = []
         for (vaultID, entry) in directory where includingDeleted || !entry.isDeleted {
-            // A vault whose key this device does not hold (yet) is not one it can show.
-            guard currentVaultKey(vaultID, keys: keys, account: account) != nil else { continue }
+            // A vault whose key this device does not hold (yet) is not one it can show. A shared vault with no
+            // ledger here is shown, as shared and unavailable, if it holds any key for it: never hidden, and never
+            // shown as one of the account's own (Z41).
+            // One whose owner the account's devices disagree about is held closed the same way, ledger or not (Z59).
+            let disputed = isOwnerDisputed(vaultID)
+            let unavailable =
+                (isSharedUnavailable(vaultID, keys: keys, personalVaultID: account.personalVaultID) || disputed)
+                && (keys.vaultKeys.values.contains { $0.vaultID == vaultID } || sharing.vaults[vaultID] != nil)
+            // A shared vault this account is no longer a member of has no current key here once the key was
+            // rotated. It is still listed while this device holds items of it, so that they are shown as what they
+            // are (`SharedVaultStatus.role` is `nil`) and can be removed (Z45).
+            let ended = membershipEnded(vaultID, account: account) && leftovers.contains(vaultID)
+            guard unavailable || ended || currentVaultKey(vaultID, keys: keys, account: account) != nil else {
+                continue
+            }
             let isPersonal = vaultID == account.personalVaultID
             let metadata = rows[vaultID].flatMap { try? openMetadata($0, keys: keys) }
             result.append(
                 VaultInfo(
                     id: vaultID, name: metadata?.name ?? (isPersonal ? VaultInfo.defaultPersonalName : ""),
                     createdAt: metadata?.createdAt ?? (isPersonal ? account.createdAt : nil), isPersonal: isPersonal,
-                    isDeleted: entry.isDeleted))
+                    isDeleted: entry.isDeleted, isSharedUnavailable: unavailable,
+                    isShared: isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID),
+                    isOwnerDisputed: disputed))
         }
         return result.sorted {
             if $0.isPersonal != $1.isPersonal { return $0.isPersonal }
@@ -372,7 +428,10 @@ extension VaultSession {
         return VaultInfo(id: vaultID, name: name, createdAt: now, isPersonal: false, isDeleted: false)
     }
 
-    /// Renames a vault. The Personal vault can be renamed too; it cannot be deleted.
+    /// Renames a vault. The Personal vault can be renamed too; it cannot be deleted. A shared vault is renamed only
+    /// by its owner or an administrator (`SharedVaultError.renameRefused` for a member who may otherwise write;
+    /// docs/02-architecture.md §8.7): checked here before anything is sealed, and by every other device's write
+    /// judge, which is what binds a client that does not ask.
     @discardableResult
     public func renameVault(id: UUID, to name: String) async throws -> VaultInfo {
         let name = try Self.validatedName(name)
@@ -383,6 +442,7 @@ extension VaultSession {
         let existing = try await store.record(RecordKey(recordID: id, kind: .vaultMetadata))
         let keys = try requireKeys(since: epoch)
         let vaultKey = try await writableVaultKey(id, keys: keys, account: account)
+        try checkSharedRename(id, account: account)
         _ = try requireKeys(since: epoch)
         let previous = existing.flatMap { try? openMetadata($0, keys: keys) }
         let revision = try nextRevision(in: id, above: existing, account: account)
@@ -440,7 +500,7 @@ extension VaultSession {
         var tombstone = Self.directoryRow(
             vaultID: id, accountID: account.accountID, deviceID: account.deviceID,
             deletion: SignedObject(signature: signature, envelope: Self.deletionMarker))
-        tombstone.version = max(tombstone.version, (existing?.version ?? 0) + 1)
+        tombstone.version = max(tombstone.version, try Self.version(replacing: existing))
         // Conditional on every version just counted, so an edit that lands in between fails the whole deletion.
         // The items' synced scan results go with them (§13.9).
         let scanStatus = try await store.records(in: id, kind: .scanStatus).map(\.key)
@@ -497,9 +557,58 @@ extension VaultSession {
     }
 
     /// Copies an item into another vault of the account, as a new item with its own ID. The original is untouched.
+    ///
+    /// Out of a shared vault, the copy is judged like an import entry (review finding Z72): if it would hide or stand
+    /// beside an account AutoFill offers, or names a look-alike host, the call is refused with
+    /// `VaultError.transferNeedsConfirmation` unless `confirming` is that concern, as the person was shown it.
     @discardableResult
-    public func copy(itemID: UUID, to vaultID: UUID) async throws -> Item {
-        try await transfer(itemID: itemID, to: vaultID, removingOriginal: false)
+    public func copy(itemID: UUID, to vaultID: UUID, confirming: TransferConcern? = nil) async throws -> Item {
+        try await transfer(itemID: itemID, to: vaultID, removingOriginal: false, confirming: confirming)
+    }
+
+    /// What copying or moving `itemID` to `vaultID` would need the person to confirm: empty when it goes through as
+    /// it is (always, for an item that is not in a shared vault). What `copy` and `move` refuse with.
+    public func transferConcern(itemID: UUID, to vaultID: UUID) async throws -> TransferConcern {
+        let epoch = lockEpoch
+        _ = try requireKeys()
+        guard let row = try await store.record(RecordKey(recordID: itemID, kind: .item)) else {
+            throw VaultError.itemNotFound(itemID)
+        }
+        let item = try openItem(row, keys: try requireKeys(since: epoch))
+        return try await transferConcern(of: item, to: vaultID, since: epoch)
+    }
+
+    /// The concern of bringing `item` into `destination`. An item of a vault this account alone writes is the
+    /// person's word already, and moving it between such vaults asks nothing, as it never did.
+    func transferConcern(of item: Item, to destination: UUID, since epoch: UInt64) async throws -> TransferConcern {
+        guard item.vaultID != destination else { return TransferConcern() }
+        let listed = try await vaults(includingDeleted: true)
+        _ = try requireKeys(since: epoch)
+        // A vault the listing does not describe is taken to be shared, as AutoFill takes it.
+        guard listed.first(where: { $0.id == item.vaultID })?.isShared ?? true else { return TransferConcern() }
+        let isOwnDestination = !(listed.first { $0.id == destination }?.isShared ?? true)
+        let saved = try await savedSites()
+        _ = try requireKeys(since: epoch)
+        // The item is judged against everything but itself, as the import judges an entry not yet saved.
+        let rest = saved.items.filter { $0.id != item.id }
+        let sites = SavedSites(
+            stored: rest, ownVaults: Set(rest.map(\.vaultID)).subtracting(saved.sharedVaults)
+        ).prepared()
+        let scopes = item.scopes.filter(ScopePolicy.isAcceptable)
+        let overlap = sites.overlap(ofAdding: scopes, inVault: destination, isOwnVault: isOwnDestination)
+        var concern = TransferConcern(
+            hidden: overlap.hidden, beside: overlap.beside, overlapIsTruncated: overlap.isTruncated)
+        for scope in scopes {
+            // The item's other scopes are the member's too: they vouch for nothing, and a host resembling one of them
+            // is a look-alike of it.
+            let others = scopes.filter { $0.host != scope.host }
+            if case .needsConfirmation(let resembles) = sites.standing(
+                ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnDestination, inVault: destination)
+            {
+                concern.lookAlikeHosts.append(HostConfirmation(host: scope.host, resembles: resembles))
+            }
+        }
+        return concern
     }
 
     /// Moves an item to another vault of the account (PRD F2.2).
@@ -518,12 +627,17 @@ extension VaultSession {
     ///
     /// An item holding values kept for the person to choose between is refused (`itemHasUnresolvedValues`): the copy
     /// would not carry them and the deletion would discard them, which only the person may do (F7.7).
+    ///
+    /// Out of a shared vault it is judged as `copy` is (`confirming`, Z72); a deleted vault's leftovers moved out to
+    /// restore them included.
     @discardableResult
-    public func move(itemID: UUID, to vaultID: UUID) async throws -> Item {
-        try await transfer(itemID: itemID, to: vaultID, removingOriginal: true)
+    public func move(itemID: UUID, to vaultID: UUID, confirming: TransferConcern? = nil) async throws -> Item {
+        try await transfer(itemID: itemID, to: vaultID, removingOriginal: true, confirming: confirming)
     }
 
-    private func transfer(itemID: UUID, to destination: UUID, removingOriginal: Bool) async throws -> Item {
+    private func transfer(
+        itemID: UUID, to destination: UUID, removingOriginal: Bool, confirming: TransferConcern?
+    ) async throws -> Item {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
@@ -536,6 +650,13 @@ extension VaultSession {
         let original = try openItem(originalRow, keys: keys)
         if removingOriginal, original.vaultID == destination { return original }
         let destinationKey = try await writableVaultKey(destination, keys: keys, account: account)
+        // A move writes in the vault it takes the item out of too: the original is trashed, then deleted. That needs
+        // this account's permission to write there as any write does (Z44), before anything is written anywhere. A
+        // deleted vault's leftovers can still be moved out: that is how they are restored. A copy writes nothing in
+        // the vault it reads from.
+        let originalKey =
+            removingOriginal
+            ? try await writableVaultKey(original.vaultID, keys: keys, account: account, allowingDeleted: true) : nil
         _ = try requireKeys(since: epoch)
         for scope in original.scopes {
             do {
@@ -544,6 +665,10 @@ extension VaultSession {
                 throw VaultError.scopeRejected(error)
             }
         }
+        // A member's scopes become the person's in the destination: judged before anything is written (Z72).
+        let concern = try await transferConcern(of: original, to: destination, since: epoch)
+        guard concern.isEmpty || concern == confirming else { throw VaultError.transferNeedsConfirmation(concern) }
+        _ = try requireKeys(since: epoch)
 
         var newID = UUID.random(using: &random)
         if removingOriginal {
@@ -568,10 +693,7 @@ extension VaultSession {
         var change = StoreChange(upserts: [createdRow], expectations: [createdRow.key: .absent])
 
         var trashedRow: StoredRecord?
-        if removingOriginal {
-            guard let originalKey = currentVaultKey(original.vaultID, keys: keys, account: account) else {
-                throw VaultError.unknownVault(original.vaultID)
-            }
+        if let originalKey {
             var trashed = original
             if trashed.trashedAt == nil || trashed.keptAfterDeletion { trashed.trashedAt = now }
             trashed.keptAfterDeletion = false

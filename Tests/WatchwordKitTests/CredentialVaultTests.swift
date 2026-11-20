@@ -44,17 +44,19 @@ actor InterleavingRecordStore: RecordStore {
 struct LockingAfterRead: CredentialVault {
     let session: VaultSession
 
-    func credentialItems() async throws -> [Item] {
-        let items = try await session.credentialItems()
+    func credentialSnapshot() async throws -> CredentialSnapshot {
+        let snapshot = try await session.credentialSnapshot()
         await session.lock()
-        return items
+        return snapshot
     }
 
     func confirmUnlocked() async throws { try await session.confirmUnlocked() }
-    func defaultVaultID() async throws -> UUID { try await session.defaultVaultID() }
     func isBackedUp() async throws -> Bool { try await session.isBackedUp() }
-    func saveCredentialItem(_ item: Item, replacingVersion: UInt64?) async throws -> Item {
-        try await session.saveCredentialItem(item, replacingVersion: replacingVersion)
+    func saveCredentialItem(
+        _ item: Item, replacingVersion: UInt64?, confirmingHosts: Set<String>
+    ) async throws -> Item {
+        try await session.saveCredentialItem(
+            item, replacingVersion: replacingVersion, confirmingHosts: confirmingHosts)
     }
 }
 
@@ -161,7 +163,9 @@ struct CredentialVaultTests {
         let family = try await vault.session.createVault(name: "Family").id
         let saved = try await vault.session.save(libraryLogin(personal))
         try await vault.session.save(
-            Item(vaultID: family, title: "Shop", scopes: [ServiceScope(host: "shop.example")], fields: []))
+            Item(vaultID: family, title: "Shop", scopes: [ServiceScope(host: "shop.example")], fields: []),
+            // The reserved `.example` suffix is also the Library item's name, which a real suffix never is.
+            confirmingHosts: ["shop.example"])
 
         let moved = try await vault.session.move(itemID: saved.id, to: family)
         #expect(moved.id != saved.id)

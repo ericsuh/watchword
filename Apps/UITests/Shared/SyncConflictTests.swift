@@ -24,21 +24,21 @@ final class SyncConflictTests: XCTestCase {
         app.openSettings()
         app.syncNow()
         app.buttons["debug.peerRename"].click()
-        XCTAssertTrue(app.staticTexts["debug.peerStatus"].waitForExistence(timeout: 30), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["debug.peerStatus"].appears(within: 30), app.debugDescription)
         app.closeSettings()
 
         // Meanwhile it is renamed here too, before this device has seen the other rename.
         let row = app.descendants(matching: .any)["items.row.Library"].firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.appears(within: 10))
         row.click()
-        XCTAssertTrue(app.buttons["detail.edit"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["detail.edit"].firstMatch.appears(within: 10), app.debugDescription)
         app.buttons["detail.edit"].firstMatch.click()
         let title = app.textFields["edit.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertTrue(title.appears(within: 10))
         title.click()
         title.clearAndType("Library here")
         app.buttons["edit.save"].click()
-        XCTAssertTrue(app.staticTexts["detail.title"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["detail.title"].appears(within: 10), app.debugDescription)
 
         // Syncing brings the two renames together: both are kept, one shown, the other offered.
         app.backToList()
@@ -48,10 +48,10 @@ final class SyncConflictTests: XCTestCase {
         let renamed = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "items.row.Library")
         ).firstMatch
-        XCTAssertTrue(renamed.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(renamed.appears(within: 10), app.debugDescription)
         renamed.click()
         let conflicts = app.descendants(matching: .any)["detail.conflicts"].firstMatch
-        XCTAssertTrue(conflicts.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(conflicts.appears(within: 10), app.debugDescription)
         let shown = app.staticTexts["conflict.Title.0.value"].displayedText
         let other = app.staticTexts["conflict.Title.1.value"].displayedText
         XCTAssertEqual(Set([shown, other]), ["Library here", "Library elsewhere"])
@@ -59,11 +59,11 @@ final class SyncConflictTests: XCTestCase {
 
         // The person keeps the other one: it is shown, and the conflict is gone.
         app.buttons["conflict.Title.1"].click()
-        XCTAssertTrue(conflicts.waitForNonExistence(timeout: 10), "the conflict is still shown")
+        XCTAssertTrue(conflicts.disappears(within: 10), "the conflict is still shown")
         XCTAssertTrue(
             app.staticTexts.matching(identifier: "detail.title").matching(
                 NSPredicate(format: "label == %@ OR value == %@", other, other)
-            ).firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+            ).firstMatch.appears(within: 10), app.debugDescription)
 
         // The choice is a new version, published like any edit.
         app.backToList()
@@ -76,33 +76,33 @@ extension XCUIApplication {
     /// Onboarding through to the empty vault, confirming the Emergency Kit.
     func createAccount(password: String) {
         let field = secureTextFields["onboarding.password"]
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue(field.appears(within: 10))
         field.click()
-        field.typeText(password)
+        field.enterText(password)
         let confirm = secureTextFields["onboarding.confirm"]
         confirm.click()
-        confirm.typeText(password + "\n")
-        XCTAssertTrue(staticTexts["kit.secretKey"].waitForExistence(timeout: 30))
+        confirm.enterText(password + "\n")
+        XCTAssertTrue(staticTexts["kit.secretKey"].appears(within: 30))
         switches["kit.confirmSaved"].toggleOn()
         buttons["kit.continue"].click()
-        XCTAssertTrue(buttons["items.add"].waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(buttons["items.add"].appears(within: 10), debugDescription)
     }
 
     func addItem(title: String) {
         buttons["items.add"].click()
         let field = textFields["edit.title"]
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue(field.appears(within: 10))
         field.click()
-        field.typeText(title)
+        field.enterText(title)
         buttons["edit.save"].click()
-        XCTAssertTrue(descendants(matching: .any)["items.row.\(title)"].waitForExistence(timeout: 10))
+        XCTAssertTrue(descendants(matching: .any)["items.row.\(title)"].appears(within: 10))
     }
 
     func openSettings() {
         let settings = buttons["items.settings"].firstMatch
-        XCTAssertTrue(settings.waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(settings.appears(within: 10), debugDescription)
         settings.click()
-        XCTAssertTrue(buttons["settings.syncNow"].waitForExistence(timeout: 10), debugDescription)
+        XCTAssertTrue(buttons["settings.syncNow"].appears(within: 10), debugDescription)
     }
 
     /// Taps Sync Now and waits for a status that mentions `expecting`.
@@ -114,7 +114,7 @@ extension XCUIApplication {
         let status = staticTexts.matching(identifier: "settings.syncStatus").matching(
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", expecting, expecting)
         ).firstMatch
-        if !status.waitForExistence(timeout: 20) {
+        if !status.appears(within: 20) {
             attachTree("sync expecting \(expecting)", target: "settings.syncStatus")
             XCTFail("no sync status containing \(expecting)", file: file, line: line)
         }
@@ -125,8 +125,8 @@ extension XCUIApplication {
     func backToList() {
         #if os(iOS)
             let settings = buttons["items.settings"].firstMatch
-            if !(settings.exists && settings.isHittable) {
-                navigationBars.buttons.element(boundBy: 0).tap()
+            if !(settings.isPresent && settings.canBeHit) {
+                navigationBars.buttons.element(boundBy: 0).click()
             }
         #endif
     }

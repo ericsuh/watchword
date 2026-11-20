@@ -44,13 +44,15 @@ struct VaultsView: View {
             if model.sharingAvailable {
                 Section {
                     if let fingerprint = model.fingerprint {
-                        NavigationLink("Your Safety Number") { OwnFingerprintView(fingerprint: fingerprint) }
+                        NavigationLink("Your Full Vault Sharing Code") { OwnFingerprintView(fingerprint: fingerprint) }
                             .accessibilityIdentifier(AccessibilityID.Vault.ownSafetyNumber)
                     }
                     NavigationLink("Accept an Invitation") { AcceptInvitationView(context: context) }
                         .accessibilityIdentifier(AccessibilityID.Vaults.accept)
                 } footer: {
-                    Text("Someone inviting you compares your safety number with theirs for you first.")
+                    Text(
+                        "Someone inviting you shows a vault sharing code; type it here, on your own device, while you "
+                            + "are with them.")
                 }
             }
             ErrorText(message: model.errorMessage)
@@ -92,7 +94,9 @@ struct VaultDetailView: View {
     @State private var renaming = false
     @State private var confirmingShare = false
     @State private var confirmingLeave = false
+    @State private var confirmingRemoveCopies = false
     @State private var removing: MemberRow?
+    @State private var checking: MemberRow?
     private let context: ScreenContext
 
     init(vaultID: UUID, vaults: VaultsModel, context: ScreenContext) {
@@ -114,12 +118,18 @@ struct VaultDetailView: View {
                 if row?.isPersonal == true {
                     Text("Your Personal vault is never shared.").foregroundStyle(.secondary)
                 }
-                if model.sharing?.readOnlyReason == nil {
+                // Only a shared vault's owner or an administrator renames it; the session decides and words it
+                // (`VaultRow.renameRefusal`, `VaultSharing.renameRefusal`), and a read-only vault says why in its
+                // banner below.
+                if (row?.renameRefusal ?? model.sharing?.renameRefusal) == nil {
                     Button("Rename…") { renaming = true }
                         .accessibilityIdentifier(AccessibilityID.Vault.rename)
+                } else if model.sharing?.readOnlyReason == nil, let refusal = model.sharing?.renameRefusal {
+                    Text(refusal).foregroundStyle(.secondary)
+                        .accessibilityIdentifier(AccessibilityID.Vault.renameRefused)
                 }
             }
-            if let reason = model.sharing?.readOnlyReason {
+            if let reason = row?.readOnlyReason ?? model.sharing?.readOnlyReason {
                 Section {
                     Banner(
                         text: reason,
@@ -159,15 +169,28 @@ struct VaultDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "You become its owner. Nobody else can see it until you invite them, and you compare safety numbers "
-                    + "with each person before you do.")
+                "You become its owner. Nobody else can see it until you invite them, and you check a vault sharing "
+                    + "code with each person when you do.")
+        }
+        .navigationDestination(item: $checking) { member in
+            MemberVerificationView(vaultID: model.vaultID, memberID: member.id, context: context)
+                .onDisappear { Task { await model.load() } }
         }
         .confirmationDialog("Leave this vault?", isPresented: $confirmingLeave, titleVisibility: .visible) {
             Button("Leave", role: .destructive) { Task { await model.leave() } }
                 .accessibilityIdentifier(AccessibilityID.Vault.leaveConfirm)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Its items go from your devices once an administrator's device has replaced the vault's key.")
+            Text(SharedVaultModel.leaveExplanation)
+        }
+        .confirmationDialog(
+            "Remove this vault's items from this device?", isPresented: $confirmingRemoveCopies,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { Task { await model.removeFromThisDevice() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(model.removeCopiesMessage)
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "this member")?", isPresented: removingBinding, titleVisibility: .visible
@@ -177,9 +200,7 @@ struct VaultDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(
-                "They lose access to new changes. The vault's key is replaced and every item sealed again, but what "
-                    + "they already copied cannot be taken back.")
+            Text(SharedVaultModel.removalExplanation)
         }
     }
 
@@ -191,6 +212,24 @@ struct VaultDetailView: View {
         if !model.sharingAvailable {
             Section("Sharing") {
                 Text("Sharing vaults is not available in this version yet.").foregroundStyle(.secondary)
+            }
+        } else if model.awaitingOwnerCheck || model.needsSetUp {
+            Section("Sharing") {
+                if let reason = model.unavailability {
+                    Banner(text: ErrorWording.unavailable(reason), systemImage: "exclamationmark.triangle")
+                        .accessibilityIdentifier(AccessibilityID.Vault.awaitingOwnerCheck)
+                } else {
+                    Text(SharedVaultModel.setUpNotice).foregroundStyle(.secondary)
+                }
+                if model.maySetUpAgain {
+                    Button("Set Up on This Device") { Task { await model.setUpAgain() } }
+                        .disabled(model.isWorking)
+                        .accessibilityIdentifier(AccessibilityID.Vault.setUpAgain)
+                }
+                if let code = model.setUpCode {
+                    Text("Invitation to accept on this device:").font(.caption).foregroundStyle(.secondary)
+                    Text(code).font(.caption.monospaced()).textSelection(.enabled)
+                }
             }
         } else if !model.isShared {
             Section("Sharing") {
@@ -235,6 +274,16 @@ struct VaultDetailView: View {
                         .accessibilityIdentifier(AccessibilityID.Vault.leave)
                 }
             }
+            if model.membershipEnded {
+                Section {
+                    Button("Remove This Vault's Items From This Device…", role: .destructive) {
+                        confirmingRemoveCopies = true
+                    }
+                    .disabled(model.isWorking)
+                } footer: {
+                    Text(VaultSharing.endedDetail + " " + model.removeCopiesMessage)
+                }
+            }
         }
     }
 
@@ -251,6 +300,12 @@ struct VaultDetailView: View {
                     )
                     .font(.caption)
                     .foregroundStyle(member.trust == .keysChanged ? Color.red : Color.orange)
+                }
+                // A member this device has not checked itself, or whose keys changed: check them in person.
+                if member.trust == .unverified || member.trust == .keysChanged {
+                    Button("Check Vault Sharing Code…") { checking = member }
+                        .font(.caption)
+                        .accessibilityIdentifier(AccessibilityID.Vault.memberCheck(member.name))
                 }
             }
             Spacer()

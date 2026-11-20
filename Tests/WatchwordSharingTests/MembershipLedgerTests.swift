@@ -10,7 +10,7 @@ import WatchwordTestSupport
 @Suite("Membership ledger")
 struct MembershipLedgerTests {
     static func ownerContact(_ household: SharingHousehold) -> VerifiedContact {
-        VerifiedContact(bundle: household.owner.bundle, method: .comparedByEye, verifiedAt: nil)
+        VerifiedContact(bundle: household.owner.bundle, method: .safetyNumber, verifiedAt: nil)
     }
 
     /// A fresh device's view: joins from whatever records it is offered.
@@ -89,7 +89,7 @@ struct MembershipLedgerTests {
         #expect(throws: LedgerError.noGenesis) { _ = try Self.join(household, Array(records.dropFirst())) }
         #expect(throws: LedgerError.noGenesis) { _ = try Self.join(household, []) }
 
-        let impostor = VerifiedContact(bundle: household.outsider.bundle, method: .comparedByEye, verifiedAt: nil)
+        let impostor = VerifiedContact(bundle: household.outsider.bundle, method: .safetyNumber, verifiedAt: nil)
         #expect(throws: LedgerError.noGenesis, "anchored to someone else, the real chain is nothing") {
             _ = try MembershipLedger.join(vaultID: household.vaultID, owner: impostor, candidates: records)
         }
@@ -398,7 +398,7 @@ struct MembershipLedgerTests {
         #expect(throws: LedgerError.checkpointInvalid) {
             _ = try MembershipLedger.restore(
                 blob, vaultID: household.vaultID,
-                owner: VerifiedContact(bundle: household.outsider.bundle, method: .comparedByEye, verifiedAt: nil),
+                owner: VerifiedContact(bundle: household.outsider.bundle, method: .safetyNumber, verifiedAt: nil),
                 account: household.writer.bundle)
         }
     }

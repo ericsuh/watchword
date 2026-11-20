@@ -19,11 +19,15 @@
     ///   `.<name>.icloud` placeholder) counts as existing, so `create` fails with `objectExists` rather than make a second
     ///   version; otherwise `createNow`'s hard link (or move) refuses an existing file. Two devices that still write one
     ///   name (a restored device reusing a number before the listing caught up) leave iCloud with a conflict, which the
-    ///   next point refuses to resolve.
-    /// - **Conflicts are refused, not resolved.** An object with unresolved `NSFileVersion` conflict versions throws
-    ///   `conflictingVersions`: an immutable object was written twice and the transport cannot know which copy is
-    ///   genuine (only the engine's signature check could say, and it rejects the object as it rejects a damaged one).
-    ///   §7.3 asks for the copy that verifies to be kept; doing that needs the engine, and is not built.
+    ///   next point hands to the engine.
+    /// - **Conflicts are handed over, not resolved** (§7.5, "Conflict copies"). One name can hold several copies: the
+    ///   file, each unresolved `NSFileVersion` conflict version of it, and a second create iCloud renamed (`N 2.wwe`,
+    ///   which the portable transport attributes to `N`). `listWithCopies` says which names hold more than the file and
+    ///   how many copies; `fetchCopies` reads them all under one coordinated read, the file first, each within the
+    ///   reader's limit. The transport cannot know which copy is genuine and does not try: it never marks a conflict
+    ///   resolved, never replaces the file with a version, and `fetch` reads the current file as it always did. Only
+    ///   `delete` removes the copies, with the object, when its author collects it. Drafted and not yet built or run
+    ///   on a Mac, like the rest of this file.
     /// - **Downloads.** A file that is not on this device yet — a placeholder, or a dataless file whose
     ///   `ubiquitousItemDownloadingStatus` is `notDownloaded`, which is also what an evicted file becomes — is fetched as
     ///   absent (`nil`) after asking iCloud to download it (`startDownloadingUbiquitousItem`). The engine already treats
@@ -48,13 +52,27 @@
 
         public let base: FileSyncTransport
         let deadline: Deadline
+        /// How long a request for a conflict version's contents may wait for its coordinated read to be granted, which
+        /// is while iCloud downloads it: longer than `deadline`, which bounds what a sync waits for, since nothing waits
+        /// for this and a deadline cut short would cancel a slow download (review finding R20).
+        let downloadDeadline: Deadline
+        /// The version downloads asked for and not yet ended, shared by every copy of this transport, so the app keeps
+        /// one transport per folder (R20).
+        public let pendingDownloads: PendingDownloads
 
         public static let standardDeadline: Deadline = { try? await Task.sleep(for: .seconds(120)) }
+        /// Ten minutes: a version of up to the engine's object limit over a slow connection.
+        public static let standardDownloadDeadline: Deadline = { try? await Task.sleep(for: .seconds(600)) }
 
-        public init(root: URL, coordinationDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDeadline)
-        {
+        public init(
+            root: URL, coordinationDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDeadline,
+            downloadDeadline: @escaping Deadline = CoordinatedFileSyncTransport.standardDownloadDeadline,
+            pendingDownloads: PendingDownloads = PendingDownloads()
+        ) {
             base = FileSyncTransport(root: root, listsUbiquityPlaceholders: true)
             deadline = coordinationDeadline
+            self.downloadDeadline = downloadDeadline
+            self.pendingDownloads = pendingDownloads
         }
 
         /// `<ubiquity container>/Watchword/<accountID>`: outside the container's `Documents`, so the Files app does
@@ -78,6 +96,137 @@
             }
         }
 
+        public func listWithCopies(prefix: String) async throws -> SyncListing {
+            let directory = try base.listingDirectory(for: prefix)
+            let base = base
+            do {
+                return try await coordinated(.read([.immediatelyAvailableMetadataOnly]), at: directory) {
+                    var listing = try base.listingNow(prefix: prefix)
+                    for name in listing.names {
+                        let versions = try Self.conflictVersions(of: base.fileURL(for: name)).count
+                        // The file (or its placeholder) counts as one, unless only renamed copies are left.
+                        if versions > 0 { listing.copied[name] = (listing.copied[name] ?? 1) + versions }
+                    }
+                    return listing
+                }
+            } catch is CoordinationFailure {
+                throw SyncTransportError.unavailable  // The folder as a whole.
+            }
+        }
+
+        public func fetchCopies(_ name: String, maximumLength: Int, maximumCopies: Int) async throws
+            -> SyncObjectCopies
+        {
+            let url = try base.fileURL(for: name)
+            // As for `fetch`: a file that is not here is asked for and read as absent, with its copies, for now.
+            if try Self.availability(of: url) == .notDownloaded {
+                _ = Self.requestDownload(url)
+                return SyncObjectCopies()
+            }
+            let base = base
+            do {
+                let (found, notHere) = try await coordinated(.read([.withoutChanges]), at: url) {
+                    () throws -> (SyncObjectCopies, [URL]) in
+                    if try Self.availability(of: url) == .notDownloaded {
+                        _ = Self.requestDownload(url)
+                        return (SyncObjectCopies(), [])
+                    }
+                    // The file and its renamed duplicates. One iCloud has not downloaded is asked for and counted
+                    // as unread, never read: reading a dataless file is not assumed to block or to fail (review
+                    // finding R11, adapter assumptions). The file itself was found here just above.
+                    var found = SyncObjectCopies()
+                    var notHere: [URL] = []
+                    for copy in [url] + (try base.duplicateURLs(for: name)) {
+                        switch try Self.availability(of: copy) {
+                        case .absent: continue
+                        case .notDownloaded:
+                            _ = Self.requestDownload(copy)
+                            found.unread += 1
+                            continue
+                        case .local: break
+                        }
+                        // A link, a directory, one past the count or over the limit: omitted. A failed read: unread.
+                        guard try FileSyncTransport.kind(of: copy) == .file, found.copies.count < maximumCopies else {
+                            found.omitted += 1
+                            continue
+                        }
+                        do {
+                            guard let bytes = try FileSyncTransport.read(copy, maximumLength: maximumLength) else {
+                                found.omitted += 1
+                                continue
+                            }
+                            found.copies.append(bytes)
+                        } catch {
+                            found.unread += 1
+                        }
+                    }
+                    for version in Self.conflictVersions(of: url) {
+                        // A version whose contents are not here yet is unread, never omitted: the engine looks again
+                        // at every sync, after the names it can read (R17), and the author does not collect the object
+                        // meanwhile (R11). Its download is asked for once this read has ended (R17).
+                        if !version.hasLocalContents {
+                            found.unread += 1
+                            notHere.append(version.url)
+                            continue
+                        }
+                        // One over the limit, or past the count: omitted. One whose read failed: unread.
+                        guard found.copies.count < maximumCopies, try FileSyncTransport.kind(of: version.url) == .file
+                        else {
+                            found.omitted += 1
+                            continue
+                        }
+                        do {
+                            guard let bytes = try FileSyncTransport.read(version.url, maximumLength: maximumLength)
+                            else {
+                                found.omitted += 1
+                                continue
+                            }
+                            found.copies.append(bytes)
+                        } catch {
+                            found.unread += 1
+                        }
+                    }
+                    return (found, notHere)
+                }
+                requestVersionDownloads(notHere)
+                return found
+            } catch is CoordinationFailure {
+                // One name whose read was not granted in time: that object alone waits, the sync goes on.
+                throw SyncTransportError.objectUnreadable(name)
+            }
+        }
+
+        /// Asks iCloud for conflict versions whose contents are not on this device (review finding R17): without this,
+        /// a version nobody had asked for could stay unread for good, re-examined at every sync. Apple documents a
+        /// coordinated read of a version's `url` as what downloads its contents when `hasLocalContents` is false (the
+        /// documentation of `NSFileVersion.hasLocalContents`; unverified until a Mac run), so each is one coordinated
+        /// read, after the copies' own read has ended, never awaited: no sync waits for the network. Its body reads
+        /// nothing; the next sync reads the version. A version already asked for is not asked for again until that
+        /// request ends, at most `pendingDownloads.capacity` wait at once, and they wait side by side, each up to
+        /// `downloadDeadline` (review finding R20).
+        func requestVersionDownloads(_ urls: [URL]) {
+            guard !urls.isEmpty else { return }
+            let deadline = downloadDeadline
+            let pending = pendingDownloads
+            Task.detached(priority: .utility) {
+                let claimed = await pending.claim(urls)
+                await withTaskGroup(of: Void.self) { group in
+                    for url in claimed {
+                        group.addTask {
+                            let attempt = CoordinationAttempt<Bool>()
+                            _ = try? await attempt.run(.read([.withoutChanges]), at: url, deadline: deadline) { true }
+                            await pending.finish(url)
+                        }
+                    }
+                }
+            }
+        }
+
+        /// The unresolved conflict versions iCloud keeps of the file at `url`. Never resolved here.
+        static func conflictVersions(of url: URL) -> [NSFileVersion] {
+            NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []
+        }
+
         public func fetch(_ name: String, maximumLength: Int) async throws -> [UInt8]? {
             let url = try base.fileURL(for: name)
             // A first look, outside coordination, so that a file known not to be here is not waited for: a coordinated
@@ -96,9 +245,7 @@
                     case .notDownloaded: return Self.requestDownload(url)
                     case .local: break
                     }
-                    if let conflicts = NSFileVersion.unresolvedConflictVersionsOfItem(at: url), !conflicts.isEmpty {
-                        throw SyncTransportError.conflictingVersions(name)
-                    }
+                    // The current file, whatever versions are kept beside it: `fetchCopies` hands those over.
                     return try base.fetchNow(name, maximumLength: maximumLength)
                 }
             } catch is CoordinationFailure {
@@ -128,6 +275,17 @@
             let base = base
             do {
                 try await coordinated(.write([.forDeleting]), at: url) {
+                    // The conflict versions go with the object (the renamed copies in `deleteNow`): its author is
+                    // collecting it, which the engine allows only once nobody needs any copy of it (§7.5).
+                    if !Self.conflictVersions(of: url).isEmpty {
+                        // A failure here is this object's alone: the engine keeps it and tries again later, and the
+                        // rest of the sync goes on (review finding SR23), rather than a raw error ending it.
+                        do {
+                            try NSFileVersion.removeOtherVersionsOfItem(at: url)
+                        } catch {
+                            throw SyncTransportError.objectUnreadable(name)
+                        }
+                    }
                     try base.deleteNow(name)
                     // An object deleted while only its placeholder is here: the placeholder stands for it.
                     let placeholder = FileSyncTransport.placeholderURL(for: url)

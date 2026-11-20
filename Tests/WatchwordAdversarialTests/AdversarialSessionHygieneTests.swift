@@ -3,10 +3,10 @@ import SecureMemory
 import Testing
 import WatchwordCrypto
 import WatchwordEnvelope
-import WatchwordHygiene
 import WatchwordModel
 import WatchwordTestSupport
 
+@testable import WatchwordHygiene
 @testable import WatchwordKit
 
 /// Milestone 6's session obligations for hygiene (docs/02-architecture.md §13.8, ADR 0005 and its amendment).
@@ -47,7 +47,7 @@ struct AdversarialSessionHygieneTests {
             Fixture.login(vaultID, title: "Forum", host: "forum.example", password: "password"))
         try await fixture.scanUntilIdle()
         let prefix = try #require(PwnedRangePrefix("5BAA6"))
-        #expect(await fixture.session.hygieneCachedRange(prefix) != nil)
+        #expect(await fixture.session.hygieneCachedRange(prefix, in: vaultID) != nil)
         let engine = try #require(await fixture.session.hygieneEngine)
         #expect(try await engine.items(using: "password") == [item.id])
 
@@ -59,7 +59,7 @@ struct AdversarialSessionHygieneTests {
         await #expect(throws: HygieneEngineError.locked) { try await engine.report(now: Date()) }
         #expect(await fixture.session.hygieneRuntime?.localKey == nil)
         #expect(await fixture.session.hygieneRuntime?.known.isEmpty == true)
-        #expect(await fixture.session.hygieneCachedRange(prefix) == nil)
+        #expect(await fixture.session.hygieneCachedRange(prefix, in: vaultID) == nil)
 
         let atRest = await fixture.local.contents
         #expect(atRest.count == 3, "one range, its index, the ledger")
@@ -101,7 +101,7 @@ struct AdversarialSessionHygieneTests {
         try await session.unlock(password: TestVault.password)
         let report = try await session.hygieneReport()
         #expect(report.totals.itemsAwaitingBreachCheck == 1)
-        #expect(await session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6"))) == nil)
+        #expect(await session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6")), in: vaultID) == nil)
         let sent = await fixture.http.requests.count
         try await fixture.scanUntilIdle()
         #expect(await fixture.http.requests.count == sent + 1, "asked for again, not answered from a cache")
@@ -286,6 +286,78 @@ struct AdversarialSessionHygieneTests {
         return try DeviceLocalKeys.deviceLocalKey(keyset: keyset, deviceSecret: ownSecret, deviceID: deviceID)
     }
 
+    /// A4, a writing member of a shared vault with a client that reads the raw scan records (Z88). A check answered
+    /// from the prefix cache costs no pacing token, so the victim's next item is scanned at once, and each item's
+    /// `scannedAt` is published to every member: the gaps between them said which of A4's probe items hit a range the
+    /// victim's device had cached for a password in some other vault, a confirmation oracle over passwords A4 cannot
+    /// see. The cache is now partitioned by vault: a range fetched for one vault never answers another's check, so a
+    /// probe in the shared vault always goes to the network, whatever the victim holds elsewhere.
+    @Test("a range cached for one vault does not answer a check in another")
+    func cachePartitionedByVault() async throws {
+        let (fixture, personal) = try await Self.unlocked()
+        let household = try await fixture.session.createVault(name: "Household")
+        try await fixture.session.save(
+            Fixture.login(personal, title: "Mine", host: "mine.example", password: "password"))
+        try await fixture.scanUntilIdle()
+        #expect(await fixture.http.requests.count == 1)
+        let prefix = try #require(PwnedRangePrefix("5BAA6"))
+        #expect(await fixture.session.hygieneCachedRange(prefix, in: personal) != nil)
+        #expect(await fixture.session.hygieneCachedRange(prefix, in: household.id) == nil)
+
+        // The probe: the same password's prefix, in the other vault. It is asked for, not answered from the cache.
+        try await fixture.session.save(
+            Fixture.login(household.id, title: "Probe", host: "probe.example", password: "password"))
+        let outcomes = try await fixture.scanUntilIdle()
+        #expect(outcomes == [.scanned(breachedPasswords: 1, networkRequests: 1)], "\(outcomes)")
+        #expect(await fixture.http.requests.count == 2)
+        #expect(await fixture.session.hygieneCachedRange(prefix, in: household.id) != nil)
+        let epoch = await fixture.session.lockEpoch
+        let names = [personal, household.id].map { RangeCacheIndex.Key(vault: $0, prefix: prefix.value) }
+        let first = await fixture.session.rangeRecordName(names[0], since: epoch)
+        let second = await fixture.session.rangeRecordName(names[1], since: epoch)
+        #expect(first != nil && first != second, "one record for each vault")
+    }
+
+    /// A2, A3 or A8 lists the device-local store at rest, with no key (Z89). Each range record's length was 20 bytes
+    /// plus 22 for every breached suffix in its range, a public property of the prefix: one file narrowed which prefix
+    /// it holds, and its trajectory across the weekly rewrites narrowed it further. Now every record up to the bucket
+    /// is padded to the same length before it is sealed.
+    @Test("sealed range records have the same length whatever their range holds")
+    func rangeRecordsArePadded() async throws {
+        let (fixture, vaultID) = try await Self.unlocked()
+        _ = try await fixture.session.hygieneReport()
+        await fixture.session.hygieneSettled()
+        let fetched = await fixture.clock.now()
+        func range(_ prefix: String, entries: Int) throws -> CachedPwnedRange {
+            let body = (0..<entries).map { index -> String in
+                let hex = String(index, radix: 16, uppercase: true)
+                return String(repeating: "0", count: 34 - hex.count) + hex + "0:\(index + 1)"
+            }.joined(separator: "\r\n")
+            let parsed = try PwnedRangeParser.parse(Array(body.utf8), prefix: try #require(PwnedRangePrefix(prefix)))
+            return CachedPwnedRange(range: parsed.range, fetchedAt: fetched)
+        }
+        let small = try range("00001", entries: 1)
+        let large = try range("00002", entries: 900)
+        await fixture.session.hygieneCacheStore(small, in: vaultID)
+        await fixture.session.hygieneCacheStore(large, in: vaultID)
+        let epoch = await fixture.session.lockEpoch
+        let contents = await fixture.local.contents
+        var lengths: [Int] = []
+        for prefix in [small, large].map(\.range.prefix.value) {
+            let name = try #require(
+                await fixture.session.rangeRecordName(.init(vault: vaultID, prefix: prefix), since: epoch))
+            lengths.append(try #require(contents[name]).count)
+        }
+        #expect(lengths[0] == lengths[1], "\(lengths)")
+        #expect(lengths[0] > CachedPwnedRange.paddingBucket)
+        #expect(await fixture.session.hygieneCachedRange(large.range.prefix, in: vaultID) == large)
+        #expect(try CachedPwnedRange(decodingPadded: small.encodedPadded()) == small)
+        #expect(small.encodedPadded().count == CachedPwnedRange.paddingBucket)
+        var tampered = small.encodedPadded()
+        tampered[tampered.count - 1] = 1
+        #expect(throws: PwnedRangeCodecError.malformed) { try CachedPwnedRange(decodingPadded: tampered) }
+    }
+
     /// A8 plants another account's sealed ledger and ranges under this device's names, for an item it has given the
     /// same ID and version: if believed, the ledger would say the breached password was checked. It is not believed:
     /// the item is due, and the planted ranges answer nothing.
@@ -306,11 +378,13 @@ struct AdversarialSessionHygieneTests {
         let attackerLedger = try #require(await attacker.session.localName("scan-ledger", since: attackerEpoch))
         let victimLedger = try #require(await victim.session.localName("scan-ledger", since: epoch))
         let prefix = try #require(PwnedRangePrefix("5BAA6")).value
-        let prefixBytes = [UInt8(prefix >> 16 & 0xFF), UInt8(prefix >> 8 & 0xFF), UInt8(prefix & 0xFF)]
         let attackerRange = try #require(
-            await attacker.session.localName("range", prefixBytes, since: attackerEpoch))
-        let victimRange = try #require(await victim.session.localName("range", prefixBytes, since: epoch))
-        #expect(await attacker.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6"))) != nil)
+            await attacker.session.rangeRecordName(.init(vault: attackerVault, prefix: prefix), since: attackerEpoch))
+        let victimRange = try #require(
+            await victim.session.rangeRecordName(.init(vault: victimVault, prefix: prefix), since: epoch))
+        #expect(
+            await attacker.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6")), in: attackerVault)
+                != nil)
         let stolen = await attacker.local.contents
         await victim.local.write(try #require(stolen[attackerLedger]), as: victimLedger)
         await victim.local.write(try #require(stolen[attackerRange]), as: victimRange)
@@ -319,7 +393,8 @@ struct AdversarialSessionHygieneTests {
         try await victim.session.unlock(password: TestVault.password)
         let report = try await victim.session.hygieneReport()
         #expect(report.totals.itemsAwaitingBreachCheck == 1, "the planted ledger is not this device's")
-        #expect(await victim.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6"))) == nil)
+        #expect(
+            await victim.session.hygieneCachedRange(try #require(PwnedRangePrefix("5BAA6")), in: victimVault) == nil)
         let sent = await victim.http.requests.count
         try await victim.scanUntilIdle()
         #expect(await victim.http.requests.count == sent + 1)

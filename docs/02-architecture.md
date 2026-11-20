@@ -32,7 +32,7 @@ Field values (passwords, TOTP secrets, passkey private keys, answers, codes), it
 | Adversary | Has | Must not get | Primary mitigations |
 | --- | --- | --- | --- |
 | A1 Sync-store attacker (compromised iCloud account, Apple insider, Dropbox breach) | All ciphertext, record structure, timestamps, sizes | Any field value or title; ability to inject/replay/swap records undetected | 2SKD (128-bit Secret Key makes cracking infeasible), AES-GCM with AAD binding, signed change log, fingerprint-verified member keys |
-| A2 Thief with a locked device | Encrypted flash, Keychain items bound to passcode/biometry | Secret Key, derived keys | Keychain classes `WhenPasscodeSetThisDeviceOnly`, Secure Enclave wrapping, no plaintext on disk |
+| A2 Thief with a locked device | Encrypted flash, Keychain items bound to passcode/biometry | Secret Key, derived keys | Keychain class `WhenPasscodeSetThisDeviceOnly` (passcode- and device-bound through the Keychain's own key hierarchy), no plaintext on disk. No further wrap of the Secret Key is built (§4; review finding Z107) |
 | A3 Thief with an unlocked device, app locked | App sandbox, pasteboard | Vault contents | Auto-lock, zeroised memory, pasteboard expiry, password required after interval |
 | A4 Malicious household member (current) | Vault key for shared vaults, their own devices | Items in vaults they are not a member of; ability to impersonate the owner | Per-vault keys, signed membership changes, owner-only admin operations |
 | A5 Former member | Old vault key, items synced before removal | Items created/changed after removal | Vault key rotation and re-encryption on removal (F4.3) |
@@ -118,7 +118,19 @@ Rationale and parameters:
   primitive root mod 31), which detects every one- or two-character error, including every adjacent
   transposition. It is a typo check, not a MAC. Implemented in `WatchwordCrypto.SecretKey`. Stored in the Keychain
   (`kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`, non-synchronisable, Keychain access group
-  shared with the extension), additionally wrapped by a Secure Enclave P-256 key where available.
+  shared with the extension) as a generic-password item holding the key's bytes: that class is the
+  whole of its protection at rest. Earlier versions of this section and of §2 said it was
+  "additionally wrapped by a Secure Enclave P-256 key where available". That was never built:
+  `SystemKeychainStore` stores every item but the Local Unlock Key with the accessibility class
+  alone, nothing under `Sources/` or `Apps/` creates an Enclave key, and ADR 0004 does not mention
+  one (review finding Z107). So an adversary who can extract an item of that class (the device
+  passcode known or found, a forensic extraction that defeats the Keychain's hardware binding) has
+  the Secret Key itself, with no second hardware-bound layer in between; the account password is
+  then all that stands between them and the sync store's ciphertext. **Open:** an Enclave-held
+  P-256 key that wraps the Secret Key (ECIES, unwrapped per unlock). It would need an amendment to
+  ADR 0004 and an adversarial test, and it is worth less than it sounds: an Enclave key with no
+  access control is usable by anything that can run as the app, so it adds to the Keychain class
+  only against extraction of the item's bytes. Tracked with the Enclave device key (W11).
   It is never placed in iCloud Keychain by default (`adr/0004-secret-key-storage.md`).
 - **KDF.** PBKDF2-HMAC-SHA256 from CommonCrypto with iterations calibrated at account creation to
   ≥650,000 and ≥300 ms on the creating device; parameters are stored in the account header and have
@@ -215,9 +227,11 @@ Field { id, kind, label, value(secret or plain), order, meta }   // kinds listed
 ```
 
 A vault's own description is a record of kind 6 whose record ID is the vault's ID, sealed under the vault key:
-`VaultMetadata { vaultID, name, createdAt, modifiedAt, version }` (`VaultMetadataCodec`: JSON with sorted keys,
-16 KiB at most, a name of at most 256 characters, and the same identity check against the row). A vault's name
-is as private as an item's title. Kinds 7 and 8 are not sealed payloads of their own: they name rows of the
+`VaultMetadata { vaultID, name, createdAt, modifiedAt, version, writtenBy? }` (`VaultMetadataCodec`: JSON with
+sorted keys, 16 KiB at most, a name of at most 256 characters, and the same identity check against the row).
+`writtenBy` is the (version, device) of the write that chose the description, present when a row carries a
+description on rather than writing one (§7.7); it is never above the row's own version, or the row does not open.
+A vault's name is as private as an item's title. Kinds 7 and 8 are not sealed payloads of their own: they name rows of the
 local store that hold a vault's directory entry and a device-registry entry (§6, §7.7, §7.8), and kind 8 is also
 the kind under which a device's name is sealed inside its registry entry.
 
@@ -241,8 +255,10 @@ milestone 2 stores full item records only.
   state, staged downloads, pending deletions and quarantine (`WatchwordSync.SyncStateStore`) are in a second
   database beside it, `sync.sqlite` (`SQLiteSyncStateStore`, milestone 3), opened and schema-checked the
   same way; a separate file keeps `WatchwordStore` ignorant of sync, and nothing needs both in one
-  transaction (tombstones are recorded after the deletion commits, and the engine's state can be rebuilt by a
-  reconciling sync, so a state row that does not decode is read as no state). Still to come: the breach-check
+  transaction (tombstones are signed before the deletion commits and recorded after it, so a lock in between loses
+  none and a crash loses the tombstone rather than publish a deletion that did not happen; and the engine's state
+  can be rebuilt by a reconciling sync, so a state row that does not decode, or that the session did not sign, is
+  read as no state). Still to come: the breach-check
   prefix cache and scan ledger, as sealed local records rather than a plaintext `hibp_cache` table (§13.2,
   §13.3; milestone 6). The schema version is `PRAGMA user_version`; a newer one is refused, not
   misread. A commit may name the version it read of each record (`StoreChange.expectations`), so a writer
@@ -256,6 +272,20 @@ milestone 2 stores full item records only.
   registry entry is re-hashed and its signatures re-checked whenever the registry is evaluated, a candidate
   header and a vault deletion count only if the account key and a registered device signed them, and the
   Keychain anchor below says how far the registry had got (§7.7, §7.8).
+- Two columns of the `account` row need a check of their own, because nothing derived from them fails when
+  they are edited: `personal_vault_id` and `personal_vault_key_id` (review finding Z5). Which vault is the
+  Personal one decides where new items, AutoFill's saved logins and new passkeys go, and which vault is never
+  shared or deleted. The account header seals the Personal vault's ID under the Account Unlock Key (its
+  binding, §7.7), so at every unlock, by password or by quick unlock, once the keyset has opened and before a
+  key is installed, the stored header must be this account record's own and its binding must open to the
+  vault the row names; the key the row names must be a key of that vault, and never one that reached the
+  account by another member's grant (`personalVaultMismatch` otherwise, and the session stays locked). A
+  missing header row is refused wherever the Keychain holds a registry anchor. Only a store with neither (an
+  account from before the registry, or a backup restored onto other hardware with its header removed) is
+  taken at the row's word. That is a residual, not a safe state (review finding Z16): such a store starts a
+  registry at its first sync if the transport holds no header for the account (`startRegistryIfAccountPredatesIt`),
+  and the header it makes then seals whichever Personal vault the row names, so from there the redirected vault is
+  the authenticated one.
 - The file is untrusted input (A8 can edit it while the app is locked; a restored backup is anyone's).
   The connection is opened with `SQLITE_OPEN_NOFOLLOW` (the database path is resolved first, since
   `/var` is itself a link), `trusted_schema = OFF`, `cell_size_check = ON` and `secure_delete = ON`;
@@ -301,8 +331,10 @@ milestone 2 stores full item records only.
     P-256 key where there is one (that adapter is Apple-only and not built yet), otherwise — and today — a
     software Ed25519 seed stored here with the device ID it belongs to (`KeychainDeviceKeyStore`).
   - `deviceRegistryAnchor` — what this device trusts of the device registry: the genesis entry, the credential
-    entry it follows and the newest entries it has applied. Not secret; in the Keychain so that A8 can neither
-    substitute a registry nor roll one back to before a revocation.
+    entry it follows, the newest entries it has applied, the password changes it has seen and not been given, and
+    a step of its own under way (the credential entry and the exact header row an adoption or a password change is
+    about to commit; review finding Z9). Not secret; in the Keychain so that A8 can neither substitute a registry,
+    nor roll one back to before a revocation, nor write a header ahead of it that the device takes for its own.
   - `deviceLocalSecret` — 32 random bytes this device makes for itself, mixed with the keyset into the key that
     seals its unsynced local records (the hygiene ledger and prefix cache, §13.8), so that another device of the
     account, which holds the same keyset, can neither read them nor plant its own.
@@ -341,7 +373,7 @@ do not travel in log segments: they are a signed chain of their own, beside the 
 - Failure handling: `CKErrorUserDidResetEncryptedDataKey` / `zoneNotFound` means CloudKit lost its
   own key material; because our envelope is independently decryptable, the client re-uploads from
   local state (the behaviour Apple prescribes) with no data loss. `userDeletedZone` prompts the
-  person.
+  person. As decided on 2026-11-17, every one of these prompts the person first (§7.10).
 - Observed cost: encrypted fields cannot be queried, which is fine because the change-log model
   only needs ordered fetches by zone.
 - **As built** (`WatchwordPlatform.CloudKitTransport`, milestone 3; not yet run against CloudKit, and not wired into
@@ -360,17 +392,18 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   create makes the zone, never a read, and listing or creating it marks it seen in a `SyncStoreMarker` on this device.
   A zone that is missing once seen was deleted (the person's "delete data" in iCloud settings purges it, and CloudKit
   then says only `zoneNotFound`), so it is `SyncTransportError.storeReset` for every operation, as are
-  `userDeletedZone` and a reset encryption key; it is never recreated or read as empty, and only the person's choice to
-  start again (not built) may forget the marker. Errors map to the
+  `userDeletedZone` and a reset encryption key; it is never recreated or read as empty by a sync, and only the
+  person's choice to start again (`startStoreAgain`, §7.10) recreates it. Errors map to the
   transport's typed errors (`CloudKitErrors`): throttling with CloudKit's `retryAfterSeconds` (`rateLimited`, which
   `AutoSyncPolicy` honours within its bounds, §7.9), `quotaExceeded`, `notAuthenticated`, the network
   (`unavailable`); each stops a sync as being offline does, and the report says which (`transportFailure`). The
   transport reaches CloudKit through `CloudKitDatabase`, a seam over `CKDatabase` that `SystemCloudKitDatabase` only
   forwards, so every decision is tested against a fake. Not built: `CKSyncEngine` (pushes reach the app's
-  `AutoSyncDriver` as remote-change hints), per-shared-vault zones and the shared database (milestone 4), the
-  re-upload after a reset the bullet above describes (today a reset stops sync until the person acts, and nothing
-  re-publishes what the zone held), and the manual integration workflow; an opt-in test runs the transport contract
-  against a development container from a signed host (`WATCHWORD_CLOUDKIT_CONTAINER`).
+  `AutoSyncDriver` as remote-change hints), per-shared-vault zones and the shared database (milestone 4), and the
+  manual integration workflow; an opt-in test runs the transport contract against a development container from a
+  signed host (`WATCHWORD_CLOUDKIT_CONTAINER`). The re-upload after a reset that the failure-handling point above
+  describes is §7.10: it is never automatic (that point's "prompts the person" holds for every kind of reset, a
+  reset encryption key included), and its CloudKit half, `startStoreAgain`, is drafted with the rest.
 
 ### 7.3 Transport B: files (iCloud Drive or any Files-app provider)
 
@@ -378,9 +411,11 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   and `.../snapshot/<lamport>.wwe`. Files are immutable once written (write to temp, then atomic
   rename), which removes the KeePass single-file conflict problem.
 - iCloud Drive: ubiquity container, every access through `NSFileCoordinator`, an `NSFilePresenter`
-  for change notification, and a reconciliation pass that lists the directory on each wake. Any
-  `NSFileVersion` conflict on an immutable file is treated as corruption and the newer copy is
-  discarded after signature verification of the other.
+  for change notification, and a reconciliation pass that lists the directory on each wake. An
+  `NSFileVersion` conflict on an immutable file, or a second create that iCloud renamed, means one
+  name was written twice. The transport resolves nothing: it hands the engine every copy, and the
+  engine keeps what verifies (owner decision, 2026-11-17: "try to detect and merge them"; §7.5,
+  "Conflict copies").
 - Other providers: the person picks a folder with the document picker; a security-scoped bookmark
   is stored; polling on foreground and a `BGAppRefreshTask`/`NSBackgroundActivityScheduler` cadence.
 - Sharing uses the provider's shared folder; members exchange public keys through the same folder
@@ -398,12 +433,18 @@ do not travel in log segments: they are a signed chain of their own, beside the 
   nothing gives it up, so a process too busy to schedule its tasks cannot fail a granted access) or on
   cancellation and cancels its coordinator: a fetch so given up is `objectUnreadable` (that object waits, the sync goes
   on), a listing, create or delete `unavailable`. `SyncFolderPresenter` (`NSFilePresenter` on the root) turns changes
-  into remote-change hints. An object with unresolved `NSFileVersion` conflicts is refused (`conflictingVersions`)
-  rather than resolved, which leaves its stream waiting at it for good; and iCloud may rename a second create of one
-  name to `N 2.wwe`, which the layout ignores, so that copy is never read. Both need a device to have reused a sequence
-  number; keeping "the copy that verifies", as above, needs the engine's signature check and is **an owner decision**
-  (`03-implementation-plan.md`, milestone 3). Not built either: other providers with a security-scoped bookmark, and
-  their polling.
+  into remote-change hints. **Conflict copies** (drafted with the rest; §7.5 has the rules and the reasons). One name
+  can hold several copies: the file, each unresolved `NSFileVersion` conflict version of it, and a second create that
+  iCloud renamed (`N 2.wwe` beside `N.wwe`; the portable `FileSyncTransport` attributes `N 2` to `N 64`, and nothing
+  else, to `N`). A listing says which names hold more than the one file and how many copies (`listWithCopies`:
+  the count of `NSFileVersion.unresolvedConflictVersionsOfItem` per file, and the renamed files the walk sees), and `fetchCopies` reads them
+  all under one coordinated read, each within the reader's size limit, at most as many as the engine asks for. The
+  transport chooses none and resolves none: it never calls `NSFileVersion`'s resolution, never renames a duplicate
+  into place, and a plain `fetch` reads the current file as before. Only `delete` — the author collecting its own
+  object, when the engine says it may — removes the copies with the object (`removeOtherVersionsOfItem`, the renamed
+  files). The legacy placeholder of a renamed copy (`.N 2.wwe.icloud`) is attributed like the copy itself and
+  counted once with it, and `fetchCopies` counts it unread and asks for its download; unattributed, a copy present
+  only as a placeholder was seen by nobody, and its author collected the name with it unread (review finding R18). Not built either: other providers with a security-scoped bookmark, and their polling.
 
 ### 7.4 Sync while locked
 
@@ -417,7 +458,7 @@ VK, so merge is deferred until unlock. The AutoFill extension works from the las
 `WatchwordTestSupport`, so the whole engine — including the N-device partition simulation and the adversarial
 suite "sync log" — runs under `swift test` on Linux. The production keyring, the persistent state store and the
 app's conflict UI are described in §7.6, the account's own objects and enrolment in §7.7, the device registry in
-§7.8 and automatic syncing in §7.9; the CloudKit and iCloud Drive transports are in §7.2 and §7.3, built but not yet
+§7.8, automatic syncing in §7.9 and starting again after a reset in §7.10; the CloudKit and iCloud Drive transports are in §7.2 and §7.3, built but not yet
 run against iCloud or wired into the app (`03-implementation-plan.md`, milestone 3). One engine runs per vault; a vault's log carries its items, its
 description (`vaultMetadata`) and its items' synced breach-check results (`scanStatus`, §13.9), each kind merged by
 its own merger (`KindRoutingMerger`).
@@ -433,7 +474,36 @@ Lamport times to the transport; nothing else.
 
 **Download** (no keys, §7.4). List the vault, fetch every snapshot not yet merged and every segment past what has been
 merged, check each signature against the author named in the location, stage what verifies. A forged, moved or
-damaged object is reported and skipped; it never stops other streams.
+damaged object is reported and skipped; it never stops other streams. An object in the device's *own* stream is
+looked at more closely, because where its next segment goes follows from it: one that carries this device's *own*
+signatures (`SyncKeyring.verifyOwn`: this account's key and this device's key, as this account's registry holds them)
+raises its next sequence number; one shown not to be its own (not a signed object, other signatures, over the size cap)
+changes nothing. In a shared vault "verifies here" and "mine" now coincide: another member could register a device under
+this device's ID (S33), and such an object verified and was held aside in sequence (Z30), but the ID commits to this
+account (§7.8, Z157) and another account's registry listing it counts for nothing, so only this account's keys sign
+what verifies in this device's stream, and an object there that is not its own numbers nothing. A name alone never moves the number: anyone who can
+create a file under the vault's prefix can list one (Z24). What cannot be told (listed and not there, unreadable, no key
+to check with) holds publishing back (`SyncReport.ownStreamUnverified`) only where the device's state could be older
+than its stream and the stream cannot show which numbers it used: when no object of the stream that is known to be
+this device's is listed (one that verified as its own, or the one at the number its signed state last published).
+Segments are collected lowest first, as a contiguous run of listed numbers that starts above what the device has
+collected already (`SyncState.collectedThrough`, signed with the state, so a name planted in the collected range stalls
+nothing, Z149), stops at the first number the listing lacks, and never takes the device's own genuine head (what it
+published or verified as its own), whatever names are listed above it (Z135); so while one of a stream's segments is
+listed none above it was collected, publishing then cannot reuse a number, and an unfetchable name far ahead mutes
+nothing (Z31). A name shown not to be the device's own (junk, another's signatures) is evidence of nothing: anyone who
+can create a file can list one. Without an own object listed, a device that has published in the vault (its signed
+state says so) also holds back while a device still trusted says, by a snapshot's coverage or a segment's
+acknowledgement, that it merged this stream further than the state's next number: a current state's head is listed
+unless the store withholds it and nobody can have merged beyond it, so this is what an older state whose head is
+missing from the listing sees (Z32, Z145). Only where the vault's log is collected (`maintainsLog`): a shared vault's is
+not, so no number there was freed and creating at a used one is refused; there the clause guarded nothing, and a
+member's acknowledgement with the device's head deleted held it for good (Z154). It is read from the state as it is now, so the head listed again, or the
+claimant revoked, ends it; it never moves the numbering. A device that never published is held by nothing but an
+undecided name: a claim about a device that never wrote, which an honest device that merged it carries on in snapshots
+of its own, held it for good (Z139), and so did one junk name where the claim pointed (Z145). The price: a state lost
+altogether (nothing signed survives) whose head the store makes unusable can reuse a collected number, as Z32 and Z135
+record.
 
 **Merge** (needs the vault key). Staged objects are verified again (the staging area is in the local file, which
 A8 can edit), then checked and opened in the order kind, context, AEAD, payload. Each stream is merged strictly in
@@ -504,7 +574,32 @@ validly signed segment), and acknowledgement and coverage values must be plausib
   whose version vector holds an edit the trash's `GroupStamp.seen` does not (`Item.isTrashedByPerson`, F7.7). Those
   stay in the trash until the person restores or deletes them; moving one to the trash again makes it theirs.
 - Versions above 2^62, or more than 2^20 above the vault's highest, are quarantined rather than merged (review
-  finding U5) — and kept in the sync state store until the person discards them (F7.7).
+  finding U5) — and kept in the sync state store until the person discards them (F7.7). The jump is measured against
+  what the pass has merged, not against where the device stood when it met the version: what a pass refuses as out
+  of reach is tried again, lowest first, once everything else in it is merged, since a log is read one stream after
+  another and a segment in record-ID order. A device that holds nothing of the vault (and has no judge) takes the
+  snapshots it starts from as its baseline, held to 2^62 alone: it has no history to measure against, and each is
+  the state of a device of the account that accepted every version in it (Z25). The list of what is to be tried again
+  lives in memory, so the state saved meanwhile says a retry is owed (`SyncState.retryUnfinished`, signed with the
+  rest), and a sync that finds it set (a lock or a crash part-way) replays the log (Z33). A retried entry that does
+  not merge stays in the quarantine and stops nothing else (Z36).
+- A record whose ID a record of another vault holds on this device is kept aside alone (`SyncReport.collided`); the
+  other vault's row is not touched and the object and its stream are merged (Z22). The local store keys records by
+  (record ID, kind) across vaults; keying them by vault as well is tracked.
+- The quarantine is capped: 2,048 entries and 64 MiB per vault, 512 and 16 MiB of them for the versions any one
+  device wrote. Past a cap a version is not kept on this device and the report counts it
+  (`SyncReport.quarantineFull`, Z27); an entry already kept is found by lookup, never by reading the quarantine. Which
+  devices' versions found no room is remembered in the signed state (`SyncState.quarantineDropped`): while one of a
+  trusted device's is there the device writes no ordinary snapshot, and once the quarantine has room for every one of
+  them again the log is replayed to offer them again (Z38). Like any replay, that offers again what the person
+  discarded. A version the store itself refuses (its lookup digest is not keyed, and entries crafted to share it crowd
+  it) is such a drop too (Z141), but the caps have room, so a replay at every sync would drop it again: the state notes
+  how many entries the quarantine held then (`SyncState.quarantineCrowded`), and the log is offered again only once it
+  holds fewer, which the person discarding entries brings about (Z147). Meanwhile the snapshots stay withheld, since one
+  would cover a version kept nowhere. Sizes from the file are summed without overflow (Z39).
+- A version found in the log under this device's own name counts as published only if it is the row the device
+  holds, and a deletion only if it is this device's own, pending or published at that stamp, never because no row is
+  held (Z29, Z35, Z138); otherwise the row is published again.
 
 This is the monotonic check of §5: an older version, replayed by the store or found in an old snapshot, can never
 displace newer values, because a value is only ever replaced by one written knowing about it.
@@ -514,8 +609,140 @@ goes into the next segment of its stream. Deletions exist only when the session 
 (`DeletionRecordingStore` records them as it commits them, with the row deleted, so the erasure summary can be made);
 a row that has merely gone missing from the database is damage, repaired by a reconciling sync, and is never
 propagated as a deletion. A row that came back while its deletion was being made is settled against the deletion
-before publishing. Objects are created, never overwritten, and the next sequence number is never below anything the
-stream has on the transport, so a device whose state was rolled back never reuses a collected number.
+before publishing. Objects are created, never overwritten, and the next sequence number is never below the highest
+object of this stream on the transport that carries this device's own signatures (Z30), and publishing waits where
+the state may be behind and the stream cannot say how far (above), so a device whose state was rolled back never reuses
+a collected number. It comes from nothing else: not from a listed name (Z24), not from another account's object in a
+shared vault (Z30), not from a staged row (the staging area is a local file, Z39), and not from a snapshot's coverage
+of this device's own stream beyond what the stream can have got (Z21); with one exception, in a vault whose log is kept
+whole (a shared vault): where a device of this device's own account, not revoked, says by a snapshot's coverage or a
+segment's acknowledgement that it merged this stream at or past the next number, this device publishes above that
+claim (`SyncConfiguration.ownStreamWitnesses`, `push`; never saved unless published, so a claim a revocation discounts
+moves nothing for good). Its state is older than what it published (a restored backup, A8), and those numbers have been
+taken out of the store (a member with delete access): published there again, a device that merged them would never
+read it (round 5's L-M2, Z159). The numbers between are not counted as merged: what this stream holds there is merged
+in sequence once it is listed (a listing that lagged, Z163), and the stream waits at the first missing one meanwhile.
+Another account's word moves nothing (Z154). A number beyond 2^48, which no reader
+lists, is never written at (`SyncReport.ownStreamExhausted`). An unsigned object squatting at exactly the next number
+stops this vault's publishing while it is there, reported at every sync (`ownStreamConflict`) with nothing marked as
+sent; passing it needs a skip the author signs and readers honour, which is open. In a shared vault the same holds of
+an object there that another member signed: device IDs commit to their account (Z157), so it verifies nowhere, like
+junk, and the device stops at it, reported, with the account that signed it named
+(`SharedVaultSyncReport.ownStreamSquattedBy`, Z164), until it is gone. While it waits, any edit the device makes in
+that vault holds back the deletions it publishes in every vault, Personal included (Z44): nothing is lost, and nothing
+is deleted elsewhere. Z30 and Z137 used to stage such an object and step over
+it, which bought nothing against a member able to create files, who can write junk at that number as well, and cost
+the inference of Z46 to Z155 about whose a stream was; a member who can do it is an A1 there. A segment of a member
+whose writes never count, in that member's own device's stream, is still passed over in sequence keeping nothing
+(Z137). `SyncReport.ownStreamSteppedOver` (Z146) stays as a defence: no object that is not this device's own can be
+admitted in its stream now.
+
+**Conflict copies** (owner decision, 2026-11-17: "try to detect and merge them"). A provider can hold more than one
+copy under one object name although objects are created once: iCloud Drive keeps both when a name is created twice
+before it has synced (an `NSFileVersion` conflict, or the second file renamed `N 2.wwe`, §7.3), and whoever holds the
+store (A1) can manufacture either. Until this was built the transport refused such an object and its stream waited at
+it for good. Now the transport says what it holds and the engine decides, as for everything else:
+
+- *The port.* `SyncTransport.listWithCopies` is `list` plus, for each name the provider holds anything besides the one
+  current object under, how many copies it holds in all; `fetchCopies` returns their bytes, the current one first, at
+  most `maximumCopies` of them and each within `maximumLength` (a copy over either bound is counted in `omitted`, not
+  returned, and never fails the call; one that cannot be read *now*, a conflict version or renamed file iCloud has not
+  downloaded or a read that failed, is counted in `unread`, asked for where the provider allows it, and never taken
+  for examined: R11). Both default to `list` and `fetch`, so a transport that cannot hold two copies
+  (CloudKit saves only new records) implements nothing. `delete` removes every copy under the name. There is still no
+  "update", and no call that resolves a conflict.
+- *Each copy is checked alone, in the existing order.* Identical bytes are one copy. At download: the container, the
+  envelope's kind and context against the name (they need no key, so a genuine object of another name planted as a
+  copy is junk before any signature is looked at), then both signatures over `name ‖ 0x00 ‖ envelope` against the
+  registry (§7.4). At merge, again for every staged copy: kind, context, the signatures, the AEAD, the payload, its
+  location, and every entry's own context. Unsigned junk therefore costs one container parse and at most one
+  signature check, and is reported (`SyncReport.copiesRefused`); it is never staged.
+- *No copy verifies:* the object is refused alone, as a damaged one is (`SyncReport.rejected`, the stream waits at
+  it), and the sync and this device's publishing go on. It is never `unavailable`.
+- *Exactly one verifies:* it is used, whichever copy the provider calls current. A junk "current" file in front of
+  the genuine object, or junk beside it, changes nothing.
+- *Several verify:* the same device signed different bytes under one name, which an honest device does only after
+  its state was rolled back (a restored backup, A8) and it wrote again before it had seen what its earlier self
+  published. In a vault of one account the engine **merges every verifying copy**: the position holds a set of
+  payloads, and the entries of each are applied through the same per-entry path as any segment's. This is sound
+  because nothing about applying an entry depends on its being the only one for its stamp: the item merge is a join
+  over arbitrary states (`10-sync-correctness.md` §3, §6), so the copies in either order, once or again, give one
+  item; two copies may carry the same record *version* by the same device with different contents, and then the
+  rows differ in bytes at an equal stamp, which the engine has always sent to the merger rather than treated as "the
+  same" (only byte-identical rows are); two tombstones with one stamp and different summaries join
+  (`joinErasureSummaries`). It is exactly as sound as a rolled-back device already was without a name collision: the
+  two writes under one revision are both kept, and the stated limit of `10-sync-correctness.md` §8 (C1) applies — a
+  write that had seen the first is taken to have seen the second. Nothing new is lost by merging; refusing would
+  lose the reach of one copy's edits for good.
+  - *Sequence.* A stream is still merged strictly in sequence. A position with several copies is one position: all
+    its copies are checked and opened before any entry of any is applied, and if one that verified at download does
+    not open (a key not yet held, say) nothing is applied and the stream waits there, so the position is never passed
+    with part of what it holds.
+  - *Acknowledgements.* A segment's vector lets other devices collect their segments, so of several copies the engine
+    records the pointwise **minimum**: only what every copy acknowledges.
+  - *Snapshots.* Several verifying copies of a snapshot are each merged, and the coverage recorded is the pointwise
+    **maximum**: coverage says "the effects of these segments are in the local store", and once every copy's entries
+    are applied that holds for each copy's vector.
+  - *A copy found late.* A device that merged a position before a second copy appeared never fetches that position
+    again, so the listing's count is what tells it: a name whose count differs from the one remembered for it
+    (`SyncState.examinedCopies`) is examined again, and its verifying copies are applied *late*, with no change to
+    `merged` or the acknowledgements. That is the application of a stale snapshot's entries, which the engine already
+    does for every listed snapshot: idempotent, and unable to displace anything written knowing more.
+  - *The author hands on.* A device that finds its own stream forked (several verifying copies of one of its own
+    names) cannot assume any other device saw both. It owes a snapshot of its own (`SyncState.handOnOwed`), as a
+    device owes one for a revoked device's work (below): everything it holds, which now contains both copies. Until
+    that snapshot is written it collects nothing.
+- *Shared vaults refuse several verifying copies, explicitly* (`SyncTransportError.conflictingVersions` as the
+  rejection's reason; the stream waits, as before this was built). A write cut is a chain of segment digests per
+  device (`SyncWriteCut`, `SharedStreamIndex`, §8.10): one digest per position. Two verifying copies of one position
+  are two chains, and a member whose device signed both could show one to the administrator taking the cut and the
+  other to everyone else; which writes are inside the cut would then depend on the copy a device happened to read.
+  Nothing here can show that sound, so it is a limit, not a guess: the position is refused until one copy is left (a
+  member of the vault, or the provider, removes the other by hand), and a second copy found late at a position
+  already merged is reported and not applied. One verifying copy among junk is used in a shared vault as anywhere.
+- *Nothing is resolved on the provider; the decision is remembered locally.* Removing a copy deletes bytes another
+  device may not have read, and only the engine of a device that has merged a copy knows it is safe to lose there;
+  so no device removes another device's copies, ever, and no device "picks a winner" on the provider. Each device
+  remembers per name the number of copies it has examined, and looks again only when the provider's count changes,
+  or at every sync while one of them could not be read (`unread`); its author does not collect a name of its own
+  whose copies it has not examined in full (R11), since `delete` removes every copy. A name whose copies were unread
+  when last examined (`SyncState.unreadCopies`), at whatever count is listed now, is examined after every other name,
+  so copies that never become readable, honestly or because A1 withholds them, cannot spend the bound ahead of a late
+  fork (R17); those names take turns, least recently examined first (`unreadCopiesExamined`), so each is examined
+  again within a number of syncs bounded by how many there are (R19). The iCloud adapter asks for a conflict
+  version's contents once the copies' read has ended (a detached coordinated read of the version's URL, bounded by
+  its own download deadline), once per version while that request waits and at most `PendingDownloads.capacity` at a
+  time (R20).
+  The copies go when the object goes: its author collects it under the usual rule (every other stream acknowledges
+  the position, a listed snapshot covers it, and it is not the stream's newest), after its hand-on snapshot, and the
+  transport's `delete` then removes every copy under the name. Junk copies beside another device's object stay until
+  that device collects it.
+- *Bounds* (`SyncConfiguration.maximumCopiesPerObject`, 16; `maximumCopiesPerSync`, 512). At most 16 copies of one
+  name are fetched, each within the object size limit; more are counted (`SyncReport.copiesNotExamined`) and not
+  read. Once one sync has fetched 512 copies of flagged names it looks at no further name's copies (the name it is on
+  is finished, so the most is 527), and half of that is kept for names already merged, so that junk under names a
+  device still waits for, examined again at every sync, cannot keep a late copy from being read (R13): a flagged name the stream needs is fetched as its current file alone, as before
+  this was built (its other copies are examined by a later sync, late), and already-merged names wait for a later
+  sync. **Not in a vault with a judge** (V59): there one copy of a fork fetched alone was staged and merged, though
+  every member that examined the name refuses it, so members could merge different objects at one position. Such a
+  vault leaves the name unfetched (`SyncReport.copiesLeftUnfetched`) and its stream waits there for a sync with the
+  budget to examine it whole. Nor does it stage a name it examined and could not read whole, one copy verifying (V61):
+  a copy listed and not readable yet (an iCloud conflict version not downloaded, or A1's `.N 2.wwe.icloud`, R21), or
+  one past `maximumCopiesPerObject`. Staged alone it was merged, and every member that read the other copy refuses
+  the name, V59's harm by another door. It is refused for now (`objectUnreadable`, which the sync summary counts as a
+  refused object), its stream waits, and every sync examines it again, the iCloud adapter asking for the version,
+  until one reads it whole; a copy that never becomes readable stops the stream as a withheld object does (R17).
+  Flagged names come after the rest, those at the next position of their stream first, then the others (snapshots,
+  later positions), each group by name (V64: it was the order of a set and a dictionary, different in every
+  process), so a genuine name a stream waits on is passed over only while 16 or more other streams, ahead of it by
+  name, hold copies at their next positions, which an honest household's forks do not reach and A1's junk under
+  authors of its own does: a liveness residual held as R17 is (A1 can withhold the object outright), with nothing
+  merged from the name meanwhile. So a flood of copies costs a bounded number of reads and signature checks per sync,
+  stalls no stream whose current file is genuine (outside a vault with a judge), and cannot stop this device publishing:
+  rejections are per object. What the bound gives up is a genuine copy hidden behind more than 15 planted ones, or a
+  count that A1 keeps equal while swapping copies; A1 can delete that copy outright, so this is withholding (Y7), not a
+  new capability. Copies of the account's own objects, and of the sharing objects, are not examined: those are named by
+  their digests or written once per device, and are read as their current file.
 
 **Record kinds a reader does not know** (ADR 0009, review finding N7). Every kind is critical or ignorable by its raw
 value (`EnvelopeKind.criticality(ofRawValue:)`: 10 to 127 ignorable, everything else critical; `scanStatus` is the first
@@ -549,14 +776,22 @@ are trusted only as far as their signature: existing devices never delete anythi
 Only a device that read everything a trusted device carried to it writes an ordinary one (`SyncReport.snapshotWithheld`
 and `snapshotWithheldBy` otherwise, ADR 0009): a snapshot from one that kept entries aside would cover their segments
 without being able to carry concurrent versions of one record, and once those segments were collected a device that
-reads the kind would never see what it left out. The snapshot a device owes for a revoked device's work is written
+reads the kind would never see what it left out. The same holds for a version kept in the quarantine instead of
+merged (an implausible jump, a join that does not fit in one record, a colliding record ID): its segment counts as
+merged, so while the quarantine holds a version a trusted device wrote, the device writes no ordinary snapshot either
+(`snapshotWithheldForQuarantine`, Z26, which the summary words, Z37), until the person has discarded what was kept,
+nor while a trusted device's version found no room there (Z38). A snapshot's coverage of the
+reader's own stream is believed no further than that stream can have got (Z21). The snapshot a device owes for a
+revoked device's work is written
 all the same, with coverage only of revoked devices' streams, which nobody reads or collects, so it hands that work on
 and makes nothing collectable.
 
 **Reconciling** (`sync(reconcile: true)`) forgets everything but pending deletions and the erasures it has merged,
 and replays the log. On a healthy device it changes nothing; on one whose file was rolled back it restores the newest
 versions. A shared vault's engine, which has a judge and a whole log, rebuilds the erasures from the log as well
-(§8.10, S40).
+(§8.10, S40). A replay is begun only with the log's listing in hand and no sign that the store was reset; otherwise
+it is postponed and the state kept (`SyncReport.replayPostponed`, §7.10), since forgetting what was published and
+merged in front of a log that is gone would publish every row again and rebuild nothing.
 
 **Revoked devices.** The keyring tells the engine which devices are revoked (`SyncKeyring.retiredAuthors`, §7.8).
 From then on the engine does not read their objects at all (`SyncReport.retiredObjects`; staged ones are dropped
@@ -600,7 +835,34 @@ its own device, and another device signing in its stream is refused by everyone 
 in the directory — deleted vaults included, so that what a deletion had not seen still arrives — and returns an
 `AccountSyncReport`; `sync()` returns the vaults' reports added up. While locked each engine only downloads. The
 same holds, unlocked, while this device is not registered, has been revoked, or has seen a password change it
-has not been given (§7.8).
+has not been given (§7.8). A sync decides once, before any vault, whether it may write (`mayWrite`), so one begun
+locked only downloads to its end whatever an unlock does meanwhile. A decision made once is not enough while its inputs
+are read before awaits (Z253): the account was read at the sync's start, and an unlock that installed the keys before
+the decision, while registering a store restored onto other hardware as a new device, left the sync deciding as the
+earlier ID, still active with no move recorded, and writing under it while the unlock made the move. So `mayWrite`
+also needs a key for the sync's device ID on this installation, read as the last await before the decision (a restored
+store has none for its earlier ID, and never gets one back), and no registration under way. That read keeps a failure
+apart from an absent key (`ownDeviceKey(of:)`, Z265): only a key the Keychain says is absent registers this
+installation as a new device, and either makes the sync a download. An unlocked sync held back by the key alone says
+which (`AccountSyncReport.ownDeviceKeyWait`: the key could not be read, or the device is still registering), worded as
+such and never "when you unlock" (Z264). A move pending leaves it unset and is said by its own notice and, unlocked, by
+the headline (`movePendingWhileUnlocked`: applied once the device has finished moving its sync records, Z271). A store
+that was reset (§7.10) is said first in the headline, over either, since such a sync downloaded nothing, with the key's
+or the move's notice beside it (merged so at round 25); a reset only suspected is asked about by the next sync that may
+write. A download remembers what it learnt of conflict copies in the vault's state (§7.5), but each vault state, stash,
+released deletion and chain row the sync signs goes through what the sync began with (`SyncStateWrites`: the device ID,
+the lock epoch, and that it began as a writer), checked synchronously before its signature (this branch's V66; PR #23's
+Z253, Z256 and Z257 are the same mechanism, ported under the same names and extended to the release, the carry and the
+chain row). So a sync that outlives a lock, an unlock or a new ID saves none of what it loaded for the old, and the
+download-only pass of a sync that did not begin as a writer saves no state (`savingState: stateWrites.permitted`). The
+epoch clause carries the other two across the awaits between a check and the store's write (Z255). Its cost: a lock and
+an unlock between a push's create and its save leave the segment published and the state unsaved, so the next sync
+reports its place taken (`ownStreamConflict`) and holds deletions for that sync, and the one after recovers, nothing
+lost (V66, Z257). An unlock that registers a restored device and makes, or waits for, its move during a sync begun
+locked finds every vault's state as it left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands the unlock
+after the decision, `lockedSyncDecidesOnTheAccountAfterItsAwaits` before it, and
+`lockedSyncWithAnUnreadCopyAcrossTheUnlocksRegistration` leaves a copy unread, which is what makes the download save
+here).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -616,16 +878,26 @@ the actor is re-entrant, so a merge can store a newer version while a save waits
 (`conflictValueNotHeld` otherwise), and checks a chosen scope with `ScopePolicy` like any save.
 
 **State.** `SQLiteSyncStateStore` (§6). Deleting the account erases it with the record store, and the Keychain copy
-of the signing key with the other Keychain items. A pending deletion is the one thing in that file sync acts on rather
-than rebuilds — it becomes a tombstone that erases the record everywhere — so the session reaches the store through
-`AuthenticatedSyncState`: each deletion it commits is signed with the account key (`SignatureDomain.pendingDeletion`,
-over every field and the deleted row's envelope), and a pending deletion that is not this device's, or does not verify,
-is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. The stash of entries an
+of the signing key with the other Keychain items. Three things in that file are acted on rather than checked again,
+and the session reaches the store through `AuthenticatedSyncState`, which signs each as it is written and verifies it
+as it is read. A pending deletion becomes a tombstone that erases the record everywhere: each deletion the session
+commits is signed with the account key (`SignatureDomain.pendingDeletion`,
+over every field and the deleted row's envelope), before the deletion commits and recorded after it (Z28), and a
+pending deletion that is not this device's, or does not verify,
+is ignored: never published, never treated as an erasure. A row A8 plants there erases nothing. The state row itself
+(Z20): the erasures it remembers become the tombstones of this device's next snapshot, its merged positions the
+coverage and acknowledgements of everything the device signs, and its published stamps decide which rows are never
+sent again, so the whole row is signed (`SignatureDomain.syncState`, over `"WWSS" ‖ vault ID ‖ device ID ‖` every
+field in one fixed encoding) and a row that does not verify is no state: the engine starts from nothing and replays
+the log, which rebuilds the erasures. A state is saved only while unlocked. Signatures stop planting, not rollback: an
+older row of this device's own costs a replay of what it had merged since. The stash of entries an
 earlier version cannot read (ADR 0009) is signed the same way (`SignatureDomain.syncStash`, bound to the vault, the
 device and the state's stash generation), because a kept deletion processed after an update would otherwise erase a
 record here and go out in this device's next snapshot; a row that does not verify is refused and the log replayed.
-The file is at schema version 2 (the stash's table, migrated from version 1 when it is opened); an older app finds
-version 2, throws `unsupportedSchemaVersion` rather than misread it, deletes nothing and syncs nothing until it is
+The file is at schema version 3 (the stash's table from version 2, and the quarantine in a table with an indexed
+digest and a stored size from version 3, each migrated when the file is opened, the quarantine's rows carried over;
+version 3 has not yet been compiled or run on a Mac); an older app finds
+a later version, throws `unsupportedSchemaVersion` rather than misread it, deletes nothing and syncs nothing until it is
 updated again. Downgrading is not supported, and the file is never thrown away to allow it: it holds pending deletions
 and the quarantine, which no replay rebuilds. This holds per
 vault: a pending deletion counts only for the vault it is filed under.
@@ -644,7 +916,13 @@ of the same account in the process, so XCUITest drives a concurrent rename throu
 256-bit key, wrapped under Ksym as a `vaultKeyWrap` record whose identity — vault and key ID — comes from where it
 is stored, and a sealed description (§5). The Personal vault needs no description to exist (its name defaults
 to "Personal"), can be renamed, and can be neither deleted nor shared: the session refuses, and a deletion of it
-is ignored whoever signed it. Every `VaultSession` invariant holds per vault: contexts from the row, identity
+is ignored whoever signed it. The description merges as a last-writer-wins register (`VaultMetadataMerger`) on
+**the stamp of the write that chose it** (`VaultMetadata.descriptionStamp`: `writtenBy`, or the row's own version
+and device), not on the stamp of the row that carries it. A row sealed again (the merge of two rows at one
+version, a rotation's re-seal, a device registered again) is a carrier: it keeps the description's stamp, and a
+carrier at a higher version never brings an older name back over a newer one. Between two carriers of one
+description the higher row stamp stands. In a shared vault this is also what keeps the choice of name with its
+administrators (§8.10). Every `VaultSession` invariant holds per vault: contexts from the row, identity
 checks after decryption, conditional commits, sync metadata owned by the vault. Search (`search`, `ItemSearch`)
 runs over decrypted items in memory — titles, scope hosts, usernames and emails, tags, notes, never a secret
 field — and nothing is indexed on disk.
@@ -665,6 +943,12 @@ and not another's (offline, locked midway, `ownStreamConflict`) leaves the other
 was until a later sync publishes the copy and then the deletion. An item that holds
 values kept for the person to choose between is not moved until they have chosen (`itemHasUnresolvedValues`): the
 copy would not carry them and the deletion would discard them, which only the person may do (F7.7).
+A copy or move **out of a shared vault** is judged like an import entry (review finding Z72): in the shared vault
+the item's scopes were a member's word, shadowing nothing outside it and vouching for no look-alike (§9.2); in the
+destination they become the person's. So `transferConcern(itemID:to:)` reports, by `SavedSites`, the accounts the
+copy would hide or stand beside and its hosts that resemble a saved site (compared with the item's other scopes for
+resemblance only), and `copy` and `move` refuse with `transferNeedsConfirmation` unless `confirming` is that
+concern. Between the person's own vaults nothing is asked.
 
 **Deleting a vault** is explicit, confirmed, signed and never inferred from absence. The caller names how many
 items the vault holds (`itemCount(in:)`, shown to the person); if that is no longer true, nothing is deleted. In
@@ -686,8 +970,14 @@ account/<accountID>/header/<generation>-<deviceID>             the account heade
 account/<accountID>/registry/<sha256 of the entry, hex>        one device-registry entry (§7.8)
 account/<accountID>/vault/<vaultID>/key/<keyID>/<deviceID>     a vault key wrapped under Ksym, vouched for by that device
 account/<accountID>/vault/<vaultID>/deleted/<deviceID>         the vault was deleted, as stated by that device
+account/<accountID>/vault/<vaultID>/shared/<deviceID>          the vault is shared, as stated by that device (§8.10)
 ```
 
+- **A store that holds none of them.** Every sync publishes what the store lacks of these objects, so a header or a
+  registry entry A1 deletes is put back by any device that holds it. The one exception is a store that lists *no*
+  registry entry the device retains while the device's sync state says it has published or merged a vault's log:
+  that store was emptied, not never set up, and nothing is published into it, these objects included, until the
+  person has answered (§7.10).
 - **The header** is everything a new device needs to derive the AUK and open the keyset: KDF algorithm,
   iterations and salt, the AUK's key ID, the wrapped keyset exactly as the local store holds it, the IDs of the
   registry's genesis entry and of the credential entry it belongs to, and a *binding*: an AEAD under the AUK over
@@ -707,6 +997,17 @@ account/<accountID>/vault/<vaultID>/deleted/<deviceID>         the vault was del
   that does not open (edited in the file, A8: moved under another vault, corrupted) counts as missing while
   unlocked, and the next sync replaces it with a copy from the transport that passed those checks; until then the
   vault is not listed or written and its items are reported unreadable, never opened under another key.
+- **A wrap says whether its key arrived by grant.** The wrap's context (its authenticated data) carries schema
+  version 1 for a key the account made and 2 for one another account's grant gave it (`VaultKey.arrivedByGrant`,
+  set by `VaultKeyGrant.open`). Either form is accepted from the directory; `VaultKey.unwrap` reports which. So the
+  fact that a vault is governed by a membership chain reaches every device of a member's account with the key itself,
+  and neither the store (A1, by withholding) nor someone with the file (A8, who cannot seal under Ksym) can take it
+  off. **A marker** (`shared/<deviceID>`, body `"WWVS1-shared" ‖ vault ID ‖ the chain owner's account ID`, the same
+  two signatures) says the same for a vault its owner shared, whose first key is the account's own and says nothing,
+  and gives every device the owner. Markers are a third grow-only set: vouched for by each device under its own name,
+  fetched before any vault's log is touched, and kept as a row of the record store that counts on the account key's
+  signature alone, so revoking the device that wrote one does not unmark the vault. What a device does with a vault
+  marked either way is §8.10's.
 
 Names reveal the account ID, vault, key and device IDs and the credential generation; a device's name is sealed
 under Ksym inside its registry entry; vault names are in the vaults' own logs.
@@ -716,7 +1017,14 @@ account password and the Secret Key (typed, or the Emergency Kit's setup code, w
 
 1. List the account's headers and take the newest first. A header that does not parse, whose name disagrees with
    its contents, or whose KDF parameters are outside the two-sided bounds is skipped before any derivation
-   (SEC5, SEC9); at most three that parse are tried, because each costs a derivation.
+   (SEC5, SEC9); at most three that parse are tried, because each costs a derivation, and at most one per
+   authoring device (its newest), so a device that publishes a chain of headers spends one of the three (Z1).
+   Nothing can be checked against the registry yet: a store that plants well-formed headers under device IDs of
+   its own invention still uses up the three, as it can delete the real header (W5, Y7). So can a revoked device
+   that can create objects and delete none, and because a header's name is `header/<generation>-<device>`, with no
+   digest of its contents, it can also create the name a device will publish its next change under before that
+   device does: objects are never overwritten, so the genuine header is not published there and no lagging or new
+   device can follow that change (review finding Z16, tracked: a digest in the name, as sharing objects have, S20).
 2. Derive the AUK, open the keyset (bound to the account ID), open the binding. Any failure is the one error a
    wrong password and a wrong Secret Key share. The binding is what authenticates the header to a device that
    holds no key yet: nobody without the password and Secret Key can make one, and it fixes the two things a new
@@ -734,10 +1042,202 @@ account password and the Secret Key (typed, or the Emergency Kit's setup code, w
 at its first unlock the installation registers as a new device under a new ID. The engine publishes only its own
 device's rows, so what the old ID wrote and never published would otherwise stay on this device alone (F7.7): in
 the commit that registers it, every row of the old ID that the restored sync state does not record as published is
-written again by the new ID, unchanged (`ItemMerge.written`, one version up), and each of the old ID's verified
-pending deletions is recorded again as the new ID's, stamped above it. A vault's name, being last-writer-wins, is
-carried over only when the sync state says it was unpublished, so a stale backup cannot override a later rename.
-Each vault's sync state then starts over: the old ID's stream is not this device's to continue.
+written again by the new ID, unchanged (`ItemMerge.written`, one version up). A vault's name, being last-writer-wins,
+is carried over only when the sync state says it was unpublished, so a stale backup cannot override a later rename.
+The same commit records the move of the old ID's sync state (`AccountRecord.migration`: the old ID, signed by the
+account key with the account and the new ID under `SignatureDomain.deviceMigration`; review finding Z181), which
+`completeDeviceMigration` then makes: each vault's sync state starts over, saved empty and signed for the new ID (the
+old ID's stream is not this device's to continue; an unsigned row would read as no state, Z184), each of the old ID's
+verified pending deletions is recorded again as the new ID's, stamped above it, and the record is cleared. A deletion
+this device cannot sign as the new ID's, for want of a current key for its vault (a shared vault held closed, Z41 and
+Z59, or a key not held here), is parked instead (below) and released once the vault has a key, so no deletion stops
+the move (review finding Z185). A move that fails part way (a state file that cannot be written) is made again at
+each unlock, after the vaults' markers are read (Z190), and each sync until it is complete; until then the device
+publishes nothing (`deviceMigrationIncomplete`, shown in the sync summary), and registers no further ID over it. The
+record is written and cleared only by the commits that say so (`StoreChange.migration`); every other write of the
+account record, a password change read before its awaits among them, keeps what the store holds (Z186). A
+registration that fails before its commit deletes the device key it made, and only that one, and two registrations
+never run at once (Z189, Z193); one reads the account record again once it runs, goes ahead only while the record
+names the ID its caller saw, and commits only over that ID (`StoreChange.expectedDeviceID`), and a restore whose
+registration did not happen at its unlock registers at the next sync (Z201). A version this device kept after its own
+deletion, which follows that deletion out, holds no deletion back (Z202, the bound of V46's rule where a vault's pass
+does not publish, §8.8); only pending deletions the session signed count there (Z203). A record the session did not
+sign moves nothing: planted in the file (A8), it would make this device take another device's pending deletions for
+its own.
+
+What is carried into a vault that may be shared, from an old ID that commits, has the old ID's work above what it
+published written again as the new ID's (`ItemMerge.reattributed`, docs/10 §9): carried with the old ID's stamps, it
+held values, and a deletion's summary claimed edits, that no segment of the old ID's stream carried, and every member's
+judge held them aside, the restored device's own on a replay (Z191). A carried deletion's erased row is written the same
+way, so its summary claims nothing the old ID did not publish. Only the old ID's own parts (and the new ID's) are
+renamed: another device's stamps, discards and lines stay byte for byte as its stream carried them (Z197). What counts
+as published is the most of three: the last version of the record the old ID's own signed state recorded, the highest
+version the old ID's own stream carried as the stream index and that stream's downloaded segments show it once the
+vault's log has been pulled (`SyncEngine.stagedEntries`, which opens and checks each segment but asks
+nothing of the judge, so only what a segment says of its own author's versions is taken from it), and what the row
+itself, whose versions the judge admitted, shows a third device saw of the old ID (Z197, Z198, Z204). Both stream
+routes stop before a name a merge here does not pass for its copies (`SyncEngine.mergeReach(of:stoppedAt:)`): one this
+sync's download refused (two verifying copies of one name, `conflictingVersions`, which is never staged, so every
+download examines it again and refuses it again), and one staged with conflict copies (which the merge refuses); never
+at or past it, unless the vault's state or a staged snapshot covers it, as the merge then passes it. A name the
+download left unfetched for want of its bound of copies (V59, `SyncReport.copyWaits`) is undecided, a stop if it is a
+fork and none if it is not: taken for a stop, A1 made one by planting a junk copy beside a genuine name and spending
+the bound, and the carry renamed what the old ID had published (V62). Where one would bound the carry, the carry
+waits for the next sync, whose bound refills (a delay only, however long A1 keeps spending it); the hold and the
+records a lost state makes count it as a stop, which only holds or records more. A name refused for a copy not read
+whole (V61) is a position not here for now, as below. The judge records every staged segment, a later position of a
+refused stream included, and the stream is never merged past the refused name (Z221, V56). A position merely not here
+(not downloaded yet, an iCloud placeholder, unreadable for now, collected) stops nothing: the move starts every vault's
+state over, so a reach that stopped there was the staged run from position 1, and at the first sync after a restore a
+placeholder of the old ID's first segment renamed everything it had published, which every member then held twice
+(V58, bringing back Z198). The names are the latest download's in the session (`downloadCopyStops`,
+`downloadCopyWaits`), so the carry and the hold bound alike. The move, and the records a lost state makes before any
+download of the sync (V57, Z225), apply no bound: with no download in hand, and with stops that are this session's
+memory, empty after a relaunch, their bound was the pre-V56 one at best, and a row whose work only segments past a
+refused fork carried went unrecorded. They record every row of an earlier ID holding its work, and the
+carry, with the download in hand, drops what that ID published (V63). The reach is applied in every vault the restore
+names, judge or not: where there is none a name with copies is merged, not refused, and the bound is only lower than
+what the merge takes, renaming more and losing nothing. Work that only segments at or past the refused name carried is
+renamed as the new ID's, and members that merged the name before the fork hold it twice, as conflicts, losing neither.
+Never what a downloaded version of a third device claims: nothing has judged it yet, and a member who may write could
+claim to have seen all of the old ID's work, so that the carry dropped its entry while every judge held the claim aside
+(Z208). In a shared vault the log is whole from the day it was shared, so whatever an honest third device saw of the old
+ID since then is in the old ID's own segments. Not what an owner's device published while the vault was private: those
+segments may have been collected under a snapshot before the vault was shared (Z144), and the old ID's signed state is
+then the only bound; with that state lost or edited (A8) the carry writes the work again as the new ID's, and members
+hold it twice, as conflicts, losing neither (Z218, accepted). The old ID's signed state is believed as it stands: a
+version it says was published but only a name every member now refuses carried is not renamed, and a member who saw
+the fork first holds every version holding that work aside (V56, open).
+So registration carries none of a shared vault's items:
+the move records each row the old ID left there, before it empties the old ID's state, in the vault's new signed state
+with the old ID's last published version of the record (`SyncState.restoredUnpublished`), and each of the old ID's
+deletions there; a sync carries them (`carryRestoredWork`) after it has downloaded that vault's log and before it
+merges anything it downloaded (`SyncEngine.download`, then `stagedEntries` for the bound, then the pass that merges;
+the session test `carryBeforeTheMergeKeepsTheFieldOrder` fails if it merges first, Z210),
+so that the pulled versions are merged into the renamed version as every other device merges them (Z204: renamed after
+the merge, a field order's tie could fall otherwise there than everywhere else); the vault publishes nothing while
+anything is still to carry there, so that no merge of a row still holding the old ID's work goes out, and a carry that
+cannot run or finish merges nothing there in that sync, in any pass, a replay asked for included, which waits for the
+sync whose carry finishes (Z209), the sync naming the vault (`publishingHeldForCarry`, Z207); the carry reads the keys
+again after every suspension, so a lock during it stops it rather than reading zeroised keys (Z212);
+the carried rows go out at the next sync, and a take-out leaves such rows alone. While a recorded
+row still holds that work every vault's deletions wait (`holdsRestoredWork`), since one of them may be the source half
+of a move whose copy it is, and the sync names the items (`restoredWorkWaiting`, Z192). The hold fails closed (Z200): a
+state that cannot be read holds, so does one that does not verify while the restore's chain of earlier IDs is known
+(the move under way, every ID an entry of a verified state names, and every ID a vault's chain row names, in any vault:
+`restoredChain`; never an ID read from a state that does not verify, which A8 can name there, Z206, Z211 and Z216). The
+chain row (`RestoredChainRow`, `SharingStateKey.restoredChain`, signed by the account and bound to the vault and to this
+device's ID) is written by the move, from what verifies there (`AccountRecord.migration` and the earlier ID's signed
+state), before the vault's state, adding to what the row names and never replacing it, so that a move made again narrows
+nothing (Z225); and again by each later save of the entries, so that it outlives the state being damaged. It can be
+signed only with the keys here and kept only with sharing configured, so it is also filled in from each vault's verified
+state, adding what the row lacks, when sharing is configured on an unlocked session, after each unlock and at each sync
+that may write (`backfillRestoredChains`, Z222); a state damaged before any of those since the move is lost with its
+chain, as before Z200. A restored device registers from the registry it holds, so the registry cannot tell an earlier ID
+of this installation from a sibling enrolled before the restore, and only the move's own record can (Z216); the move's
+earlier ID counts only from a migration record this session signed (Z227). In a vault whose state is lost or does not
+verify, a row still that ID's, holding its work above what its stream carried, holds as if an entry named it
+(`rowsLeftByEarlierIDs`), and is recorded again in a state this session signs before the logs; the move does the same
+where neither this device's state nor the earlier ID's verifies, for the IDs the vault's chain row names (the row of an
+earlier attempt at the move, or the earlier ID's own, from its own restore; Z225, Z226): a second restore's inherited
+entries are named by no other record then, and the state the move saves verifies, so the hold would read it and never
+look for them. Both find those rows the one way (`rowsLeft`: the hold within the reach of V58, the records with no
+bound, V63), from the rows read once, before the parked deletions, so that a chain ID's row wins a key both name (V57
+was the same bug, fixed apart and merged into Z225's code). Those rows are read through sharing, so a move that would
+read one while sharing is not configured waits, its record kept and nothing published, and `configureSharing` makes it
+(through `completeDeviceMigration` and `startSyncStatesOver`, as every move), or the next unlock or sync after it
+(`moveAwaitsSharing`, Z229); so does a move into a shared vault with no state at all, where the rows would be read too
+(Z238). A vault whose state verifies, for the earlier ID (a first restore) or for this device's own (a move made again),
+needs no row, so those moves do not wait (Z235). While a move is pending nothing but the move writes a vault's sync
+state or chain row: a sync then only downloads, and its download saves nothing of what it learnt of conflict copies
+(`SyncEngine.download(savingState:)`; the move starts every state over anyway, so the copies are only examined again);
+the sync's other writes need the move to be complete; Stop Waiting is refused (`VaultError.deviceMigrationIncomplete`,
+read again before its save); and the chain backfill, whose rows the move writes itself, waits for it (Z234, which is
+also V60's); and so does the sharing pass's take-out, which runs only in a sync that may write (Z253): during the move
+it found no restored work in a state that does not verify for the new ID and took the earlier ID's uncarried copy out. A
+state saved then was one started over for the new ID where none verified, which the move read as one it had begun,
+recording nothing of the earlier IDs' work and none of V49's facts (V60). Nor does a sync that began before the move was
+recorded save a state under it: its engines' state store refuses to sign once the vault has been locked, this device's
+ID has changed or a move has been recorded since the sync began, and a sync that did not begin as a writer saves none
+(`SyncStateWrites`, V66; the same mechanism as PR #23's Z253, Z256 and Z257, §7.5); V60 decided only at the sync's
+start, and an unlock during a locked sync registered a restored device and recorded, or made, the move while the
+download was still to save. The move is made once at a time, and only while the store still records it
+(`migrationInFlight`, Z237); a caller turned away meanwhile (`configureSharing` while the move under way waits for
+sharing, an unlock after a lock that stops it) has it made once more when the move under way ends, with the keys of then
+(Z241), from the account the store holds then, never a caller's older one, and an attempt's failure stands until an
+attempt makes the move (Z247): the first failure, or an unreadable chain row over any other (Z259); each attempt takes
+its lock epoch before its first await (Z242). A chain row the sharing store cannot read fails the move, to be made
+again, never read as none (Z236), and holds the deletions back; so does a listing of the vault directory or a vault's
+state that fails while the chain is read (Z245, a state's failure not reported as a row's, Z260). A vault's state that
+cannot be read when a sync asks whether it has a restore's work to carry counts as having some, and a vault whose state
+does not verify and whose re-record of what a restore left fails merges nothing in that sync either: merged first, a row
+still holding the earlier ID's work becomes the new ID's before the carry (Z254). The take-out, which leaves those rows
+alone, does not run on a state it cannot read (Z258), and a take-out that did not finish leaves its judged basis
+unsettled: no replay settles a vault's basis while a take-out begun for it has not ended normally (`takeOutsOwed`,
+beside S65's `takenOutAgainst`, which a take-out that throws leaves as it was), and a replay whose take-out throws waits
+for the next sync (Z262). Settled after one, every later take-out returned at its first guard, and a demoted member's
+late write merged before the demotion was known stayed current here for good. While a vault's take-out is owed it
+publishes nothing, in its first pass (the one that hands on after a reset too) or in a replay whose take-out returned
+with nothing decided, since what this device holds there may be built on the write to be taken out (Z270, Z276; merged
+so at round 25); a vault still owed after the replay loop, or whose replay's take-out threw, holds every deletion back
+for that sync and is named (`AccountSyncReport.takeOutUnfinished`, its own notice, never `deletionsHeldBack`'s wording,
+Z268), which says its changes there wait only where no pass of the sync published there
+(`takeOutUnfinishedSentNothing`), and otherwise that they may (Z273). Only a take-out that finishes ends it, and every
+sync that may write and reaches the take-out runs one (a disputed vault, and a sync a transport failure stops, do not,
+and neither publishes, Z277). Before its first row goes, and before it withdraws a pending deletion (Z279), a take-out
+saves the judged head unsettled, so that what it changed before it threw, or before the process ended, is made good by a
+replay after any relaunch, whatever the basis does, not only while `takeOutsOwed` remembers it (Z274, beside S65's
+`takenOutAgainst`, which a take-out that throws still leaves as it was); a sharing state that cannot be saved then fails
+the take-out, closed. A take-out owed and found at the judged basis (one that took rows out before it threw, the basis
+since come back) asks for the replay that rebuilds them (Z269), and records that basis's head as S65's
+`takenOutAgainst`; and the rebuilding guard's clearing of an owed entry is what lets a rebuild end (Z275). Nor is such a
+vault, nor any other still in `takeOutsOwed` after the passes (one whose carry did not finish, or whose device ID does
+not commit), sealed again in that sync, by a rotation's reseal step or the catch-up after the logs: the reseal's own
+take-out (S59) would act with no replay after it, and what it took out stood missing until the next sync (V71). A plan
+carried on there still revokes the transport's share and publishes its record, and waits at `.resealing` until a sync
+whose take-out finishes, where take-out, replay and reseal act together. No owed removal waits for it: nothing is sealed
+again while a removal is owed (S19), so a plan resumed then completes and the removal is planned in the same pass; what
+waits is a leave request, which becomes a departure on this device only at that later sync (V75). What waits to be
+sealed again is either on the transport under the old key already or goes out later inside segments sealed under the
+vault's current key, the new one, and the vault publishes nothing while its take-out is owed, so the wait shows a
+removed member nothing that sealing again at once would not. But a row is read only where it can decide something
+(Z239): by a move only where no state verifies, and to add to it what the vault's entries name, and by the hold, the
+report, the re-record and Stop Waiting only for a vault that may be shared whose state does not verify, or that has none
+(`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248), so a sharing store that cannot read the rows
+holds back only what depends on them, and an ordinary restore reads none, nor does a device never restored while its
+shared vaults' states verify. One whose shared vault's state is lost or damaged reads every shared vault's row, the
+chain being a union across vaults (Z216), and holds while one cannot be read (Z250). Where one is needed and cannot be
+read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never restored,
+Z240, Z250); the move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when
+the vault opens here and the row is carried, when a version that holds none of the work replaces the row, when the vault
+is deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync
+reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault
+that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
+`SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
+owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
+later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the
+old ID published (old hardware still running under it that publishes after the carry, or a segment of its stream this
+device does not show) members hold the old ID's copy and the new ID's both, as concurrent values: nothing is lost, but
+what the old ID later replaced or deleted comes back beside it (Z198, recorded). One exception (review finding Z167):
+where a shared vault holds an edit of the old ID that nobody received (the old ID does not commit, Z162, so a copy it
+published there reached nobody), the old ID's pending deletions are not carried over but **parked**: signed by the
+session under an ID derived from the new one that names no device (`parkedDeletionDevice`), which the engine neither
+publishes nor applies, and which no other device's deletion copied into the file can carry; each sync reports the vault
+(`deletionsHeldBack`) and, once no such edit remains (the person moved the copy out from this device, or deleted it),
+records them again as the new ID's (`releaseParkedDeletions`). Carrying the copy over would not do: its values keep the
+old ID's stamps, which every member holds aside. Any future way of moving an installation to a new ID (the in-app
+re-enrolment of Z162) parks the same way. One predicate decides the move, the release and the deletion gate (review
+finding Z170): any row of a shared vault, whichever device's, holding an edit of a device ID of the account's registry
+that does not commit, or of the ID being left (`vaultsHoldingEditsNobodyReceived`). An edit there is a value that ID
+stamped (`ItemMerge.attributedValues`, history entries included), never a clock entry or a stamp's `seen`, which are
+claims a writing member of another account can make about any ID (Z173); a value another account stamped with such an ID
+is held aside by the judge, so only this account's own writes, made here or carried over, count. The move parks again,
+whatever it finds, what the old ID had itself parked, so a second restore (from a backup taken under the restored ID,
+which commits) releases nothing; and while such a row exists no vault's deletions go out at all, the new ID's own
+included, or a deletion made again of an original that came back would go out ahead of its only copy. The sync names the
+copies (`AccountSyncReport.copiesNobodyReceived`, Z171) and the summary says what releases them: moving each out of the
+shared vault from this device, or deleting it. Where this device may not do either (the account only reads the vault, or
+holds no key or ledger for it here) the deletions wait, in every vault, Personal included, until it may.
 
 What a store that replays the account's *entire* earlier state can do: show a new device the account as it was
 (only with the password of that time, so the person has to type an old password for it to work). That device
@@ -747,14 +1247,50 @@ has the account is not affected at all: it follows only newer credentials, and r
 
 **A password change is the account's, not the device's.** `changePassword` re-verifies the current password,
 writes a credential entry to the registry (§7.8) and a new header, and deletes the header it replaces from the
-transport. Every other device, at its next sync, keeps the new header as a *candidate* — only if the registry
-holds its credential entry and the account key and the writing device signed it — and from then on refuses the old
-password (`passwordChangedOnAnotherDevice`), refuses quick unlock (and destroys the Local Unlock Key), and neither
-merges nor publishes until the person enters the new password there, which adopts the header. The keyset does not
-change: a password change does not take the keys away from someone who opened them with the old password (§7.8
-says what does). If the change was not the person's, they unlock a device they still hold with the password it
-has (`unlock(password:ignoringPasswordChange:)`), revoke the device that made it and set a password of their own;
-every other device then follows whichever password the person gives it.
+transport. Every other device, from the sync that brings it the credential entry, refuses the old password
+(`passwordChangedOnAnotherDevice`), refuses quick unlock (and destroys the Local Unlock Key), and neither merges nor
+publishes until the person enters the new password there, which adopts the change's header. That refusal is keyed
+on the registry's entry and remembered in the Keychain's anchor, not on the header having arrived or on any row of
+the local file (Z3, §7.8). The header is kept as a *candidate* only if the registry lists its credential entry and
+the account key and the writing device signed it, one per authoring device. The keyset does not change: a
+password change does not take the keys away from someone who opened them with the old password (§7.8 says what
+does).
+
+**Which header a typed password is tried against** (`openAccount`; review findings Z1, Z8). The device's own
+header first: it is the one thing in reach that no adversary wrote, and no derivation under parameters someone
+else chose runs ahead of it. If the password opens it while a change is pending, it is the retired password and is
+refused; it is never taken as confirming a "change" that happens to use the same password, which a revoked device
+that knew it can publish. If it does not open it, each device that published a *pending* change (one that follows
+the credentials this device has) gets one attempt, on its newest header, up to three; a change whose own history
+revokes this device is refused (`passwordChangeRevokesThisDevice`), and if more devices have published one than
+were tried, the unlock says that (`tooManyPasswordChangesPending`) rather than "wrong password". The devices whose
+registration the checkpoint this device follows had sealed are tried first (review finding Z13): one registered
+after it may have been registered with the password it retired, by anyone who knew that password, and as many of
+them as they like, so the order of generations and IDs, both a change's author's choice, comes second. A change that
+branches off *before* the credentials this device follows (two devices changed the password at once, or someone
+used a password since retired) is not tried from the lock screen at all, or a retired password would open a
+device that has moved on. If the change was not the person's, they unlock a device they still hold with the
+password it has (`unlock(password:ignoringPasswordChange:)`, which reads no candidate), revoke the device that made
+it and set a password of their own. From an unlocked session `pendingPasswordChanges` lists **every** device that
+made a change this device does not follow, sealed ones first, with what following each would revoke worked out for
+the first sixteen and for any other the person selects (`describePasswordChange`, Z13); and
+`followPasswordChange(by:current:password:)` follows the one the person names, given the password this device
+follows now, re-derived under its own header (Z14: an unlocked or quick-unlocked session is not enough), and that
+change's password. That is how a fork is followed, and how the genuine change is reached when a revoked device has
+published more than an unlock tries. Every derivation under a candidate's parameters (its author's choice, up to the
+ceiling) runs off the session's actor, so a `lock()` never waits for one (Z14).
+
+**A header ahead of the anchor** (review finding Z9). The local header row is A8's to write, and a revoked device's
+holder can make a header for a change of their own with the retired password, so a row one generation ahead of the
+Keychain anchor proves nothing. Before an adoption or a password change commits, the device writes into the anchor
+the credential entry it is moving to and the SHA-256 of the exact header row it commits; once the commit is pinned
+the intent is cleared. A crash between the two leaves an intent that the next read completes (the row is that
+header) or drops (the row is still the one the anchor follows). A row ahead of the anchor that no intent names is
+not this device's step: a change is pending, the password that opens it is refused like a retired one, with
+`ignoringPasswordChange` the device opens and follows nothing, and nothing moves the anchor onto it. Candidates are
+judged along the same chain as that question, and none is tried while a step of the device's own is under way. An
+anchor left behind its row by a version that wrote no intent reads the same way; the device is opened with
+`ignoringPasswordChange`, and the change is followed by naming its own device.
 
 ### 7.8 The device registry (as built; review findings D9, Y5, Y6)
 
@@ -770,6 +1306,23 @@ it follows). Every entry carries the account key's signature and its author's: a
 — for a device registering itself — the current enrolment key. A credential entry is signed a third time, by the
 enrolment key of the generation it replaces: a device that merely holds the keyset cannot change the password for
 everyone. Entries the account key did not sign are never admitted at all.
+
+**A device's ID commits to its account** (review finding Z157). It is the first 128 bits of
+`SHA-256("WW-device-id-v1" ‖ 0x00 ‖ accountID ‖ algorithm ‖ keyLength ‖ key)` over the device key's public half, as an
+RFC 9562 version-8 UUID (`DeviceIdentifier`): the device makes its key first and takes the ID it gives
+(`DeviceKeyStore.createDevice`, at account creation, enrolment, a restore onto new hardware and
+`prepareDeviceIdentity`). A registered device's key never changes, so neither does the commitment. Nothing in the
+registry's own rules depends on it, and a private vault never asks: its writers are this account's devices. A shared
+vault asks it of every registry, this account's own included (`DeviceRegistryState.committedDevicesOnly`): a device
+counts there only if its ID commits to the registry's account under the key the registry lists. Any account can still
+put any device ID in its own registry, but for another account's device that is a second preimage of 122 bits, so no
+account can list, sign as or revoke another account's device where it matters; §8.10 says what that settles. No entry
+format changed; an installation whose device IDs predate this has devices that count in no shared vault, and such a
+device takes no part in one (review finding Z162): it shares, accepts, writes and publishes nothing there
+(`SharedVaultError.deviceIDDoesNotCommit`, `SharedVaultSyncReport.deviceIDDoesNotCommit`), and nothing it published
+there under an earlier build counts as published, so no vault's deletion goes out ahead of a copy it holds alone. It
+takes part once it is enrolled again as a new device (an owner decision). `approveDevice` and `enrol(as:)` refuse an
+identity whose ID does not commit (`VaultError.deviceIDDoesNotCommit`).
 
 **Rules** (`DeviceRegistry.evaluate`, a pure function; the merge is set union, so devices that hold the same
 entries and follow the same credentials compute the same registry). The entries are replayed in one order:
@@ -821,20 +1374,36 @@ fill no device's registry, stop no fetch of the entries that matter, and keep ne
 spreading nor a new device from enrolling (review of the device registry, "flood"), in its own name or in a
 puppet's. A registered device in the wrong hands, or a revoked one before a password change, can still sign
 entries that might count (and so can puppets it registers before the change); the limit then
-refuses the registry rather than evaluate it without bound, as before. A candidate password
-change is judged *as if it were followed* (the registry replayed with it as the last checkpoint), never by where
-it falls among unsealed entries: otherwise a revoked device could hide the change from a device that has not been
-given the new password yet, by back-dating a revocation of the device that made it (found by the adversarial
-suite).
+refuses the registry rather than evaluate it without bound, as before.
 
-**What each device trusts.** The genesis entry and the credential entry it follows, and the newest entries it
-has applied, are pinned in the Keychain (`deviceRegistryAnchor`). The genesis entry comes from the account header
-the person's password opened; the credential entry moves forward only when this device changes the password or
-the person unlocks it with a newer one. So the store cannot forge the registry (no account key), cannot roll a
-device back (the local file must still hold everything the anchor names, or nothing verifies until a sync
-restores it), and cannot fork it in any way that survives the entries reaching a device (union is the merge). It
-can withhold entries, as it can withhold anything (Y7): a device then acts on an older registry until they
-arrive. A header older than the pinned credentials is refused at unlock (`accountHeaderRolledBack`).
+**Password changes this device does not follow** are *listed* and *followed* by different rules, because a device
+that has not been given a new password must at least see that there is one, whatever else is planted. A change is
+listed (`pendingCredentials` if it follows the entry this device follows, `forkedCredentials` if it leaves the
+chain earlier) from its own signatures and its links back to the chain alone: its author's signature under a key
+an ancestor registers, the enrolment key of the generation it replaces, consecutive generations, a predecessor
+that is followed or itself listed, and not an entry that can never count on this chain. That is one verification
+per entry and no replay, so nothing bounds the list and nothing can crowd the genuine change out of it (Z2: a
+budget of sixteen replays, spent in entry-ID order and charged before the replay, let sixteen planted entries hide
+it). A change is *followed* only by evaluating with it as the credential, which replays the registry with it as
+the last checkpoint and never judges it by where it falls among unsealed entries: otherwise a revoked device
+could void the change by back-dating a revocation of the device that made it (W1). The list can therefore name a
+change that would not replay; making one takes the account key, a device key and the replaced generation's
+enrolment key, and whoever holds those can make one that does.
+
+**What each device trusts.** The genesis entry and the credential entry it follows, the newest entries it
+has applied, and the password changes it has seen and not been given are pinned in the Keychain
+(`deviceRegistryAnchor`). The genesis entry comes from the account header the person's password opened; the
+credential entry moves forward only when this device changes the password or the person unlocks it with a newer
+one, and only through the intent such a step writes first (Z9). So the store cannot forge the registry (no account
+key), cannot roll a device back (the local file must
+still hold everything the anchor names, or nothing verifies until a sync restores it), and cannot fork it in any
+way that survives the entries reaching a device (union is the merge). It can withhold entries, as it can withhold
+anything (Y7): a device then acts on an older registry until they arrive. A header older than the pinned
+credentials is refused at unlock (`accountHeaderRolledBack`). A pending change is the one part of the registry
+whose rows can be deleted without the pinned heads noticing (it is no entry on the followed chain), so the anchor
+names the pending credential entries seen while the device follows a given entry and keeps them until it follows
+another: the retired password and quick unlock are refused on the anchor's word, whatever the file holds by then
+and whether or not the registry can still be evaluated (Z3).
 
 **Adding a device.** By enrolment with the password and Secret Key (§7.7), or by a registered, unlocked device
 vouching for a device's ID and key before it has them (`prepareDeviceIdentity`, `approveDevice`).
@@ -869,9 +1438,17 @@ choice explicit (`RevocationPasswordChoice`).
   confirm. The revocation is then behind a checkpoint that only someone knowing the *new* password can have
   made: on every device that has been given it, nothing the revoked device signs afterwards counts — not a
   registration under any ID or key, not an enrolment with the old password, not a back-dated revocation of the
-  others — and a device that has not been given it yet neither merges nor publishes. What still holds: the
-  reading, above; and whatever the revoked device wrote before a given device learned of the revocation, which
-  that device merged in good faith and hands on (§7.5).
+  others — and a device that has not been given it yet neither merges nor publishes, and refuses the retired
+  password. What still holds: the reading, above; and whatever the revoked device wrote before a given device
+  learned of the revocation, which that device merged in good faith and hands on (§7.5).
+- *A competing change.* The revoked device still holds the enrolment key of the generation before its
+  revocation, so on a device that has not been given the new password it can publish a password change of its
+  own from there, with every signature the genuine one has. Such a device cannot tell the two apart and does not
+  try: it adopts neither on the retired password, tries each author's newest once on a new one, refuses a change
+  that revokes itself, and otherwise leaves the choice to the person (§7.7, Z1). What the revoked device can
+  still do there is delay: plant changes under devices it registered before it was revoked, so that the person
+  has to name the device they changed the password on. A device it registered before the revocation is still a
+  registered device after it; the person revokes those too.
 - *A stolen local header.* A thief with the device's Keychain (the Secret Key) and database can try passwords
   against the header as it was, offline. A password change elsewhere does not change that copy, and the keyset
   it opens is still the account's: again only the re-key ends it. The KDF floor and the Keychain's protection
@@ -916,6 +1493,226 @@ and, once the app registers for them, CloudKit pushes. The app does not create o
 A clock that moved backwards cannot show that an interval has not passed, so such a wait is treated as over:
 syncing early costs a request, waiting for ever would cost the data.
 
+### 7.10 Starting again after a reset (owner decision, 2026-11-17: re-upload, "but ask the user first")
+
+A store can lose everything it held: the person deletes Watchword's data in their iCloud settings, CloudKit discards
+the key that protected a zone, a folder is emptied. Every device still holds all it had, sealed and signed as before,
+so the store can be filled again from local state. It is filled again only when the person says so, on each device
+that has something to add, because the person on another device may have deleted the data on purpose.
+
+**How a device learns of a reset.** Three signals, and none is trusted for more than stopping and asking:
+
+1. *The transport says so* (`SyncTransportError.storeReset`): a CloudKit zone this device has seen
+   (`SyncStoreMarker`) is missing, or CloudKit reports `userDeletedZone` or a reset encryption key (§7.2). The sync
+   stops where it stands, as when offline, and creates nothing.
+2. *The store holds none of the account's objects, and this device has synced before*
+   (`VaultSession.syncAccountObjects`): no device registry entry this device retains is listed, and its sync state
+   says it has published or merged some vault's log (`hasSyncedBefore`). This is an emptied folder, or a zone deleted
+   on a device whose marker was lost too (A8, a reinstall). The session treats it exactly as the first signal: it
+   reports `storeReset` and the sync stops before anything is published, the account's own objects included, in
+   every vault and in the sharing pass. A store that never held the account is told apart by what the device
+   remembers doing, not by what the store shows: a device that has never published or merged a log publishes as ever.
+   *A device move keeps the fact* (V49): an installation restored onto other hardware starts each vault's state over
+   for its new device ID (`completeDeviceMigration`, Z181), which before V49 read as new, so a restore into a store
+   the person had emptied filled it again unasked (the `SyncStoreMarker` is device-local and outside the backup, and
+   CloudKit creates a zone nobody marked). The move asks `hasSyncedBefore` of the old ID's states first and saves each
+   empty state with the signed fact `SyncState.syncedBefore` (and the old state's `storeResetSuspected`, and the
+   one-shot `SyncState.startedOverByMove` of the third sign, V52); a move made again finds the fact in the states a
+   first attempt emptied. (The old state is believed if the session signed it, however old: an A8 rollback of that
+   row to an older genuine one drops a carried `storeResetSuspected`, the class of rollback signed local state does
+   not detect, V53.) `hasSyncedBefore` also answers yes for any item or
+   description in the account's vaults that another device ID wrote, which only a merged log brings: a check that
+   can only ask. It also asks where a move left a row of the earlier ID behind (one that did not open, or a vault's
+   description where the old state was none), and the person's yes then uploads it.
+3. *The engine sees it* (`SyncReport.storeLacksObjects`, `SyncState.storeResetSuspected`): at a listing, before
+   anything listed is merged, an object this device wrote and did not delete is missing — a segment past what it may
+   have collected (`SyncState.ownUnlistedThrough`, named `collectedThrough` on the branch that made it and renamed at
+   the merge, where Z149's `collectedThrough` counts only what was deleted; it never reaches the newest segment it published, since it never
+   collects that one, except after its own hand-on snapshot: SR19), or a snapshot it remembers writing; a device sees its own objects
+   at once and nobody else deletes them, so an honest store lists them all — *and* it has merged something of some
+   stream that nothing listed stands for (a segment past what the listed snapshots it has merged cover is missing;
+   what it merged from a revoked device, whose segments are never listed, unless a listed snapshot covers it: SR27).
+   This is what a device that was offline during a reset finds when it returns to a store another device has
+   started again. The first half alone is not enough to ask (a device restored from a backup remembers less than its
+   later self collected) and the second alone is not either (a provider that lags can show a snapshot's replacement
+   late). The suspicion is remembered until everything the device has merged is listed or stood for again, because
+   what another device uploads can stand for this device's own stream, and so hide the first half, while this device
+   still holds more of a third stream than the store does. In a state a device move started over and not handed on
+   since, finding nothing lacking says nothing (the state has no record of what was merged, the local store holds it
+   all), so there the suspicion ends only with this device's hand-on, which writes the snapshot of everything (V49).
+   "Not handed on since" is a signed one-shot bit, `SyncState.startedOverByMove`, set by the move with
+   `syncedBefore` and cleared by that hand-on alone (V52), never "no hand-on snapshot held now": the hand-on is
+   collected once another snapshot supersedes it, and every later suspicion would then have needed the person's yes
+   on this device for good, however much another device uploaded. Once cleared, the state's `merged` stands for what
+   the device holds, and a later suspicion ends as in any state. The bit is not cleared by another device's snapshot
+   covering everything merged: coverage counts stream positions, and the rows a move carried over (the old ID's
+   unpublished edits, merges sealed under it) are at no position of any stream, so only a snapshot of the rows
+   themselves stands for them. So a move into an intact store keeps the bit until its first hand-on (the first later
+   reset asks this device once), and a hand-on that cannot be written (`ReuploadRefusal.tooLarge`, a Lamport time
+   past `maximumVersion`, sixteen names taken) leaves the question standing, and with it no snapshot, no collection
+   and no replay: it fails safe, losing and uploading nothing. In a shared vault, which hands nothing on, the rule is
+   unchanged.
+
+`AccountSyncReport.storeNeedsReupload` is any of the three (the third only for a vault that can be uploaded again).
+
+**Nothing is uploaded again unasked.** At a store that says it was reset, or holds none of the account's objects,
+the sync publishes nothing at all, new edits included: they stay local and go out with the upload. In a store
+another device has started again, what this device has published is remembered in `SyncState.published`, which a
+reset does not change, so the ordinary outbox never re-sends anything; while the engine's suspicion stands and the
+person has not answered, the device writes no snapshot (neither elected nor owed: either would carry the whole
+vault) and collects nothing. New edits are still published in the device's stream there — they are new, not a
+re-upload — and other devices wait at the gap before them until this device's person has answered. **A replay is
+postponed** (`SyncReport.replayPostponed`) whenever the log cannot be listed or the suspicion stands: a replay
+forgets what the device published and what it merged, and from a log that is gone it would rebuild nothing, publish
+every row the device ever wrote, and lose the knowledge of what to hand on. No timer and no policy reaches the call
+below: `AutoSyncPolicy` knows two modes, a full sync and a download, `AutoSyncDriver` calls `syncAll` and nothing
+else, and a `storeReset` is to it a failed sync that backs off.
+
+**The call** (`VaultSession.reuploadAfterStoreReset(confirming:)`, which only a screen calls, after the person
+confirms). `reuploadPlan()` says what would be uploaded — the account's own vaults and how many items each holds,
+and the shared vaults that cannot be — for the question; the call takes the plan the person was shown and refuses
+(`reuploadNotConfirmed`) if it no longer describes this device, as `deleteVault` does with its count. It needs the
+vault unlocked, this device registered, not revoked and following the current password, and no device move incomplete
+(`deviceMigrationIncomplete`: the move would start the states over beneath the upload, and the sync publishes
+nothing until it is complete, so the store would be started again and left empty; V51), nor a key of this device's
+own that cannot be read now (`deviceKeyUnreadable`), is absent, or is being registered (`deviceNotRegistered`): the
+sync would write nothing without it (`mayWrite`, §7.5), which left the store started again and empty in the same way
+(V70, from the merge of PR #23's round 24, whose `ownDeviceKey(of:)` it reads just before it marks the upload unfinished
+and starts the store again: a check, not a guarantee, since the Keychain can close before the sync reads the key itself,
+and then the store is started again and the sync only downloads, the question kept open, V73). It holds the session's
+sync lock from before the plan is checked, so no ordinary sync merges anything between the answer and the upload, or
+runs between the two steps. Then:
+
+1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
+   CloudKit saves the zone again (deleting it first where CloudKit says its key was reset, and taking a deletion
+   answered "no such zone" as done), keeps the marker, and leaves a zone that exists exactly as it is. It learns
+   which by fetching the zone and then reading one record under each of the layout's top-level prefixes with a
+   listing's own `name BEGINSWITH` query, never a `TRUEPREDICATE` one (SR20), asking for the encrypted payload and
+   fetching the record it lists whole: a zone's metadata is not encrypted and fetches after a key reset, only its
+   records answer the reset (SR26), and whether a query for plain fields does, or whether the answer comes per record,
+   is not documented (SR29). Only CloudKit's explicit reset deletes, never an empty zone or a transient failure, and
+   only if a second look just before the deletion says so too, so a zone another device has started again by then is
+   left alone (SR30; CloudKit has no conditional zone deletion, so the window narrows and does not close). A
+   transport with no notion of a reset does nothing. Before it,
+   each of the account's own vaults that has synced (or was started over by a move after the installation had) is
+   marked `storeResetSuspected`, which only its hand-on or a
+   store standing for everything it holds clears, so an upload stopped part-way (a lock, the network, the app
+   killed) asks again; after it, the lock epoch is checked again (SR21).
+2. One sync with `reuploadingSince` the epoch of the answer, which counts only while the vault is unlocked at that
+   epoch (`reuploadAnswered`): a lock that overtakes it makes it an ordinary sync (SR21). *The account's objects* need no new code beyond skipping the second signal: every
+   sync publishes what the listing lacks of the registry entries the device retains, its account header, a wrap
+   under its own name of every vault key it has opened, and every vault deletion it has verified (§7.7). They are
+   everything enrolment reads: a brand-new device can enrol from one device's upload.
+3. *Each of the account's own vaults* runs its engine with `handingOn`. The engine downloads and merges whatever
+   the store already holds again (another device may have uploaded first: merges are joins, so this is only more to
+   carry), publishes its outbox and pending deletions as the next segments of its stream, and then, if it holds
+   something the store lacks, writes **one snapshot of everything it holds**: every row, whoever wrote it, and a
+   tombstone for every erasure it remembers, covering what it had merged of each stream. The precedent is the
+   snapshot a device owes for a revoked device's work (§7.5): what this device merged from other devices' streams
+   exists on the transport nowhere else now, so it hands it on. Every reader merges every listed snapshot, entries
+   first, whatever it covers, and continues each stream from the most any snapshot covers.
+
+**Decisions, and why.**
+
+- *Sequence numbers are never restarted, and no snapshot name is used twice.* The device's stream continues at its
+  next number. A number once used was read by other devices under other bytes; using it again is the fork of §7.5.
+  The snapshot's coverage of the device's own stream is what lets every reader, new or old, pass the gap where its
+  segments were. Every snapshot, the hand-on and one owed for a revoked device or a fork alike (R15), is named by a
+  number above any this device has used for one (`SyncState.highestOwnSnapshot`): an emptied store would accept an old name again, and a device that had merged
+  the earlier snapshot under it would never read the new one.
+- *`published`, `known`, `merged`, the erasures and the acknowledgements are kept as they are.* `published` still
+  says "on the transport in something this device wrote": the snapshot carries every row. Nothing is forgotten, so
+  there is nothing to roll back to: a device that is told of a reset, truthfully or not, is afterwards exactly the
+  device it was, plus what it merged.
+- *The stash is never dropped and never uploaded.* Kept entries of kinds this version cannot read (ADR 0009) stay in
+  the signed stash. A snapshot cannot carry them (one entry per record; the stash may hold several versions of one),
+  so the snapshot of a device that holds any covers its own stream and revoked devices' streams and no other: a kept
+  entry names the device whose *object* carried it, which for a snapshot is not the device whose segment did, so the
+  stash cannot say which streams carried none. A reader passes the gap in the uploader's stream and waits at the
+  others until their own devices, which read the kind and hold it as rows, upload again; `snapshotWithheldBy` names
+  them. The uploader's snapshot still stands for all it holds (`SyncState.handedOn`), so it is not asked again.
+- *Held-aside and quarantined versions stay where they are.* They were refused as implausible or as work that does
+  not count; uploading them inside a snapshot would launder them into every device's vault. They are neither
+  published nor dropped: only the person discards them (F7.7).
+- *Pending deletions* go out as tombstones in the device's next segments, as always (after every vault's other
+  writes, §7.7), and the snapshot carries a tombstone for every erasure the device has published or merged: a device
+  whose copy predates a deletion does not bring the record back.
+- *A device that was offline during the reset* merges the snapshots it finds on the rebuilt store. If they cover
+  everything it had merged, its own stream included, it has nothing to add, is asked nothing, and continues at its
+  next number. If it holds more — segments of its own that the others had not merged, or more of a third device's
+  stream — the engine's signal asks its person, and its own snapshot hands that on. Until they answer, its new edits
+  are on the transport behind a gap, where other devices wait (`SyncReport.waiting`); nothing is lost on any device.
+  Declining decides nothing for good: the notice stays, and so does the gap.
+- *Two devices uploading at once* each write a snapshot under their own name (`<lamport>-<device>`), and each
+  merges the other's at its next sync. The item merge is a join and snapshot coverage is a maximum, so either order
+  gives the same vault; a device asked twice writes once, because its own listed snapshot stands for what it held.
+- *Shared vaults are refused* (`ReuploadRefusal.sharedVault`, reported per vault whether or not the person was
+  asked, and worded for them; a shared vault alone never raises the question). A shared vault keeps its whole log
+  and writes no snapshots, because a write cut is a chain of digests of a device's own segments and every version is
+  judged through the segment that carried its values (`SyncWriteCut`, `SharedStreamIndex`, §8.10). One member's
+  device holds the other members' work but not their segments (they are not kept once merged), cannot sign in their
+  names, and a snapshot would hand their work on with no segment for any judge to count it by. So nothing is
+  uploaded for a shared vault: it stays on each device as that device holds it, readable, with nothing dropped, and
+  its log does not sync again (new edits are still published as segments, behind a gap nobody can pass). What a
+  sound rebuild would need: every device keeping the signed objects of the shared log byte for byte — they
+  authenticate themselves, so any member's device could then create each again under its own name, with every cut
+  chain verifying as before — or a membership record that restarts the log under a later format (§8.9). Not
+  designed. While a shared vault's log is missing its replays are postponed like any other: a change of head still
+  takes out the versions that no longer count, and what a replay would rebuild of such a record stays held aside for
+  the person (`06-adversarial-review.md` §S).
+- *A vault too large for one snapshot* (the 64 MiB envelope limit, §5) is refused (`ReuploadRefusal.tooLarge`) and
+  nothing is written for it; snapshots in parts are not designed, and the question comes back at the next sync.
+
+**Threats.**
+
+- *A1 can fake a reset at will* — delete the zone, empty the folder, delete one device's newest segment, answer
+  `zoneNotFound`, or put an old copy of the store back. The device stops or asks; it uploads nothing unasked. If the
+  person confirms, the store receives a snapshot of record envelopes it was given before, under the same keys, and
+  account objects it held before: it learns nothing new (a store that in fact still holds everything receives
+  nothing at all). No device is rolled back: nothing in the path forgets, overwrites or deletes local state (the
+  record store, the sync state, the stash, the quarantine and the pending deletions are written only by the ordinary
+  merge of verified objects), and every other device merges the snapshot as a join, under the same signature,
+  registry, context and version checks as any snapshot. A1 can make the question appear again by deleting again;
+  that is withholding (Y7) with a prompt, and declining costs nothing but the sync A1 could stop anyway.
+- *A reset must not look like "never set up".* On CloudKit the marker makes a missing zone `storeReset` for every
+  operation. Where no transport says so, the second signal does: the account's objects are not put back, and nothing
+  else is published. What tells the two apart is the device's own sync state, which the store cannot write. A8, who
+  can, can erase it: the device is then a "new" one to itself, and publishes the rows it wrote again, unasked, as
+  segments from its first number. The store gains ciphertext it held before, under the same keys; the reused numbers
+  are the fork of SR15. A store emptied of everything but one registry entry is not "emptied" either (SR18): the
+  account's small objects are put back as ever, and no vault's contents are: a device whose only work in a vault was
+  a revoked device's, handed on in a snapshot the store then lost, is asked rather than writing it again (SR27), and a
+  snapshot is remembered from the sync that writes it, not only from the next listing.
+- *The person deleted the data on purpose, on another device.* Hence the question, and its wording
+  (`ReuploadQuestion`): it says the data is gone from the sync storage, that this may have been deliberate, what
+  will be uploaded (how many items in how many vaults, and the encrypted keys and device list), that uploading
+  undoes a deletion made elsewhere, and what cannot be uploaded (shared vaults). Declining leaves the device as it
+  is. **Not undone unasked, but not prevented either:** each device asks its own person, and nothing tells a second
+  device that the first person said no.
+- *A revoked device* still holds the account key. Its session refuses the call (`deviceRevoked`) and publishes
+  nothing. A modified client on such a device could fill an empty store with the registry as it knew it, without its
+  own revocation, and a brand-new device enrolling from that store alone would not learn of the revocation until a
+  trusted device uploads. That is the limit §7.8 already states for a store that withholds a revocation (A1 can do
+  as much without a reset); no existing device is affected, since a registry only grows.
+
+**Limits** (`06-adversarial-review.md` §S). A shared vault's log does not sync again after a reset (SR11). A device
+that never published in a vault, was offline during the reset and alone holds more of a stream whose device is gone
+is not asked by the engine (SR14). A device whose sync state was rolled back *and* whose store was then reset has no
+listing to tell it how far its stream had gone, and can publish under numbers other devices merged under other bytes;
+they read its later snapshots, not those segments (SR15). Each device asks its own person, and a refusal on one is not
+known to another (SR16).
+
+**Adapters.** `CloudKitTransport.startStoreAgain` is drafted with the rest of that transport (not compiled, not run
+against CloudKit; that a zone whose key was reset must be deleted before it is saved again follows Apple's
+documentation and is unverified, as are saving a zone again after `userDeletedZone` and a zone fetch succeeding
+after a key reset while its records answer the reset, SR26, and how a query reports the reset, SR29). `CoordinatedFileSyncTransport`
+needs nothing: its folder is created by the first write, and an emptied folder is the second signal. The Devices
+screen shows the notice, an "Upload Again…" button and the question as an alert (`DevicesModel.askToUploadAgain`,
+`confirmUpload`, `declineUpload`; the SwiftUI in `Apps/Shared/DevicesView.swift` is drafted, unbuilt). It says the
+upload is done only when every vault the plan named ran and nothing is still asked for
+(`DevicesModel.uploadFinished`); a vault outside the plan, a shared one waiting for its key say, does not hold it back
+(SR28).
+
 ## 8. Sharing protocol
 
 As built in milestone 4's protocol core, `WatchwordSharing`. The module is portable (real cryptography through
@@ -931,8 +1728,8 @@ A shared vault has **members**, each an account with a role:
 | Role | May |
 | --- | --- |
 | owner | everything an administrator may; and alone: grant or revoke the administrator role, remove an administrator, delete the vault. Exactly one, fixed for the life of the vault: never removed, never re-roled. |
-| administrator | invite and remove members who are not administrators, change them between read-write and read-only, rotate the vault key |
-| read-write | read and write items |
+| administrator | invite and remove members who are not administrators, change them between read-write and read-only, rotate the vault key, rename the vault (§8.7) |
+| read-write | read and write items; not the vault's name |
 | read-only | read items. They hold the vault key like everyone else: this is a rule the clients keep, **not cryptography** (F4.5, §8.7) |
 
 Membership is a **chain of signed records**, one per change, each naming its epoch (the previous one plus one), the
@@ -956,7 +1753,7 @@ at most 2,048 bytes; a record is at most 12,090 bytes.
 
 | Object | Magic | Contents | Signed by |
 | --- | --- | --- | --- |
-| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, a write cut (opaque bytes; empty unless the operation ends an account's permission to write, §8.7), the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
+| Membership record | `WWMR` | vault ID, epoch, previous hash, signer, operation (`createVault`, `addMember`, `removeMember`, `memberLeft`, `changeRole`, `rotateKey`, `deleteVault`) with operands, vault key ID and the epoch that introduced it, a write cut (opaque bytes; empty unless the operation ends an account's permission to write or its administrator role, §8.7), the resulting members (account ID, role, epoch added, X25519 and Ed25519 keys, bundle self-signature) in account order | the signer |
 | Key grant | `WWKG` | a `VaultKeyGrant`: vault, key ID, sender, recipient, recipient's X25519 key, HPKE encapsulated key, ciphertext (§4) | the sender (`.vaultKeyGrant`) |
 | Leave request | `WWLR` | vault, account, the epoch the member was added | the member |
 | Published key bundle | `WWKB` | account ID, X25519 key, Ed25519 key | self-signature (`.publicKeyBundle`) |
@@ -1008,8 +1805,8 @@ device has already seen, which the ledger holds. Everything the store offers is 
 **Verifying a record** against the state before it, cheapest first: the vault, the epoch (exactly the next), the
 previous hash; the signer is a member and an administrator of the previous state; the operation is one that signer
 may perform (§8.1); the shape of the key change (a removal, a departure and `rotateKey` name a new key, nothing else
-changes it); a write cut only where the operation ends an account's permission to write (§8.7), so that a record has
-one encoding; the signature, under the key the *previous state* lists for the signer; and only then what costs work or
+changes it); a write cut only where the operation ends an account's permission to write or its administrator role
+(§8.7), so that a record has one encoding; the signature, under the key the *previous state* lists for the signer; and only then what costs work or
 came with the record: the new key ID must not have been used on this record's own path, a new member's key bundle is
 validated, a departure's embedded leave request is checked, and the member list must be exactly the previous list
 with the operation applied. Unsigned junk costs exactly one signature check; the key-history check walks the
@@ -1077,6 +1874,30 @@ cut, were each signed by an account that could sign the same on the accepted hea
 on counting until the departure is carried out again with a cut by an account that may: a former administrator cannot
 turn a pending leave request into "set this member's work aside" (S29).
 
+**An addition undone on the branch that lost** (review finding Z43). An administrator's device that has not been shown
+an owner-signed record can add someone and remove them again on its stale head; the owner's record then displaces the
+addition, the removal and the removal's rotation together. That member is in no accepted state, so no removal is owed
+by the rule above. Two things follow all the same. The addition is **not replayed**: of a superseded addition the
+ledger says whether a record held on its branch went on to remove that member (`wasUndoneOnItsBranch`), and the device
+that signed it then lets it go, where it used to sign the member in again and wrap the current key to them with
+nobody asking. And the key that was current on the losing path while they were a member was wrapped to them; where
+that is the accepted head's key (the rotation lost too) the ledger lists them in `exposedKeyHolders`: someone outside
+the vault holds its key. Until a rotation is adopted, `recordsToReseal` is empty, as while a removal is owed,
+`pendingRotation` reports `keyHeldOutsideTheVault`, and any device whose account administers the vault plans a
+routine rotation at its next sync. Like `owedRemovals` this is a function of the records held, the records that show
+it are the last let go when branches are trimmed, and a branch that went on to add the member again exposes nobody:
+what it last meant is that they are a member, and that addition is its author's to replay. And like an owed removal
+(S29) the branch is believed only as far as accounts with standing signed it (Z53): the removal by someone who could
+remove such a member on the accepted head (a departure needs none, the member's own signature asked for it), the
+addition by someone who could add them there, and the key the head's **by the record that introduced it**, which must
+be on the accepted chain. A key's ID proves nothing on a branch: whoever could once sign there can name any ID, the
+current key's included. Without these a former administrator's dead branch (a rotation naming the head's key ID, a
+throwaway account added and removed) stopped re-sealing in the whole vault and had every administrator's device
+rotate, as often as it was repeated; and a removal built by a demoted administrator on an honest one's displaced
+invitation had it quietly dropped. Not covered, and tracked:
+an addition that loses alone and is never replayed (its author's device gone, or no longer an administrator) leaves
+its grant standing in the same way with nothing reported.
+
 **Everything else that loses is proposed again by its author.** `MembershipLedger.status(of:)` says whether a record
 this device proposed is `awaitingPublication`, `adopted` or `superseded`. A device keeps what it proposed until it is
 adopted, asks after every ingest, and proposes a superseded change again on the new head (the proposing functions
@@ -1099,13 +1920,14 @@ account record on the transport. It is a store like any other: what it returns i
 account asked about, and is then only a *candidate*.
 
 A bundle's **fingerprint** is `SHA-512("WW-fingerprint-v1" ‖ accountID ‖ pkX ‖ pkEd)` truncated to 60 bytes, shown as
-a 60-digit **safety number** in twelve groups of five, and as a QR code carrying
+a 60-digit **full vault sharing code** (the API's `safetyNumber`; the screens no longer say "safety number", ADR 0010)
+in twelve groups of five, and as a QR code carrying
 `"WWFP1-" ‖ hex(accountID ‖ fingerprint)` (158 characters; one scan names the account and authenticates its bundle).
 A typed number matches only as sixty ASCII digits with ASCII spaces ignored; a scanned payload is parsed exactly;
 both comparisons are constant-time.
 
-**Verified contacts** (`VerifiedContacts` over the `VerifiedContactStore` port). Confirming a fingerprint, by typed
-number, by scan, or by the person's own comparison, **pins** the bundle: a record signed by the pinning account's own
+**Verified contacts** (`VerifiedContacts` over the `VerifiedContactStore` port). Confirming a bundle, by a completed
+vault sharing code session (below), by a scan, or by the full code typed, **pins** the bundle: a record signed by the pinning account's own
 key. From then on a different bundle for that account is refused and reported (`SharingError.keySubstituted`),
 never silently adopted, in the three places the module meets one: the key directory's answer on either side of an
 invitation, and the member list of a chain (below). Replacing a pin is a separate, explicit act. A pin that does
@@ -1134,7 +1956,12 @@ invitee:  begin ─► awaitingVerification ─confirm─► verified ─accept�
   a member **with its own keys** (an administrator who was handed a substituted key for the invitee is caught here:
   `ownKeySubstituted`), and opens the grant of the current key (§8.5).
 - An invitation to a vault ID the device already holds under another owner is refused (`vaultOwnerConflict`): vault
-  IDs are not secret, and accepting it would let the sender stand in as the owner of someone else's vault.
+  IDs are not secret, and accepting it would let the sender stand in as the owner of someone else's vault. In the
+  session the owner it must name comes from what is authenticated (`knownOwner`, V31): the loaded ledger, then the
+  account's shared marker, then, for a vault in the account's directory none of whose keys arrived by grant, the
+  account itself; a vault holding a granted key with no ledger and no marker accepts no invitation (`ownerUnknown`).
+  The owner's own second device, which holds the genesis key from the account's directory and no grant of it,
+  accepts an invitation naming itself with that key (`accept(…, holding:)`), and nothing else does.
 - A member who was removed and is **invited back** continues the ledger their device already holds
   (`accept(…, continuing:)`); it is not rebuilt from what the store offers. Their earlier membership and the old
   key's grant are a valid prefix of the chain, so a store that hid everything from their removal onwards would
@@ -1158,20 +1985,110 @@ members the check on the current head found pinned to the keys listed, or `nil` 
 locked since the head changed); the member list calls a member verified only from that list, and anyone it does not
 name "not checked yet". An empty `unverifiedMembers` is not evidence of anything.
 
-**What the screens accept as a comparison** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). The typed
-safety number (`.safetyNumber`) or the person's own "the numbers match" (`.comparedByEye`), in that order. A
-fingerprint code pasted from a message only names the account to look up: it is not `.scannedCode`, which is for a
-code read by the camera from the other person's screen and is never recorded until the app can scan one (finding 2).
-`VerifiedContact.method` therefore says what the person did (S16).
+**Vault sharing codes** (ADR 0010; `VaultSharingCode.swift`, `SharingBoard.swift`, `VaultSession+SharingCode.swift`).
+Before a key is wrapped to someone, or a chain anchored on an owner, the two people run a **session** over the
+**sharing board**, a port (`SharingBoard`) of objects created once and fetched by exact name, never listed, which A1
+runs like the directory; no production adapter exists for either yet (`InMemorySharingBoard` serves tests and the
+UI-test household). The construction is the ADR's, a short authentication string over a commitment:
 
-**Names of shared vaults.** A vault's name is a record any member who may write can change (§8.7; S37 attributes it
-to its writer), so a member can call a shared vault "Personal". The owner's decision on the review (2026-11-16, made
-here for the owner to confirm): renaming stays a write like any other, because making it the owner's or an
-administrator's would need every device's write judge to refuse a member's rename, a protocol change, and a rule kept
-by the screens alone would not bind a hostile client. The screens instead never let a name stand alone: every list and
-the item editor label a vault by ownership and role (`VaultRow.badge`: "Your own vault", "Shared by you", "Shared
-with you · Can edit"), and the editor says where a new item goes, with "everyone in this vault can see it" for a
-shared one (finding 4).
+```
+starter S: number (8 digits), session (16), Ns (32);   C = SHA-256("WWSC1-commit" ‖ session ‖ S.account ‖ Ns)
+           board[number]/commit = session ‖ S.account ‖ C
+joiner  J: fetch commit; bundle(S) from the directory, fixed now;   board[number]/reply = session ‖ J.account ‖ Nj
+S:         fetch reply; bundle(J) from the directory, fixed now;    board[number]/reveal = session ‖ Ns   (once)
+J:         fetch reveal; check C
+both:      T = SHA-256("WWSC1-code" ‖ session ‖ number ‖ S.account ‖ keys(S) ‖ J.account ‖ keys(J) ‖ C ‖ Ns ‖ Nj)
+           joiner's code = T[0..<8] mod 10^6, starter's = T[8..<16] mod 10^6, six digits each
+```
+
+Each board object is `"WWVS" ‖ version ‖ kind ‖ session ‖ …` of one fixed length, parsed exactly. The transcript is,
+byte for byte, `SHA-256("WWSC1-code" ‖ session(16) ‖ number(8 ASCII digits) ‖ S.account(16) ‖ keys(S) ‖ J.account(16)
+‖ keys(J) ‖ C(32) ‖ Ns(32) ‖ Nj(32))`, so each account ID appears twice (once on its own, once as the first field of
+its `keys`), with the commitment `C = SHA-256("WWSC1-commit" ‖ session ‖ S.account ‖ Ns)`; a known-answer vector from
+Python's hashlib pins it (`transcriptKnownAnswer`, V30). `keys(B)` is `accountID ‖ X25519 ‖ Ed25519`, the fingerprint's
+inputs, not the ADR's `KeyBundleCodec` bytes: those carry the
+self-signature, which CryptoKit randomises, so a device's own bundle and the directory's copy would hash apart on a Mac
+(deterministic BoringSSL signing would hide it on Linux). The person on S reads eight digits; the person on J types
+them (or scans S's QR code, `"WWSC1-" ‖ number ‖ FingerprintCode`), reads six back, S's person types them, and only
+then does S show its six for J's person to type. Each device compares what was typed with its own transcript in
+constant time; three wrong codes, ten minutes without progress (the injected clock), a lock or a restart end the
+session, and every ending is shown (G2). Each device looks the other's bundle up **once, before its own nonce is
+public**, and S reveals **once, for the one reply it holds**, never again: a bundle or a reply chosen after a nonce is
+public could be searched for. A scan replaces typing in its direction and authenticates by the whole fingerprint
+(`.scannedCode`); a starter scans the joiner's `FingerprintCode` in place of typing their code. The scanner hands over
+only the code the person taps among those in view. A joiner's scan is evidence only once the starter's reveal has
+opened its commitment, so the session it names was live when it was scanned (commit and reveal are unsigned, so this does
+not show that the account's own device took part; V37); the screen then names the keys the scan read by their **account
+check** (`confirmScannedAccount`) and pins them only on the person's yes (`confirmScannedSharingPartner`). Every step of
+every session screen, on both sides, shows this device's own account check (`SharingCodeStatus.ownFingerprint`,
+`SharingCodeWording.accountCheck`: the first four groups of the fingerprint, twenty digits of SHA-512 over the account
+ID and both keys), so the two can be compared whichever step the other screen is on (V18, V34); an 8-hex prefix of an
+account ID, which its holder chooses, is no such check.
+
+What a completed direction yields is `SharingCodeEvidence`: the bundle it authenticated, the account it was made for,
+and the session. Only `SharingCodeStarter` and `SharingCodeJoiner` make one (the typing discipline of
+`VerifiedContact`), and `VerifiedContacts.verify(_:)` pins it as `VerificationMethod.sharingCode` (or `.scannedCode`)
+for that account alone. The session pins as soon as evidence exists (for a joiner's scan, once the person said yes to
+the account named); evidence not pinned lives in the run and goes with it. A different pin already there is not replaced
+(`keysDifferFromPin`), and the person's explicit "use their new keys" replaces it only to keys a shared vault's chain
+lists for that account (`replacePinFromSharingCode(listedIn:)`), so a session with the wrong device cannot settle a
+"keys changed" warning to keys nobody listed; with no vault named, every shared vault is loaded first and none may list
+the account with other keys, and the owner of a shared vault that is unavailable here is not replaced at all (V28,
+scoped to that owner by V33; while such a vault's owner cannot be named, nobody's pin is). After a session the starter invites as before (`invite`: the grant to the
+pinned bundle and the record that adds them) and sends the `Invitation` as one more board object, `"WWVI"`, signed by
+its account key and bound to the session, its number and the joiner (`inviteThroughSharingCode`), under a name that
+carries the session (`vault-sharing/<number>/invitation/<session>`). Inviting is resumable: a retry delivers the same
+signed bytes and never invites again, and a slot someone else took leaves the invitation to hand over as text
+(`invitationNotDelivered`, V22). An invitation `invite` has issued is kept by vault and invitee outside the run until it
+is delivered (memory only: it names only the vault and owner), so a run that ends meanwhile (Start Over, another
+window, a lock) still reports it with `invitationNotDelivered`, a later session with the same invitee delivers it
+without inviting again, and the fallback hands it over as text (`undeliveredInvitation`, V35). The joiner opens it
+only under the bundle the session authenticated (`sharingCodeInvitation`) and accepts with every existing check. **No
+vouching:** an invitation whose owner is not the starter is accepted only once the joiner has pinned the owner by a
+session (or the full code) of their own. The session lives in memory in the actor (`sharingCodeRun`), runs one step
+at a time (a second is `busy`), checks the lock before anything reaches the board, and `lock()` drops it. A start or a
+join ends the running session first and re-checks the lock and the session's generation after every wait, so an end, a
+lock or another start that lands meanwhile wins (V20). A joiner remembers each number it answered for twice a session's
+lifetime, across a lock, and never answers one again (`numberAlreadyAnswered`), so a board that serves a fresh commit
+buys the adversary in the middle no second try against one starter session (V23). Each status names its session
+(`runID`), and every step, the invitation (`inviteThroughSharingCode(to:as:checked:)`) and an end (`run:`) are bound to
+it, so one window's screen never drives another window's session (V25).
+
+**What the screens accept as a check** (`WatchwordPresentation`, `docs/05-anti-phishing.md` §3). A vault sharing code
+session, or the fallback: the full vault sharing code typed (`.safetyNumber`), behind a secondary action, for two
+people who cannot be at their devices together. Its screens show none of the directory's digits for the other account,
+only this device's own, for the other person to type in turn: the person types the sixty digits the other device shows,
+so copying the screen can never pass (`FullCodeComparison`; `06-adversarial-review.md`, V17). The person's own "the
+numbers match" is gone (ADR 0010, G3): the case
+is removed and its raw value (3) reserved, so a pin that carries it is ignored and the contact is unverified again. A
+fingerprint code pasted from a message only names the account to look up; `.scannedCode` comes only from the camera,
+through the screens' `cameraScanned` entry points (finding 2). `VerifiedContact.method` says what the person did
+(S16). The member list offers a session with any member it shows as unverified or with changed keys
+(`MemberVerificationModel`); a session another account answers is ended before anything is pinned, and the screen
+says "verified" only when the vault's comparison afterwards lists the member as verified: one whose listed keys are
+not the ones checked is to be removed and invited again (V24).
+
+**Evidence names the keys it is about** (review finding Z40). The key directory is untrusted and is asked more than
+once between a lookup and a pin (`contactCandidate`, then `verifyContact`, `invite` or `acceptInvitation`, each with a
+lookup of its own), and whoever serves it may answer differently each time. So no evidence is a bare "yes": a typed
+full code and a scanned code are matched against the bundle about to be pinned, and a session's evidence names the
+keys its transcript covered; any difference is `fingerprintMismatch`, and nothing is pinned, wrapped to or anchored on.
+Once a contact is pinned, a later lookup that returns other keys is `keySubstituted`, as before. (The security-audit
+branch bound the person's comparison by eye to the fingerprint the screen showed, `comparedByEye(shown:)`; ADR 0010
+removed the comparison by eye altogether, so that case is gone here.)
+
+**Names of shared vaults.** Only a shared vault's owner or an administrator may rename it (owner decision,
+2026-11-17). The review of the account screens (finding 4) had left renaming with every member who may write, for the
+owner to confirm, and the owner decided the other way: a name is what a person reads before saving into a vault, and a
+member who can call a shared vault "Personal" can have someone's item land where they will read it. A rule kept by the
+screens alone would not bind a client that does not ask, so this is a rule of the protocol: every device's write judge
+refuses a description that is not an administrator's work, the same on every device whenever it heard of the
+membership records. §8.7 says which descriptions count and why the rule is the one it is; §8.10 how the session, the
+merge and the judge apply it. The screens still never let a name stand alone, because an administrator can choose any
+name: every list and the item editor label a vault by ownership and role (`VaultRow.badge`: "Your own vault", "Shared
+by you", "Shared with you · Can edit"), and the editor says where a new item goes, with "everyone in this vault can
+see it" for a shared one (finding 4). A vault's own screen offers a rename only to an account that may
+(`VaultRow.mayRename`, from `SharedVaultStatus.mayRename`), and says why to everyone else (`renameRefusal`).
 
 ### 8.5 Key grants
 
@@ -1225,8 +2142,10 @@ the chain are not the ones this device's person verified.
 requested and not yet carried out, a removal that is owed (§8.3), a plan of this device's not yet in the chain, the
 current key not yet held, and records still to be sealed again.
 
-**Leaving.** The member's device publishes a signed `LeaveRequest` and leaves the transport share; it cannot write
-the record itself, which names a key it must not hold. The next unlocked device of an administrator (the owner, if
+**Leaving.** The member's device publishes a signed `LeaveRequest`; it cannot write
+the record itself, which names a key it must not hold. It does not take itself off the transport's share
+(`ShareAccessControl` has only an administrator's `revokeAccess`): the administrator's device that carries the
+departure out does that as the rotation's first step, and until then the leaver is a member like any other. The next unlocked device of an administrator (the owner, if
 the leaver is an administrator) turns the request into a rotation whose record carries the request's signature, so
 "left" in the chain always means the member said so. A request is bound to the vault and to one stint of membership
 (the epoch the member was added), so replaying it after the member has been invited back, or into another vault,
@@ -1260,7 +2179,9 @@ asking, and the transport's own permission where it has one (CloudKit's read-onl
 
 **The write cut.** A record that ends an account's permission to write (the removal or departure of a member who
 could write, a change of role to read-only) carries a `WriteCut`: the signing administrator's device, after one more
-sync pass, commits to what it has merged of that account's work. The verifier refuses a cut on any other record. To
+sync pass, commits to what it has merged of that account's work. So does a record that ends an administrator's role
+without ending their permission to write, a demotion to read-write (below, "Who may name the vault"). The verifier
+refuses a cut on any other record. To
 this module the cut is at most 2,048 opaque bytes, signed with the rest of the record and therefore the same on every
 device; what it must let the integrator do is decide, from the cut and a write alone, whether the write is inside,
 with the same answer everywhere and no way for the account to add to the set afterwards (§8.8 says what that means
@@ -1285,6 +2206,77 @@ wrote that the signing device had not merged when it took the cut. That is the p
 clients keep (S12), and why the device syncs first and, for a removal, takes the member off the transport before
 anything else. An administrator chooses the cut they sign; one who signs less than they hold sets a member's work
 aside for everyone, which is within what an administrator who can remove the member can already do.
+
+**Who may name the vault** (owner decision, 2026-11-17: only the owner or an administrator renames a shared vault;
+§8.4). The vault's description (§5) is the one record a member who may write may not. The session refuses its own
+account (`SharedVaultError.renameRefused`), and for anyone else's description every device asks
+`MembershipLedger.administratorStanding(of:)`, beside `writeStanding(of:)`, before merging it and again about the one
+it holds whenever the head has changed. A description counts only if its writer's writes count *and* this says so:
+
+| Standing | Which of the account's descriptions count |
+| --- | --- |
+| `holdsRole`: the owner, or an administrator on the accepted head | every one the account signed. Judged *now*, like `mayWrite`, and for the same reason: nothing in a write says when it was made that its writer could not have chosen. So a name an account wrote before it was made an administrator counts once it is one. |
+| `ended(cut:author:)`: an administrator once, not now | exactly those inside the write cut of the record that ended the role (the latest such record of the accepted chain; for an owed removal, what the displaced record's branch said, §8.3). That record is a removal, a departure or a change of role, **to read-write as to read-only**. |
+| `neverHeld` | none: the account never was an administrator here, or the vault was deleted |
+
+Like read-only it is **not cryptographic**: every member holds the vault key and can seal a description. What stops
+it counting is every other member's client asking.
+
+Three rules were weighed.
+
+- *By current role alone*: a description counts while its author is the owner or an administrator. The smallest
+  rule, sound, and it needs no cut. What it admits: nothing of a former administrator's, early or late. What it
+  costs: the name an administrator gave the vault lapses on every device the day their role ends, by an act nobody
+  meant as a rename, with the version held aside on each of them, and comes back if they are promoted again.
+  Rejected: "a write inside the cut counts on every device, whenever it meets it" should hold for a name as for an
+  item, and a rename made with the role was a permitted write.
+- *By the role at the time the description claims* (a version, a date, or a membership record it names): a writer
+  chooses what a write claims, so a former administrator would name an epoch at which they held the role. Nothing
+  binds a writer except a commitment made by someone else.
+- *The cut* (chosen): that commitment already exists for writes, and three of the four ways a role ends already
+  carry it (a removal, a departure, a change to read-only: an administrator can always write). The fourth, a
+  demotion to read-write, ended no permission and carried none; it now carries one, taken the same way (§8.8,
+  `requiresWriteCut(changingRoleOf:to:)`), which bounds the former administrator's descriptions and says nothing
+  about their items: their `writeStanding` stays `mayWrite`. Only the owner signs such a record (§8.1).
+
+A fourth, the cut where a record already carried one and the current role for a demotion to read-write, needs no
+change to the verifier, and was rejected for what a person would see: the names of an administrator who was removed
+would stand while those of one merely demoted lapsed. "By current role alone" keeps the same adversaries out and
+admits less, and what it changes is visible to a person, so the choice of the cut over it is recorded for the owner
+(`06-adversarial-review.md` §T, K10); going from the cut to the role alone later only narrows what counts.
+
+The record's layout is unchanged: the field was always there, and what changed is which records the verifier lets
+carry a cut, and what an empty one on a demotion to read-write means (none of that account's names count). Nothing
+is released at format 2, so the version byte stays. After a release this would have to be a later format (§8.9): a
+device on the old rule would refuse the new record as invalid, for good, and carry on without it.
+
+What that comes to, case by case:
+
+- **The owner, or an administrator on the head**: their rename counts on every device.
+- **An administrator demoted to read-write**: the names they chose before the owner's device took the cut count for
+  good; one written after it counts on no device, and a device that merged it before it heard of the record takes it
+  out again and holds it aside. Their items are untouched.
+- **Demoted to read-only, removed, or gone by their own leave request**: the same, by the one cut that also bounds
+  their items.
+- **A read-write member whose client does not keep the rule**: never. Not a late one; not one written above an
+  administrator's description (a higher version changes nothing about whose work it is); not one labelled as an
+  administrator's revision (a description is judged by its bytes in the stream of the device its stamp names, S36);
+  and not one that an unaware member's device stored again as a row of its own (it is judged by the write that chose
+  it, `VaultMetadata.writtenBy`, S37).
+- **A member promoted to administrator after writing a name while read-write**: it counts from the promotion on.
+  Deliberately, as a write made while read-only counts once its author may write (S12): the alternative would need
+  to know when a write was made, which only its writer says; and it would bind nobody, because the account can write
+  the same name again the moment it holds the role. Every device changes its answer at the same head.
+- **A demotion displaced by a fork** is not owed (§8.3): until the owner's device proposes it again the account is
+  an administrator and its names count, and the new record's cut, taken then, decides.
+
+**A name is chosen, not only written.** Whoever may write can seal a version that carries a description on (the
+merge of two rows at one version does, on any device), so with descriptions ordered by their *row's* version a
+member could have chosen the vault's name without writing one: by sealing an old description again, genuine to the
+byte, above the current one (review finding S54). The description is therefore a last-writer-wins register on the
+stamp of the write that chose it (§7.7), which the judge checks with the rest of its bytes; a carrier's version
+decides only between carriers of the same description. A description dated above the row that carries it does not
+open at all, or an administrator who expects to lose the role could date a name above every rename to come.
 
 ### 8.8 What integration calls, and what is not solved
 
@@ -1313,10 +2305,23 @@ written out against a hostile store. One sync pass, in this order:
 6. **Rotation.** Continue any saved plan (`RotationPlan.parse(_:account:)`, `steps(in:)`); a superseded removal or
    departure is planned again. Plan each of `owedRemovals` this account may sign. As an administrator, plan a
    rotation for each of `pendingLeaveRequests`. Every plan that removes a member who can write, and every change of
-   role to read-only, needs a write cut (`requiresWriteCut`), taken after step 5 of the same pass. Then, as a member
+   role to read-only or away from administrator, needs a write cut (`requiresWriteCut`), taken after step 5 of the
+   same pass. Then, as a member
    who may write, seal again whatever `recordsToReseal` lists, from an inventory that holds only what counts; a
    re-seal is the same item state at a higher version (`ItemMerge.written`), not an edit, so two devices doing it at
-   once converge, and it keeps every value's own author.
+   once converge, and it keeps every value's own author. The vault's description is sealed again only by an
+   administrator's device (§8.10). Planning and carrying out a rotation ingest membership again, so the head may have
+   moved since step 5 by someone else's record as well as this device's own: what no longer counts under the head is
+   taken out once more before anything is sealed again (S59), because a version sealed under the new key is believed
+   by a member who joins later to have been judged with every record up to that key in hand. Where this sync's take-out
+   did not finish (`takeOutsOwed`), nothing is sealed again, by a plan or otherwise, since that take-out would have no
+   replay after it in the sync: a plan revokes and publishes, and waits at `.resealing` until a sync whose take-out
+   finishes (V71). An owed removal never waits for such a plan (nothing is resealed while one is owed, so the plan
+   completes first); a leave request does, and becomes a departure on this device only then (V75). A person's removal
+   or rotation (`removeMember`, `rotateVaultKey`) carries its plan out at once, reseal included, then syncs so what
+   it sealed again goes out and what its take-out took out is replayed; where an automatic sync began meanwhile, that
+   sync or the next does both, and the call reports the rotation rather than `syncInProgress`, which said it had failed
+   although it had gone through (V75).
 
 Accepting an invitation passes the ledger the device already holds for that vault ID, if it ever held one
 (`continuing:`), and the owner it knows for it (`knownOwner:`).
@@ -1358,10 +2363,45 @@ Not solved here, and to be decided with integration:
   devices to refuse to sign while they disagree, which is device-registry work. A displaced *demotion* is not owed;
   the owner's device proposes it again (step 3).
 - **Forks cost work.** Whatever lost a fork is done again: removals by any device that may, everything else by its
-  author's device when it next syncs. Until then an invitee waits, a role change is not in effect, and a removed
+  author's device when it next syncs, except an addition that its own branch went on to undo, which is let go and
+  whose key is rotated instead (§8.3, Z43). Until then an invitee waits, a role change is not in effect, and a removed
   member is listed (with their writes counted only as far as the displaced record's cut). A displaced *demotion* is
   not owed, so until its author proposes it again the member's writes count in full, the later ones included; the
-  new record's cut then decides.
+  new record's cut then decides. What a device sealed under the key of a rotation that lost is passed over by the
+  devices that never held that key and reaches them sealed again (§8.10, Z47); a **deletion** it published under
+  that key does not, and stays this device's alone until the item is touched again.
+- **A move across a vault this device may not publish to.** A move is a copy in one vault and a deletion in
+  another, and deletions go out only once everything else has. A vault that is not published to (this account was made
+  read-only there before the device synced) or whose copy was taken out and held aside as a write after the cut holds
+  an item that exists nowhere else; while any vault does, no vault's deletions are published (Z44,
+  `holdsUnpublishedWork`). What releases them is the copy going out, or the person discarding the held-aside copy.
+  A row the sync layer knows only by a deletion counts too while it holds an edit of this device's above what it
+  published: a move's copy has an ID anyone reading the source vault can derive, and a tombstone for it found in the
+  log before the copy existed made the copy look known (Z148). Not a row that waits only behind this device's own
+  pending deletion of the same record (a version kept after that deletion, which the outbox sends right behind its
+  tombstone): counted, the two waited for each other for good (V44). That holds where the sync publishes the vault,
+  where both go out in its deferred pass; anywhere else only for a version holding nothing of this device's that the
+  deletion had not seen, nor what it published of the record (Z202: the tombstone's own revision counts as seen, so
+  a kept version that follows its deletion out holds nothing back), so a kept version restored and edited in a vault
+  that is not published holds the others back like any unpublished edit (V46). A vault holding what a restore has
+  still to carry is not published in that sync (Z204), so there only the second rule applies. The pending deletions
+  read for this are this device's, through the session's signed store; one that cannot be read or checked holds (Z203).
+  A listing of the vault's rows that fails holds too, as a state that cannot be read does (Z246): read as none, an
+  unsent edit held nothing back.
+  "Held aside" here means what this device's own take-out put aside, which it notes in a signed row of its own
+  (`OwnTakenOutRow`, `WWTO`): an entry in the quarantine names the device its writer claims, and counting any entry
+  that named this device let a member who can have it hold something aside (a segment signed into the stream named
+  after it, Z46) stop its deletions in every vault, the Personal one included (Z54). The row is not the stream index:
+  the take-out removed those versions from the store, so an index refused or rebuilt from the log cannot find them
+  again, and the gate opened whenever it was (Z121). While the row has not loaded (deleted, refused), every held-aside
+  entry naming this device that the sync state does not know holds the deletions back, as before Z54, until the
+  quarantine holds none; a quarantine that cannot be read holds them back and forgets nothing. A shared
+  vault's second replay in a sync defers deletions like every other pass, and deletions go out after the replays
+  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so, as
+  something this device moved, added or changed that has not reached the others (an edit made over a write that stops
+  counting is held aside as this device's own as well, Z278); where the cause is a copy nobody received (an edit of a
+  non-committing device ID of the account's registry, Z170), `copiesNobodyReceived` names the items, and the summary
+  names each by title and vault with what releases it (Z171).
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
   departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
   must carry what is needed to judge without them.
@@ -1455,45 +2495,330 @@ the record versions it carried, and the digest of every value it carried that it
 whose stamp names that stream's device (format 2, S36; format 3 since note-line removals, discards and history
 entries are values too, S32 and S43, so an older index is refused and rebuilt by a replay); and the devices a version
 is waiting on. All of it goes through the `SharingStateStore` port as blobs, each signed by the
-account (`WWML`, `WWRP`, and `WWSI` for the index) or re-checked on load (proposals are records, filtered to this
-account's own), so a planted file can delete trust and never add it; the owner's account ID only says which pin
-anchors the ledger, and a ledger whose owner's pin is gone is not loaded. Pins live behind `VerifiedContactStore`.
+account (`WWML`, `WWRP`, `WWSI` for the index, `WWVK` for the keys the ledger was seen to hand this account,
+`WWTO` for what the take-out held aside, and `WWRC` for a restore's chain of earlier device IDs, §7.7, Z216) or
+re-checked on load (proposals are records, filtered to this account's own), so a planted file can delete trust and
+never add it; the owner's account ID only says which pin anchors the ledger, and a ledger whose owner's pin is
+gone is not loaded. **Whether a vault is shared does not come from this state** (review finding Z41; V31): a key
+opened from a grant is `arrivedByGrant`, which its wrap under the keyset authenticates
+(`VaultKey.grantedSchemaVersion` in the wrap's context), and the account signs a **shared marker** beside the
+vault's directory entry (`account/<id>/vault/<vault>/shared/<device>`,
+`AccountObjectLocation.vaultShared`, body `"WWVS1-shared" ‖ vault ‖ owner`, both signatures of a directory object),
+written when the vault is shared or a key is adopted, published, fetched and vouched for like the vault directory's
+other objects, stored at enrolment, and kept as a record-store row (tag `0x03`) that only the account key's signature
+makes count. A row of the sharing state marks nothing, so one planted there closes no vault, and the Personal vault is
+never shared (V32). A vault the marker, a granted key or a loaded ledger names (`isMarkedShared`; every vault but the
+Personal one until the markers are read) with no verified ledger loaded is **unavailable** on the device, never one of
+the account's own: it has no key to seal under (never the lowest key ID), its sync only downloads and verifies nothing,
+and every write, rename, deletion and share is refused (`SharedVaultError.ledgerUnavailable`). The screens list it as
+shared and closed with the reason (`unavailableSharedVaults`, V33): `ownerNotChecked` when the saved ledger's checkpoint
+carries this account's signature and only the owner's pin is missing (a new pin loads the saved ledgers again, V19; a
+load that began before the pin settles nothing, V36), otherwise `notSetUp`, whose way back is accepting the vault's
+invitation on this device (`setUpSharedVaultAgain`, from the marker's owner: `sharedVaultInvitation`), which verifies the
+chain on the transport back to the owner's pin and keeps every item. The same holds for a member's (or the owner's)
+second device, which never had a ledger. Accepting again rebuilds the ledger from the store, so a store that serves a
+stale chain prefix to a device whose saved ledger was removed is not caught (S26 needs that ledger). Pins live behind
+`VerifiedContactStore`.
 In-memory implementations serve tests; `SQLiteSharingStore` (`sharing.sqlite`, both ports) is the production one.
-A vault key received through a grant is stored like any other, as a `vaultKeyWrap` row under the keyset, with a
-directory row when the vault is new on the device; a key whose ID the device already holds for another vault is
-refused (`keyIDInUse`, S38), because key IDs are public and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
-chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission` (in
-`writableVaultKey`, so every write path asks: save, move, copy, rename, conflict resolution). Deleting a shared vault
-is the owner's and also proposes `deleteVault`; a member leaves instead.
+A vault key received through a grant is stored as a `vaultKeyWrap` row under the keyset whose context says it arrived
+by grant (§7.7), with a directory row when the vault is new on the device and the account's marker naming the chain's
+owner; a key whose ID the device already holds for another vault is
+refused (`keyIDInUse`, S38), as is one whose ID it holds for this vault with other bytes, because key IDs are public
+and a shared vault's owner chooses them; the key a shared vault's records are sealed under is the one the
+chain names (`currentVaultKey`, the seam §7.7 left), and a write the person makes needs `writePermission`: in
+`writableVaultKey` for save, copy, rename, conflict resolution and both sides of a move (the vault an item is moved
+out of is written to as well: the original is trashed, then deleted), and through `checkSharedWrite` for a permanent
+deletion and the 30-day purge, which skips a vault this account may not write to (review finding Z44: those three
+once asked nothing, so a read-only member's device deleted locally and queued signed tombstones that went out the day
+the member was allowed to write). The same check covers a removal that is owed, a chain stopped at a later format, and
+a vault with no ledger here. A rename also needs the owner's or an administrator's role (`checkSharedRename`,
+`SharedVaultError.renameRefused`; §8.7), asked before anything is sealed; vaults that are not shared, and the Personal
+vault, are renamed as before. Deleting a shared vault is the owner's and also proposes `deleteVault`; a member leaves
+instead.
+
+**"Shared" is a fact a device cannot lose** (review finding Z41). Whether a vault is governed by a chain was once
+answered by the ledger a device had loaded. The ledger is per-device state, so two kinds of device ran a shared vault
+as one of the account's own, with no role, the lowest key ID held as the current key (after a rotation, about half the
+time the key a removed member kept), no judge, snapshots and collection in a log that must stay whole, a second
+"Share", and "delete vault" open to it: any other device of a member's or the owner's account, which receives the keys
+through the vault directory and never held the ledger; and a device whose saved ledger, owner row or owner's pin was
+deleted (A8) or lost. Two things answer the question now, neither of which goes with the ledger: a key of the vault
+that **arrived by grant** and the account's **marker** for it (both §7.7). The sharing state is not a third: not every
+row of it is signed, and for a while a vault it named without a ledger that loaded was held closed too, so one planted
+row closed a private vault with no way out (Z50). A vault either names with no verified ledger loaded is
+**unavailable** on that device
+(`VaultInfo.isSharedUnavailable`, `SharedVaultError.ledgerUnavailable`): it is listed, labelled as shared and closed
+with the reason (`unavailableSharedVaults`, V33: `ownerNotChecked` when the saved ledger's checkpoint carries this
+account's signature and only the owner's pin is missing, so checking the owner again restores it, a load that began
+before the new pin settling nothing, V36; otherwise `notSetUp`, whose way back is "Set Up on This Device",
+`setUpSharedVaultAgain`, accepting the invitation `sharedVaultInvitation` gives from the marker's owner, keeping every
+item), and what the device already holds of it stays readable; it has no current key, so nothing is sealed, signed
+or published there and its engine only downloads (no snapshot, no collection); every write, the move of an item out of
+it, its rename, a second `shareVault` and its deletion are refused. Until the markers have been read in a session,
+every vault but the Personal one is treated so, and a sharing state that cannot be read loads no ledger, so the
+vaults the marker or a granted key names stay closed until it can: a failed read is not an answer. The way out is the device accepting the vault's invitation itself, which works on a
+second device because the owner it must name is the one the marker gives, and only that one: a device that holds a
+granted key of the vault and cannot name its owner (no ledger, no marker yet) accepts no invitation for it at all
+(`ownerUnknown`), since anyone the person might verify could otherwise sign a chain for the same vault ID and stand in
+as its owner (Z48), and one whose account's markers name two owners accepts none either (`sharedVaultInvitation`; before, the
+directory row made by the granted key counted as "this account's own vault" and the invitation was refused as an owner
+conflict). The person compares the owner's fingerprint there too, since pins are per device, unless the owner is the
+account itself; the key is the grant's, or, where no grant was ever made (the owner's first key on the owner's other
+device), the one the account's own directory gave the device. What this leaves: a device of the **owner's** account
+that holds only the first key and has not been shown the marker (the store withholds it, or the row was removed from
+the file and no sync has run since) still takes the vault for its own until a sync delivers the marker or any later
+key's wrap; from then on it writes and publishes nothing there. Until then it seals under the first key. That is the
+right key only while the vault has not rotated: after a removal it is the key the removed member kept, so a store
+that keeps both the marker and the new key's wrap from that device, with the removed member reading what it serves,
+gets what the owner writes there (Z49). This is the exposure of any device a store keeps a removal from (§8.3, "what
+the store can do"; D6), reached here by a device with no ledger, which also publishes unjudged and maintains a log
+that should stay whole for as long as it is kept in the dark. Closing it would take sharing under a fresh key that no
+member is ever given the predecessor of, by a grant from the owner's account to itself, so that no key of a shared
+vault is of the account's own class; then every member is one who joined after a rotation, passes over the whole of
+the vault's earlier log, and takes its earlier values on a later sealer's word (S42's vouching, with what S42 leaves
+open for S36 and S46, for every member instead of for latecomers). That trade was not made here. And the ledger
+itself is still not synced between an account's devices (S35): each accepts the invitation.
+
+**A device led into another chain** (review finding Z59). A member's new device that holds nothing of a vault (the
+store keeps from it every object the account's directory holds of the vault: key wraps, markers) has nothing to
+compare an invitation's owner with, so it accepts one from anyone the person verifies, and joins a chain that person
+signed for the same vault ID. Nothing on the device can tell, and nothing stops the join; what is stopped is its
+reaching the account's real items. **A key is used for a vault with a ledger only if that ledger hands it to this
+account**: one the device opened from a grant the ledger entitles the account to, or one the account's directory
+brought from another device whose bytes a grant of the ledger's shows to be the same (`SharedVault.verifiedKeys`,
+saved signed, `admitVaultKeys`); the account's own genesis key only where the ledger's owner is this account
+(`withholdUnvouchedKeys`, at unlock, when the directory adds keys, and whenever ledgers load). A key ID shows nothing:
+key IDs are public, and whoever signs a chain chooses the IDs it names. Before this the device made the real key
+resident when the directory delivered it, opened the account's other devices' segments (on the other chain the
+member is a writer) and sealed what they carried again under the other chain's key, publishing it. **A vault whose
+owner the account's devices disagree about is held closed on all of them, ledger or not** (`isOwnerDisputed`: two of
+the account's markers name different owners, or this device's ledger names an owner its account's marker does not):
+no current key, so nothing sealed, sealed again or published; no proposal, plan, rotation, invitation or acceptance;
+every write refused (`ownerDisputed`); not given to AutoFill; listed as closed and disputed
+(`VaultInfo.isOwnerDisputed`, `SharedVaultStatus.ownerDisputed`), with words that say the person's devices were given
+two owners and the items can be read and copied into a vault of their own. Both sides hold a chain verified to
+someone the person compared a safety number with, so neither device can be the one to go on. **Nothing ends a
+dispute in this version.** A marker is never retired: the account key signs markers, a revoked device keeps that key,
+and a retirement it could sign would reopen what the dispute closes; a retirement the person chooses, signed by the
+account and a device registered now, is the design that would end one, and is tracked. Last, a device answers "nobody
+owns this vault" only once it has listed its account's vault directory in the session and found nothing of the vault
+there (`SharingRuntime.directoryVaults`), so a device that has not synced, or whose listing names the vault while its
+objects do not arrive, takes no stranger's invitation; a store that withholds the vault's whole directory still gets
+that answer, and the two rules above are what hold then.
+
+**A share that was cut short** (review finding Z50). `shareVault` writes the marker before the chain, so that every
+device of the account learns the vault is shared whether or not it ever sees the chain. A lock or the end of the
+process between the two left a marker naming this account, no ledger and no genesis record anywhere, and the vault
+closed with no way out. So a vault whose only mark is this account's own marker naming this account, none of whose
+keys came by grant, is this account's to finish sharing: `shareVault` goes on from there under the key the genesis
+record names either way, and for a vault that is already shared here it saves the state and publishes the genesis
+record again. That is also how the owner's other device takes up a vault the account shared elsewhere while it has
+not rotated. It lists the vault's membership records first and joins a chain rooted at this account's own bundle if
+one is there, signing a genesis only when none is (Z122): signed again on CryptoKit, where Ed25519 is randomised, the
+record was a second root, and where both roots were bare and each device invited someone the fork rule set one
+invitee's addition aside. The owner's device also puts its genesis record back at every sync while the store does not
+list it: the one call that published it may have failed.
+
+**A vault this account is no longer in** (review finding Z45). Leaving and removal change the chain and the key;
+nothing takes the vault's records off the leaver's devices, and the screens no longer say that anything does. Once the
+accepted chain no longer lists this account, the vault's items are not given to AutoFill (`credentialItems` leaves out
+every vault for which `vaultsWithheldFromAutoFill` answers: one this account is no longer a member of, and one that is
+shared with no ledger here, where membership cannot be told), the vault stays in the list while the device holds items
+of it, labelled as one this account is no longer in, and the person removes what the device holds with
+`removeLocalCopies(ofSharedVault:)`: the rows, their synced scan results and what was held aside, taken out of the
+store directly, so nothing is recorded to publish and nobody else's copy is touched. It is refused while the account is
+still a member. Not all of it need be a copy: a change made on this device that never reached the others (written and
+not published, or put aside when the account's permission ended) exists nowhere else, so the call is refused
+(`unsharedWork`) unless it is given the number of such changes the person was shown
+(`unsharedWork(inSharedVault:)`), and the confirmation says that number and that they would be discarded for good
+(review finding Z57). A change counts if the item's clock holds an edit of this device's above every version of it
+the device published, and not merely because the device sealed the row: a merge it sealed in a vault it only read is
+its row too, and holds nothing the others lack (Z123). The key wraps and the ledger stay (S26). One consequence for the AutoFill extension, whose adapter is
+not built: its session must be given the sharing state (`configureSharing` over the App Group's `sharing.sqlite`)
+like the app's, or every shared vault is one with no ledger there and none of its items is offered. What the leaver's device already copied elsewhere, and what a
+removed member's device holds, cannot be taken back, which the removal dialog says (F4.3); "read-only" is worded as a
+rule the apps keep, not encryption (F4.5).
+
+**Sharing a vault that already holds work** (review finding Z42). A vault can be shared after months of use from
+several devices. At the genesis record its stream index is empty, and the judge attributes a value through the segment
+of its writer's stream that carried it, so `shareVault` asks for the index to be built from the log before any row is
+judged (`indexRebuilding`, as for an index refused on load); judged against the empty index, every item holding a
+value the owner's other device wrote was taken out and held aside. That is enough while the log is whole. It is not
+once the log has been **compacted**: a private vault writes snapshots and collects segments (§7.5), and a value that
+survives only in a snapshot is carried by no stream's segment, so every device that replays the log, an invitee's
+first of all, would hold those items aside for good. Nothing attributes such values yet, so a vault with a snapshot on
+the transport, or one this device merged a stream through, is not shared: `shareVault` throws
+`SharedVaultError.historyCompacted`, and the person shares a new vault and moves the items into it (a move is a write
+by this device after the genesis, which everything attributes). The rule that would lift this is the owner's to
+choose (`06-adversarial-review.md` Z42): values in a snapshot the owner's account signed counting as that account's
+where the stamp names one of its devices, or the sharing device writing every record again in its own stream with the
+owner account vouching for its other devices' values. Either widens S36's "a value is its device's work only where
+that device's own stream carried it" for the owner's account, and wants the same review that rule had.
+
+The check at `shareVault` is made before any other device of the account can have seen the marker, and one that has
+not seen it still runs the vault as a private one and may compact its log afterwards (review finding Z56). Three
+things bound that. The marker is put on the transport, and must be, before the chain's first record is published
+and before a key is wrapped to anyone (`publishSharedMarker`). A chain that has **never listed anyone but its owner**
+(`MembershipLedger.isOwnersAlone`) is not judged at all on the owner's own devices: only the owner's account can sign
+what verifies in it, as in a vault that is not shared, so the judge admits every segment, version and tombstone and
+nothing of the owner's is held aside, whatever became of the log. On another account's device it is judged as any
+vault is (Z124): a member whose addition lost a fork to the owner's records accepts a chain that lists only the
+owner, its own account's signatures verify there, and its writes, which count nowhere then, would have stayed. It is
+a function of the accepted chain and of whose device this is, so the first record that lists
+someone else changes the head, and everything is taken out and judged then as at any change of head. And `invite`
+makes the whole-log check again before that first record exists: a vault whose log was compacted in between cannot
+take its first member (`historyCompacted`) and goes on as its owner's. What is left is a compaction that lands after
+the invitation's check, by a device whose sync had read the account's directory before the marker was there and is
+still running, or a store that hides the snapshot from the inviting device: the outcome is Z42's, items held aside,
+nothing lost.
+
+**A deletion not yet published when permission ended** (review finding Z57). A member who may write deletes an item
+for good and is made read-only, or removed, before their device syncs. The deletion is outside the cut like any write
+of that moment, and published late it would be held aside by everyone. Left queued on the device it counted as an
+erasure in every merge there and went out, signed, on the day the account was let write again. The take-out at the
+change of head withdraws it with the rest of what no longer counts: the pending deletion is removed, and the replay
+puts back what the log holds of the record. The person deletes it again if they are let write again and still want
+to.
 
 **The session's API** (what a UI calls): `configureSharing`, `publicKeyBundle` (for the directory, and the person's
-own safety number), `contactCandidate` and `verifyContact` (fingerprint by typed number, scanned code or comparison;
+own full vault sharing code), the vault sharing code session (`startSharingCodeSession`, `joinSharingCodeSession`,
+`refreshSharingCodeSession`, `enterSharingCode`, `scanSharingPartnerCode`, `inviteThroughSharingCode`,
+`sharingCodeInvitation`, `replacePinFromSharingCode`; §8.4), `contactCandidate` and `verifyContact` (the full code
+typed, or a scanned code;
 a different pinned bundle is `keySubstituted` unless the person replaces the pin), `shareVault` (the genesis
 record), `invite` (needs a verified contact: wraps the current key and proposes the addition), `acceptInvitation`
 (confirms the owner's fingerprint if not pinned, continues any ledger the device ever held for the vault, S26, and
-passes the owner it knows for the vault ID, the account itself for its own vaults, S6), `leaveSharedVault`,
+passes the owner it knows for the vault ID: the loaded ledger's, else the account's marker's, else the account itself
+for a vault none of whose keys arrived by grant, S6 and Z41, and none only once the session's listing of the account's
+directory names nothing of the vault, Z59), `sharedVaultInvitation` (the invitation a second device
+accepts to set up a vault its account already takes part in), `leaveSharedVault`,
 `changeRole`, `removeMember`, `rotateVaultKey`, `sharedVaultIDs` and `sharedVaultStatus`. Each is checked by
 `MembershipRules` (through the ledger's proposing functions and `RotationPlanner`) before anything is signed.
 
 **One sync** (`syncAll`) runs §8.8's pass around the logs. Before any vault's log: membership ingested (names first,
 refused names remembered), member keys compared with the pins, proposals settled, the current key fetched if the
 chain entitles this account to it, and the device registry of every account the chains list or listed fetched from
-`account/<id>/registry/` and evaluated from the one genesis entry signed by the key the chain gives for that account,
-following its newest password change. A registry is evaluated once per signing key the chains give an account, and
-each vault uses the one its own chain anchors (S39). Then each shared vault's log runs with the judge, publishing only if this
+`account/<id>/registry/` and evaluated from the genesis entry this device anchored for the key the chain gives that
+account, forward from the password change it follows (below). A registry is evaluated once per signing key the
+chains give an account, and each vault uses the one its own chain anchors (S39). Then each shared vault's log runs with the judge, publishing only if this
 account may write (a read-only or former member merges and publishes nothing, `sync(publishing:)`), and with
 `maintainsLog` off: a shared vault writes no snapshots and collects no segments, because a cut is judged against the
 departing account's own segments (§8.8, "a departed account's log"). After the logs: a saved plan continued, owed
 removals this account may sign planned, leave requests turned into rotations by an administrator, and what
-`recordsToReseal` lists sealed again through `ItemMerge.written`. While locked only membership is ingested and the
-logs download.
+`recordsToReseal` lists sealed again through `ItemMerge.written` (the description only by an administrator's device,
+below), after what no longer counts under the head has been taken out again (`resealSharedVault`, S59). While locked
+only membership is ingested and the logs download.
 
 **Verifying** (`SyncKeyring.verify`, `sharedVerify`): an object of a shared vault must carry the dual signature of a
 device in the registry of an account the chain lists, under that account's key as the chain lists it (for an account
-whose permission ended, the key in the record that ended it), and that account's standing must not be
-`nothingCounts`, nor that account one whose chain keys differ from this device's pin (`MemberKeyCheck.substituted`).
-A snapshot needs an account that may write now. Devices revoked from a member's account, as the vault's chain anchors
-it, are not read.
+whose permission ended, the key in the record that ended it), and that account must not be one whose chain keys differ
+from this device's pin (`MemberKeyCheck.substituted`, from a comparison made on the current head: with none, nothing
+verifies until one is made, and a comparison is stored only for the head it was made on; V29). A segment of an account whose standing is `nothingCounts`
+verifies, and the judge passes over it in sequence and keeps nothing of it (`SegmentAdmission.passOver`, Z137): refused
+here, no device ever staged it, and in another member's device stream it squatted at its number for good.
+A snapshot needs the owner's account: a shared vault writes none, so an honest one is from before the vault was
+shared, when the owner's devices were its only writers, and it is read for one thing, the gap in a stream whose first
+segments were collected then (refusing it would stop that stream at a new member and at every replay). A member's
+snapshot would have its coverage vector believed unjudged, and is refused (Z21). Devices revoked from a member's
+account, as the vault's chain anchors it and as this device follows that account's registry, are not read.
+
+**Another member's registry** (`evaluateMemberRegistry`; review finding Z6). An account's own devices know which
+password change is theirs, because the person typed its password. Another member's device knows nothing of the
+kind: two changes made from the same generation each carry the account key's signature, a registered device's and
+the previous generation's enrolment key's, and a device that was revoked with a password change still holds all
+three for the generation before its revocation. So no rule picks between two branches, and following the highest
+generation followed whoever published most. Instead, what this device took once is an anchor (the genesis entry,
+the credential entry first anchored, its *base*, and the one followed now; signed by this account under `WWMD` and
+saved with each vault that lists the member, refused whole if it does not verify) that moves **only forward**: one
+credential entry at a time, and only where exactly one change follows that replays as a chain. A change that leaves
+the chain before the base is never followed, whatever its generation. One that leaves it at the base or after,
+beside a change this device has followed since, competes with it (review finding Z12): a device anchored long before
+a theft would otherwise follow whichever branch was published first, the forged one included, and hold the genuine
+change, arriving later, as one that leaves the chain behind it. Where two or more compete, neither is taken, and a
+device counts only if it is registered at the entry they leave *and in every competing branch*: each side's
+revocations are honoured,
+so neither the device a branch revokes nor the one it keeps signs anything that counts here, while a device nobody
+contests carries on (a contested device stays listed as a revoked one is, so what it wrote before is still its
+account's work). A second genesis entry neither replaces nor removes the one anchored; with none anchored, two
+anchor neither. Each such sight is reported in the vault's status (`membersWithDisagreeingDevices`: "this person's
+devices disagree"). **Nothing in this version settles it** (review finding Z11). A twelve-digit code once moved the
+anchor to the branch the member's own device named; it was about 40 bits of an unkeyed hash of a value the holder
+of the member's account key can grind (to collide with the genuine entry and deny the step, or to give a forged
+change the genuine code), the weakness ADR 0010 rejects, and was removed. Re-verifying a member's devices after a
+fork belongs to the vault sharing code session of ADR 0010, whose transcript can cover the member's registry tip.
+Comparing safety numbers again does not do it: that verifies the member's account keys, which both branches share.
+Until then the person's way out is outside this device: what the member's contested devices write is held aside
+here (not lost); the member can go on writing from a device every branch keeps, if they have one; and an
+administrator can remove the member, who makes a new account and is invited again under it, since a new account has
+a registry the old device never signed into.
+
+A refresh follows at most eight changes forward (review finding Z10; the pin carries the progress to the next), and
+its replays run off the session's actor, dropped if a `lock()` came meanwhile: each step costs up to eight replays
+of a registry its account fills, and a refresh runs before any vault's log.
+
+What this does not stop: the holder of the member's account key can keep that member's contested devices in
+question, and make the notice return, for as long as they like; a device that anchors while only the forged branch
+is visible follows it; and the pins are local state, which A8 can delete or roll back (review finding Z15,
+tracked): a device whose pins are gone anchors again from what the transport shows, with its base wherever it
+lands now. These end with the account re-key (F10.1, not built), which gives the member a signing key the old
+device never held, and the pins' digest in the Keychain.
+
+**A stream is one account's, by identity** (review findings Z46, Z157). An object's name carries a device ID and no
+account, and until Z157 any member could list another member's device ID in their own registry (S33) and sign
+segments into the stream named after it; `validate` makes every entry in such a segment name that device, so to every
+rule keyed by device ID they were the victim's device's versions. Z46 to Z155 inferred whose a stream was: the signer
+of its lowest segment, passing over accounts whose work could not count (Z146), recording such segments only where a
+cut could need them (Z155), preferring a signer who could write when its key was current and rotating after a
+promotion (Z152), and counting a revocation only from the stream's account (Z150). Each inference was attacked in turn:
+a plant at segment 1 took a stream; a promotion moved it; a later plant by a writer named a promoted member's stream
+for the writer, on the victim's own device too (round 5's M1); a captured stream let a removed member's revocation
+silence a new device everywhere (M2). Now a device's ID commits to its account under its key (§7.8), and a shared
+vault counts a registry's device only if it commits to that registry's account, this account's own registry included
+(`memberRegistries`, `committedOwnState`). So:
+
+- **Every object that verifies in a device's stream is signed by that device's account** (`signingAccount`): no other
+  account's registry lists the device. Another account's object there verifies nowhere, is refused at download as
+  junk is, and is never staged, recorded or judged; the stream's account is the one its device ID commits to
+  (`SharedStreamIndex.account(ofStream:)`, which reads it off any recorded segment), on every device, whatever arrives
+  first, before a promotion or after. `SharedStreamIndex.record` refuses a second account's segment in a stream, and
+  an index of an earlier format, which may hold one, is refused and rebuilt (format 7).
+- **A value's stamp and a clock's entry name one account**: the device a stamp names is listed by one registry at most
+  (`accountsListing`), so a claim about a device's edits is a claim about that account's.
+- **A revocation is its own account's** (`revokedDevices`): the revocations of every registry the chain anchors are
+  unioned, since each lists only devices of its own account; no member can retire another's device.
+- **An ID two committed registries list counts in neither** (`countedRegistries`, Z165): two accounts acting together
+  can find colliding committed IDs (a birthday search over 122 bits), and whichever registry arrived first named the
+  stream. The ID is dropped from both, this account's own registry included, and a stream recorded before the second
+  registry arrived is forgotten and the log replayed, so arrival order decides nothing; only the colluders' device
+  loses.
+- **This device takes part only if its own ID commits** (Z162): otherwise nothing it writes there reaches anyone, so it
+  writes and publishes nothing there, and its rows there never count as published for the deletion gate. A key that
+  cannot be read is not one that does not commit (Z169): it refuses as `deviceKeyUnreadable`, worded as a retry, and
+  that sync publishes nothing there (`SharedVaultSyncReport.deviceKeyUnreadable`). Restored onto other hardware, such a
+  device's deletions stay parked while a shared vault holds an edit of its old ID (Z167), and while any row of a shared
+vault holds an edit of a non-committing ID of the account's registry, no vault's deletions go out (Z170). Such a
+  copy is this account's alone, so a claim of another member's version about one of those IDs whose values this
+  device's row holds (a clock entry superseding them, or a deletion's erasure summary having seen them) is judged as a
+  claim about this device's own work: refused unless a segment that counts carried it (Z179), or the copy's values
+  would go and its parked deletion with them. The deletion gate counts such an ID's values, never its clock entry
+  (Z173, Z180).
+- **Nothing an account whose work cannot count signs is recorded** (`nothingCounts`, a member never let write): no
+  cut runs over it, since a cut is taken only of an account that could write, and the change of head that lets the
+  account write replays the log, which records it then. Its segments are passed over in sequence in its own devices'
+  streams (Z137), and it can grow no other device's index (Z146, Z155).
+
+What this removed, and why each is no longer needed: `passedOver` and the refiling of streams at each change of head
+(Z146), `skippedPassedOver` and the rule of where a passed-over segment is recorded (Z155), `naming`, each segment's key
+ID and the rotation after a promotion (`promotedWithinKeyEra`, Z152), the account-of-stream test on revocations (Z150),
+the own-stream guard in `judgeRecord` and `streamAdmits` (Z46, Z30), and the replay asked for when a stream's account
+changed (Z51(b), Z120's trigger): every one answered "whose is this stream?", which identity now answers. What stays:
+**every device records every segment**, whether or not it opens there (Z51): who signed it and which object it is need
+no vault key, so a cut's chain is whole across segments the cutting device could not open (Z52); a stream's first
+sequence falling asks for a replay (Z151); and a version is exempt from the question about its own writer's edits only
+where its writer's own stream carried it or it is this device's own. What is left is what anyone who can create objects
+in the store can do (A1, and a member with write access to the folder): an object at a device's next number, junk or
+signed by any key at all, stops that device's stream there in that vault, reported (`ownStreamConflict`, and
+`waiting` elsewhere), nothing marked sent and nothing lost, until it is removed.
 
 **The write cut over sync's objects** (S28). The cut a removal, departure or demotion carries is, for each device
 whose segments the departing account's keys signed, the furthest sequence through which the signing device holds every
@@ -1511,7 +2836,8 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   that segment) and every value it holds counts: each group's values, kept and retained values, the field order,
   each note line, each removal of a line, each resolution's discard and each history entry once per write that
   recorded it (S32, S43), read through `ItemMerge.canonical`, and the vault's description, attributed to the write that
-  chose it (`VaultMetadata.writtenBy`, kept by every re-seal, S37). A removal, discard or entry that names no writer is
+  chose it (`VaultMetadata.writtenBy`, kept by every re-seal, S37) and counted only as an administrator's work
+  ("The vault's description", below). A removal, discard or entry that names no writer is
   the work of the row carrying it. And every edit the version's clock says it contains, of any device but its own
   writer's, must have been published in a segment of that device's stream that counts (a version of the record at or
   above that count, `knowledgeCounts`): a version built on a late write holds what that write had seen, and an edit
@@ -1519,7 +2845,24 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   claim to have seen a current member's edits that their stream has not published is a claim about edits that do not
   exist yet, which would supersede them when they are made, so the version waits for that stream (S46; one about this
   device's own edits is refused). A current member's device whose stream this device cannot read from its first
-  segment is not checked. A tombstone is judged the same way before it is applied or remembered
+  segment is not checked. Nor is a stream that will never carry the edits here (Z144): a revoked device's, which is
+  never read again (and a shared vault writes no snapshot to hand its work on), and a device of the owner's account
+  whose first segments were collected before the vault was shared; for an account that may write, a claim about either
+  is believed and never waited for, as such a device's own versions already were. A revocation is its own account's
+  (Z157): a registry counts only devices whose IDs commit to its account, so the revocations of every registry are
+  unioned, and a member's revocation of another member's device ID, which once retired it everywhere (Z150), revokes
+  nobody's device. "Collected" only
+  where an owner's snapshot merged here covers the missing segments (`SharedStreamIndex.collected`, from
+  `WriteJudge.recordSnapshot`), and only for versions of the record no higher than the stream carried of that record
+  (Z151; round 5's L-M3, Z160: a version of another record said nothing about this one): a compacted vault is
+  never shared (Z42), so a missing first segment had nearly always not arrived, and any writer's claim to have seen the
+  owner's device's future edits was believed. What a replay settles is the *judged basis* (`judgedBasis`): the head,
+  and the counted revocations of devices a judgement since the last replay waited for or asked about (`awaiting`,
+  `relied`); a change of it takes out and replays like a change of head (Z153), so a revocation learnt after a version
+  was held aside for that device does not leave it aside for good. Waiting, every version whose clock
+  named a lost phone was held aside for good on any device that built its index after the revocation. A tombstone, from a segment or from a snapshot (Z21), is judged the same way before it is
+  applied or remembered, a snapshot's with nobody exempt, since its signer chose the device its entry names, and with
+  the pass's segments recorded first (Z34),
   (`WriteJudge.admitsErasure`): its erasure summary is its author's clock, and one built on a late write would erase
   what its author was shown only through it, so it is held aside and the item stays (S45; `10-sync-correctness.md`
   §9). A value is judged by its **bytes, stamp included**
@@ -1529,11 +2872,17 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   carried counts only if its own copy of the record holds it: a device knows what it wrote, so a value relabelled
   with its revision is refused there at once. A value carried by no segment held here waits: the version is held
   aside and the device its stamp names is remembered (`SharedStreamIndex.awaiting`), and a new segment of that
-  device's stream replays the log. The one exception is a member who joined after a rotation, who cannot open the
+  device's stream replays the log; except where that stream will never carry it here, a revoked device's or the
+  owner's collected one, where it is believed for an account that may write, and for the vault's description only one that holds the owner's or an administrator's role now: nothing carried it, so no cut can judge it (Z144, V48, V50). The one exception is a member who joined after a rotation, who cannot open the
   segments that carried older values: for them a version sealed under a key introduced at or after the latest record
   that ended anyone's permission to write vouches for such values (its sealer held that record and every earlier
   segment, and judged them), provided the device is listed by an account whose work can count. Segments sealed under a
-  key this account was never entitled to are passed over for that reason (`WriteJudge.passesOverSegment`). A tombstone's
+  key this account was never entitled to are passed over for that reason (`WriteJudge.passesOverSegment`), and so are
+  segments sealed under a key that only a record on a losing branch introduced (a rotation signed on a stale head):
+  the accepted chain never names that key, no grant of it is fetched, and the stream of whoever sealed under it would
+  otherwise wait there for good with everything written after (Z47). What they carried arrives sealed again under the
+  vault's key; if that branch comes to win, receiving its key replays the log. A segment passed over is still
+  recorded, unopened (Z51). A tombstone's
   segment carries what applying it writes (`ItemMerge.attributedSettlement`), so a version kept after a deletion is
   judged like any other.
 - *Taken out.* When the head changes, every local version of the vault that no longer counts is held aside and taken
@@ -1542,7 +2891,50 @@ sync, from the stream index and the vault's merged positions. The judge then giv
   longer counts erases nothing (S40). Receiving a key, a segment inside a cut that was missing, or a new segment of a
   device a version is waiting on replays it again; the need is written down by clearing the saved index's head, and the
   index is saved before anything a recorded segment lets count is merged, so a restart in between still replays (S41).
+  Requests are counted, and a replaying pass settles the head it judged against only if none was made while it ran:
+  what such a pass learns (a stream's account changing when an earlier segment arrives) can make a version stop
+  counting that the pass's own take-out judged against the old index, and only a take-out removes it (Z120).
   An index refused on load is rebuilt by a replay before anything is taken out against it.
+
+**The vault's description** (§8.7, "Who may name the vault"). The judge asks more of a `vaultMetadata` version than of
+an item's, and the three properties above carry over:
+
+- *Whose work.* The description is one value, its bytes the vault, the name, the creation date and the stamp of the
+  write that chose it (`VaultMetadata.descriptionStamp`: `writtenBy`, kept by every path that stores a description
+  again — the merge of two rows, a rotation's re-seal, a device registered again — or else the row's own). It counts
+  through a segment of the stream of the device that stamp names which carried those bytes, if that segment counts
+  as a write (above) **and as an administrator's** (`administratorSegmentCounts`): its signer is the owner or an
+  administrator on the head, or was one and the segment is inside the cut of the record that ended the role. A
+  read-write member's segment therefore carries no description that counts, whatever the description claims; a
+  version of anyone's that carries such a description on is held aside with it; and a description this device wrote
+  and has not published counts only while its own account holds the role, so a rename made before the device heard
+  of its demotion is taken out before it is ever published.
+- *Which one.* Among the descriptions that count, the one with the highest stamp is the vault's (§7.7), whatever
+  version the row carrying it has reached. A member who may write can seal carriers, and so could otherwise choose
+  between names administrators once wrote (S54).
+- *Taken out.* `takeOutWhatNoLongerCounts` judges the description like every other record at each change of head,
+  and the replay rebuilds it from the versions that count: a promotion makes held-aside names count, a demotion
+  takes late ones out, on every device at the same head. A segment at or below a former administrator's cut that
+  arrives later asks for a replay, as one inside a write cut does.
+- *A member who joined after a rotation* cannot open the segment that first carried an older name, and takes it on
+  the word of the version that carries it on. For a description that word must be an administrator's
+  (`vouchesForDescriptions`): the version's own writer is the owner or an administrator (its segment counts as
+  one's), and for each account that could be the name's author, either it holds the role now or the version is
+  sealed under a key introduced at or after the record that ended its role, so that its sealer held that record and
+  judged the name by its cut. A member's version vouches for no name (S55), which is why only an administrator's
+  device seals the description again after a rotation (the device that planned the rotation is one). A device whose
+  account may not name the vault leaves the description out of what it counts as its own to seal again
+  (`sharedInventory(_:resealableBy:)`), so its `pendingRotation` does not report it as owed for as long as no
+  administrator's re-seal has reached it (S60). That word is judged by the row's bytes: each segment files the
+  digest of every description row it carried, and a row counts, and vouches, only through the segment of its
+  device's stream that carried those bytes (`descriptionCarriage`), never by its version alone, which a snapshot
+  can deliver under any device's name with other bytes (S61). The same word
+  stands when the only carrier of the name that such a member can read is a late copy its former author published
+  again (S56). Holding the record is not having judged by it: a device that learns of a demotion while it plans a
+  rotation of its own holds, for a moment, a late name it merged before and a key newer than the demotion. So
+  `resealSharedVault` takes out what no longer counts under the head before it seals anything again, items as well
+  as the description, and seals nothing while it cannot (S59); without that such a device, if its own account had
+  joined after a rotation, kept the late name as a row of its own and handed it to every member who joined since.
 
 What is held aside is kept in the sync state's quarantine (`quarantinedVersions`, `SyncReport.heldAside`), never
 merged, never published by the device and discarded only by the person; the objects it came from are judged again
@@ -1562,10 +2954,11 @@ the ledger holds it in `laterFormatRecords` (§8.8 step 1): one that arrives bef
 chain once that record is here. Tests: "Vault session: a shared vault in a later format", and
 `laterFormatBeforeItsParent` and `laterFormatImpostorsThroughTheSession` in "shared vaults through the session".
 
-**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46):
+**Limits** (also `06-adversarial-review.md` §I, S33 to S35, S42, S45 and S46, and §T, S57 and S58):
 
-- A device ID listed by more than one member's registry makes values stamped with it that reached a newcomer only
-  through vouching count only while every listing account's work can count (S33, insider denial of service like S11).
+- A device ID is listed by one account's registry at most, as a shared vault counts them (Z157): values stamped with a
+  device that reached a newcomer only through vouching count while that account's work can count (S33). Another
+  account's object at a device's next number stops that device's stream there until it is removed, as junk does (above).
 - Vouching is for a member who joined after a rotation, and only under a key introduced at or after the latest record
   that ended a permission: a member invited after a demotion, with no rotation since, holds aside versions carrying
   values from before the last rotation until the next one seals them again, and a store withholding one device's
@@ -1575,11 +2968,25 @@ chain once that record is here. Tests: "Vault session: a shared vault in a later
   only: a device that merged a late version and then deleted the item claims what the late writer had seen (S45). A
   late version's vectors can claim edits of a current member that do not exist yet, which a device merging it carries
   on (S46). Both tracked, neither reproduced.
+- A name chosen by an administrator whose role ended after the last rotation cannot be checked by a member who joined
+  after that rotation: the version carrying it on was sealed under a key older than the record, so nothing says its
+  sealer had judged it by the cut. That member's device shows no name for the vault (the row's badge still says whose
+  vault it is) and holds the version aside until the next rotation seals the name again or an administrator renames
+  the vault; every other device shows the name throughout (S57). The same word is missing from a carrier that a
+  read-write member's device stored when two rows met at one version: a member who joined since holds that row aside
+  and keeps the administrator's own row of the same name. Rotate after demoting an administrator, as after any
+  demotion (S42).
+- An administrator's choice of name is bounded only by the role: one who holds it can write any name, date it up to
+  the version jump the engine allows, and seal another's description again; a name written before a promotion counts
+  from the promotion on (§8.7). `modifiedAt` is not part of what the judge attributes, so a carrier can state another
+  time for a name it carries; nothing reads it (S58).
 - A member who joined after a rotation reads records sealed before it only once a device that holds the old key has
   sealed them again (rotation does so for every record a member who may write holds), and a version of a shared vault
   that does not open here is held aside, not merged (S34).
-- Another device of a member's account receives the vault's keys through the account's own vault directory but no
-  ledger and no pins: it accepts the invitation itself. The ledger, pins and plans are per device (S35).
+- Another device of a member's or the owner's account receives the vault's keys through the account's own vault
+  directory but no ledger and no pins. It holds the vault closed, says so, and accepts the invitation itself (Z41,
+  above); until then it neither writes there nor receives what the other members write. The ledger, pins and plans
+  are per device, and syncing them between an account's devices is still open (S35).
 - The transports' own sharing (`ShareAccessControl` is the port), the key directory's adapter, and the UI are open
   (`03-implementation-plan.md` milestone 4).
 
@@ -1596,6 +3003,30 @@ best of its scopes. Ranking then applies **shadowing**: an item is *shadowed* if
 item has a strictly higher score. Shadowed items are never offered, listed, pre-selected or filled
 on that host by the extension; they are reachable in the app only (F6.6; the extension's "other
 accounts on this site" list was removed by owner decision, 2026-11-16).
+
+**A vault is a trust domain (review finding Z60).** Shadowing is a statement by whoever wrote the more
+specific scope: "on this host, that other account is not the one". In a vault only this account writes, the
+person made it. In a shared vault any member who may write made it (adversary A4), and a member who saved
+an item one label below another member's own login used to take that login out of AutoFill there and stand
+as the destination of the next saved password or passkey. So the ranker is told which vaults other accounts
+write (`sharedVaults`, the session's answer and never an item's claim), and an item is shadowed only by a
+more specific match **in its own vault, or in a vault only this account writes**. The person's own more
+specific item still shadows a shared vault's (their AWS login keeps the household's Amazon login off the
+console); a shared vault's item never shadows an item of another vault. Where the two meet on a host both
+are offered, which is `chooseAmong`: nothing is suggested, filled or written without the person choosing
+between entries that name their vaults. `AutoFillGate.candidates(on:among:sharedVaults:)` is the one place
+`decide` and `authorize` rank, and it adds the second half of the rule: where the only items scoped to a
+host are in shared vaults, the host is still compared with what every *other* vault holds
+(`PhishingDetector.assess(host:againstItemsIn:sharedVaults:)`), and one that resembles a site saved there,
+or that cannot be verified by eye (a label mixing scripts, punycode that did not decode), is refused as
+`FillRefusal.resemblesSavedSite`. A scope recognises a host for its own vault and no further; the person's
+own scope for the host is what ends the refusal. The same holds when a host is about to be *added* to an item (the
+editor, an import, a merge, a copy out of a shared vault: `SavedSites.Prepared.standing(…, inVault:)`), more
+strictly (review finding Z76): it is recognised only by the person's own vaults or the item's own vault, and where
+only shared vaults match it is compared with every saved scope that does not itself match it, the matching vault's
+included, so a member's `аmazon.com` in the household beside the household's `amazon.com` is asked about when the
+person adds it anywhere. A page is still judged as above: within one shared vault a member who can add a look-alike
+could as well edit the item it resembles.
 
 Scenario S1: retail item scoped `amazon.com` (subdomains on); AWS item scoped
 `signin.aws.amazon.com` and `console.aws.amazon.com`. On `www.amazon.com`, only retail matches. On
@@ -1654,7 +3085,11 @@ Full design in `05-anti-phishing.md`. Three additions beyond matching:
 
 1. **Scope policy.** `ScopePolicy`/`PublicSuffix` refuse single-label and public-suffix scopes at
    creation, edit, and import. Without this, a `com` scope becomes the top-ranked match on an
-   attacker's domain.
+   attacker's domain. A shared-hosting suffix that is also its operator's own sign-in site
+   (`PublicSuffix.signInAtSuffix`: `wordpress.com`, `substack.com`, `tumblr.com` and a few others) is
+   accepted as an exact-host scope and refused with subdomains, which would reach its tenants (review
+   finding Z63); `ScopePolicy.newScope(forHost:)` gives such a host that reach wherever nobody chose one
+   (the editor, an imported URL, a passkey's relying party).
 2. **Look-alike warning.** `PhishingDetector` turns "no match" into a named warning for hosts that
    resemble a saved scope — visual skeleton, edit-distance near-miss, saved name out of position,
    per-label mixed script, punycode. Silence is what pushes a person to copy a password by hand.
@@ -1692,14 +3127,19 @@ identities, and it gives an item a password or code identity for a scope host on
    identity, and the AWS login never had one); and
 3. no other item scoped to that same host shares the name the suggestion shows, so accounts that
    tie are told apart by what the person tapped (F11.5), and two accounts under one email are not
-   suggested at all.
+   suggested at all; and no item of the other trust class (§9.2: one of the two in a shared vault,
+   the other in another vault) is scoped to that host at all, whatever its name, since a name can
+   differ by bytes and not to the eye (`аlice@x`, `alice@x `) and the system's rows name no vault
+   (review finding Z70).
 
 Everything else is reached through the keyboard's key icon, which opens the extension's list:
 that request names the page and goes through the gate. The cost is real and deliberate: a login
 saved from the extension is scoped to one exact host and has no QuickType identity until the
 person widens its scope in the app. A passkey identity is published exactly when the gate would
-release the passkey for its relying party, which every passkey request names. Because of rules 2
-and 3 one item's identities depend on the others, so a change to one item is published as the
+release the passkey for its relying party, which every passkey request names, and, for an item of
+a shared vault, only where nothing of another vault is offered for that relying party beside it;
+a stale identity of such a passkey handed back without the person gets `requiresInteraction`
+(Z70). Because of rules 2 and 3 one item's identities depend on the others, so a change to one item is published as the
 difference between the whole sets before and after.
 
 Nothing is published for an item that is excluded from AutoFill (F6.8), archived or in the trash,
@@ -1716,7 +3156,11 @@ else in the model changes.
 
 Passkeys: the extension signs `authenticatorData || clientDataHash` with the item's P-256 key,
 increments no counter (Apple's guidance for synced passkeys), supports `prf` (HMAC-secret derived
-from a per-passkey 32-byte secret stored in the field) and `largeBlob` storage in the item.
+from a per-passkey 32-byte secret stored in the field) and `largeBlob` storage in the item. A
+relying party's largeBlob write replaces the field, whose earlier value stays in the item's history,
+so writes are bounded: one per field per `largeBlobInterval` (a day), and none that would take the item
+past `remoteWriteItemBudget` (half the payload limit, the budget of every write made for a remote
+party, Z71); a write refused is reported as not written and the assertion stands (review finding Z66).
 `PasskeyAuthenticator` (§9.2) is that authenticator, in software: ES256 only, attestation format
 `none`, credential IDs of 32 random bytes, the signature DER-encoded. The flags say what happened
 rather than what a relying party would like to hear: UP and UV come from what the extension
@@ -1745,16 +3189,25 @@ mirrors `ASCredentialServiceIdentifier`. It reaches the vault through one port:
 
 ```
 protocol CredentialVault            (VaultSession conforms; FakeCredentialVault in tests)
-  credentialItems()                 every readable item, archived and trashed included
+  credentialSnapshot()              every readable item, archived and trashed included; each vault's
+                                    name and whether other accounts write it; where a new item goes
   confirmUnlocked()                 throws `locked` unless unlocked now; the last call before a release
-  defaultVaultID()                  where a new item goes
   isBackedUp()                      whether items reach the sync store (the BS flag)
-  saveCredentialItem(_:replacingVersion:)   create, or compare-and-swap on the version read
+  saveCredentialItem(_:replacingVersion:confirmingHosts:)
+                                    create, or compare-and-swap on the version read; a host it adds
+                                    that needs a confirmation is refused unless named
 ```
 
 Every method throws `CredentialVaultError`, and `locked` whenever there are no keys. The vault
-keeps owning versions, timestamps, history, sync metadata and the scope policy check. Item IDs
-should be unique in what `credentialItems()` returns, and the model does not rely on it: an ID two
+keeps owning versions, timestamps, history, sync metadata and the scope policy check, and judges
+every host a save adds as the editor's save is judged (F11.7, Z61): the model names a host in
+`confirmingHosts` only where its sheet showed the look-alike warning and the person chose the new
+item (review finding Z78; before, the session's conformance answered for every host, a public
+bypass of Z61). The planner's and the publisher's entry points that take bare `[Item]`, and the
+session's `credentialItems()`, which would treat every vault as the person's own, are internal,
+for tests. A vault the
+snapshot does not describe is taken to be shared. Item IDs
+should be unique in what `credentialSnapshot()` returns, and the model does not rely on it: an ID two
 items share (a member of a shared vault choosing a record ID, an item mid-move between vaults)
 names neither, so both keep ranking and neither is listed, released, written or published.
 
@@ -1794,6 +3247,28 @@ What holds across all of them:
   decides it (§9 above); the lists read the page through `AutoFillGate.page`, as a release does. Domain
   identifiers and passkeys are unchanged, and a QuickType fill on an `http` page cannot be refused,
   since the tap does not name the page.
+- **A vault is a trust domain (Z60).** The model reads, with the items, which vaults other accounts
+  write, and treats an item of such a vault as what a member said. It never shadows an item of
+  another vault (§9), so the person's own login stays listed and released beside it and the two are a
+  choice (`suggested` is `nil`); the person's own entries and candidates come first. Its scope does not
+  vouch for a look-alike: a host only shared vaults are scoped to that resembles a site in another
+  vault gets the `LookAlikeWarning` in place of a list, releases nothing, publishes nothing and is
+  never saved to silently. Nothing writes to it without UI: a conditional registration upgrades only
+  a login in a vault this account alone reads, and a silent save creates only in a default vault of
+  that kind. It is never the destination picked for the person
+  (`PasskeyRegistrationOptions.suggested`), and a new item never takes its scope
+  (`NewItemProposal.besideExisting` is built from the person's own items). Every `PasswordEntry`,
+  `PasskeyEntry`, `OneTimeCodeEntry`, `InsertableItem`, `SaveCandidate`,
+  `PasskeyRegistrationCandidate` and `NewItemProposal` carries an `EntryVault` (ID, name, `isShared`):
+  two rows a member made alike in title, user name and host differ there, and
+  `everyMemberSeesWhatIsSaved` is what a sheet states before a password or passkey is written to a
+  shared vault's item. The vault's name is a member's to choose, so the adapter shows `isShared`
+  wherever it shows the name. In published identities "no other item" means of any vault (§9.1),
+  and an item of the other class at the same host withdraws the site's suggestions for both, so a
+  member can take a keyboard suggestion away by saving something below it or beside it and can
+  never direct one, not even with a user name that only looks like the person's (Z70). Not covered: a relying party's reports and a `largeBlob` write still
+  reach a shared vault's item without extension UI; neither carries a secret of the person's into
+  the vault.
 - **Shadowed accounts are neither listed nor released.** An item that matches the host less
   specifically than another (F6.6) is not in the list (there is no "other accounts" part: listing
   what cannot be used served nothing; owner decision, 2026-11-16), and the gate refuses it even
@@ -1838,21 +3313,25 @@ What holds across all of them:
   would outrank them, and the gate would then refuse them there even when chosen: right for a
   different service under the same domain (S1), wrong for a second account on the same one, and
   the request cannot say which. So `NewItemProposal` reports `hiddenAccounts` and offers
-  `besideExisting`, the scope of the accounts already there (one the person gave an item), and the
-  person picks `newItem` or `newItemBesideExisting`. The passkey sheet's suggestion never hides
-  an account.
+  `besideExisting`, the scope of the person's own accounts already there (one the person gave an
+  item; a shared vault's item lends none), and the person picks `newItem` or
+  `newItemBesideExisting`. The passkey sheet's suggestion never hides an account.
 - **A registration never adds a scope.** A passkey joins an existing item only if the gate
   already authorises that item for the relying party, and an item holds at most eight. A login
   saved for `www.shop.example` is not for the relying party `shop.example`; the sheet names it
   under `relatedLogins`, the passkey goes to an item of its own, and joining the two means adding
   `shop.example` to the login in the app (F11.7). A conditional registration only ever adds a
-  passkey to the one saved password login for that relying party and user, and only to an item
-  that holds no passkey yet: every field of that request, the user handle included, is the
-  page's, so "one per account" would be no bound at all.
+  passkey to the one saved password login for that relying party and user, in a vault only this
+  account reads, and only to an item that holds no passkey yet: every field of that request, the
+  user handle included, is the page's, so "one per account" would be no bound at all.
 - **A remote party never deletes.** A report sets or clears a flag in `Field.meta`
   (`reportedUnusedAt`, `reportedUnknownAt`) or changes a passkey's account name, only on items the
   gate would release to the reporter, and at most once per field per day, because every change is
-  a version in a history that is never pruned (F1.4).
+  a version in a history that is never pruned (F1.4). Nor may it take the item past
+  `remoteWriteItemBudget` (half the payload limit), which every write the model makes for a remote
+  party has: a report (counted in `ReportResult.overBudget`), a largeBlob write, a conditional
+  upgrade (review finding Z71: a report a day, alternating a passkey's name, grew an item holding a
+  large blob past its payload limit in about three weeks).
 - **Locked is a state.** `vaultLocked`, or `requiresInteraction(.vaultLocked)` for a request made
   without UI. Each request reads the items once; each step of an interactive flow reads them
   again; writes are compare-and-swap. A lock that lands mid-request wins: a write fails in the
@@ -1867,8 +3346,18 @@ for the page's `passwordrules` and its mapping to `RandomPasswordPolicy`; the ge
 is checked against the parsed rules before it is returned), and `CredentialIdentityPublishing`.
 
 **`VaultSession` is the `CredentialVault`** (`VaultSession+AutoFill.swift`; `WatchwordKit` depends on
-`WatchwordAutoFill`, never the reverse). `credentialItems()` is every vault's items as `items()`
-presents them (read through their rows, canonical, what a vault's deletion left shown trashed). The
+`WatchwordAutoFill`, never the reverse). `credentialSnapshot()` is every vault's items as `items()`
+presents them (read through their rows, canonical, what a vault's deletion left shown trashed), less
+the vaults withheld from AutoFill (§8.10, Z45), with each vault described by `VaultInfo`: its name and
+`isShared`, which is `isMarkedShared` (§8.10: a ledger loaded, the account's signed marker, a key that
+arrived by grant, a sharing state that names the vault, or markers not read yet) and so the same fact
+every other sharing rule asks. The vaults are described after the items are read, and a vault is
+marked shared before another member's item can be merged into it. An extension process that was not
+given the sharing state sees every vault but the Personal one as withheld or shared. And a vault other
+than Personal holding an item whose clock names a device outside this account is described as shared
+whatever the rows say (`vaultsWrittenOutsideTheAccount`, review finding Z77): on the owner's devices the
+marker row and the sharing state are all that say so, and A8 can delete both, while the clock is inside
+the ciphertext. The
 store keeps one row per item ID whatever its vault and sync refuses a record naming an ID another
 vault holds, so an ID occurs once; a move is a copy under a derived ID and the original trashed in
 one commit, so the original is never fillable beside its copy. `saveCredentialItem` is a
@@ -1909,8 +3398,16 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
   later bug cannot revive an expired enrolment; a biometric re-enrolment also forgets the state.
   After `maximumFailedAttempts` prompts that did not end in the key — cancels included, because the
   system prompt retries internally and a run of failures usually ends in Cancel — the LUK is deleted
-  and no further prompt is shown. Bytes from the Keychain that fail to open the wrapped AUK, or an
-  AUK that fails to open the keyset, destroy the enrolment; a bad vault-key row does not.
+  and no further prompt is shown. The attempt is counted *before* the prompt is shown, written to the
+  Keychain, and taken back only once the released key has opened the wrapped AUK and the keyset: a
+  count made after the Keychain read returned was never made if the app was killed while the prompt
+  was up (Z7). The price is that a crash, a kill or an unrelated Keychain error during the prompt
+  counts as a failed attempt, and three send the person back to the password. Bytes from the Keychain
+  that fail to open the wrapped AUK, or an AUK that fails to open the keyset, destroy the enrolment;
+  a bad vault-key row does not.
+- **The row is not believed about the Personal vault.** Both ways of unlocking check, before a key
+  is installed, that the Personal vault the account row names is the one the header seals under the
+  AUK (§6, Z5), and that no password change is pending that this device has not been given (§7.7).
 - **Enrolment needs the password.** `enableQuickUnlock(password:)` re-verifies the password against
   the stored header, because enrolment starts the 14-day interval: a quick-unlocked session must not
   be able to restart it.
@@ -1921,7 +3418,9 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
 - **Lock wins.** `VaultSession` is an actor and actors are re-entrant across `await`. A lock epoch
   is checked after every suspension, so a `lock()` that lands during an unlock discards the derived
   keys (`lockedDuringUnlock`) and one that lands during a save fails it (`locked`) instead of sealing
-  with a zeroised key.
+  with a zeroised key. What an unlock does after installing its keys (re-enrolling quick unlock,
+  copying the signing key to the Keychain, reconciling the account's objects) checks again before
+  each read of them, since reading a zeroised key traps (W22, Z4).
 - **Auto-lock** (`AutoLockPolicy`, F5.5) is likewise pure: idle timeout, background grace (default
   zero: backgrounding locks at once), screen lock/sleep, and a clock that moved backwards locks.
 
@@ -1931,9 +3430,20 @@ As built in milestone 2 (`WatchwordKit.VaultSession`):
 `SymmetricKey` bridging for CryptoKit, `ConstantTime` comparison, and the CommonCrypto PBKDF2 call
 (which needs raw pointers, and reads the password from and writes the key into protected storage).
 From milestone 2 it also holds the four system bindings whose signatures are pointer-typed
-(ADR 0001, milestone 2 amendment): the SQLite wrapper, `SecItemCopyMatching` (which returns
-Keychain data straight into `SecureBytes`), `LAContext.canEvaluatePolicy` and the PDF
+(ADR 0001, milestone 2 amendment): the SQLite wrapper, `SecItemCopyMatching` (which copies
+Keychain data into `SecureBytes`), `LAContext.canEvaluatePolicy` and the PDF
 `CGContext` initializer. Each is one small file with a safe API.
+
+Keychain secrets (the Secret Key, the Local Unlock Key, the device seed) are not in `SecureBytes` all the way: a read
+leaves the `CFData` the Security framework allocated, released unwiped when `KeychainBridge.copyData` returns, and a
+write hands `SecItemAdd` one `NSMutableData`, made straight from `SecureBytes` (`withMutableDataCopy`, the one
+helper in `SecureMemory` for it) and zeroed through the object once the call is done (`SystemKeychainStore.store`),
+so the zeros reach that buffer even if the framework kept a reference to it (review finding Z126; a `Data` wiped
+with `resetBytes` copies a shared buffer first and zeroes the copy), beside whatever the framework copies
+internally. The quick-unlock state is decoded from one `Data` copy that nothing else references (the decoder
+returns before the wipe), zeroed after decoding. Wiping the framework's `CFData` would need a write through a pointer to
+storage this code does not own; that copy is accepted and tracked (review §Z, Z98), and a post-lock memory image of
+the process may still hold one of these keys until the allocator reuses the block.
 `SecureBytes`:
 
 - heap storage that is page-aligned and a whole number of pages, so `mlock` (best effort; the result
@@ -1989,14 +3499,54 @@ generator, and reaches the network only through the `HTTPClient` port. Everythin
 Hygiene is the one feature that talks to a third party, so it adds two positions to §2:
 
 - **The service and the network path** (the Have I Been Pwned operator, its CDN, a TLS-intercepting proxy
-  the device trusts). Sees every request and chooses every response. It learns five hexadecimal characters
-  of a password's SHA-1 per check and the times of the checks, and nothing else; it cannot move a request
-  to another host, exhaust the device with a response, or switch the scanner off. It can always lie by
-  omission (leave a breached suffix out of a range), which nothing on the device can detect.
+  the device trusts). Sees every request and chooses every response. From any one request it learns five
+  hexadecimal characters (twenty bits) of one password's SHA-1 and the time, and nothing else: no request
+  carries more, and no other request is made. It cannot move a request to another host, exhaust the device
+  with a response, or switch the scanner off. It can always lie by omission (leave a breached suffix out of
+  a range), which nothing on the device can detect.
+
+  What it learns *across* requests is more, and an earlier version of this section stopped at "nothing
+  else" (review finding Z108). One device asks about all its passwords from one address on a weekly
+  cadence, so the service can group the requests and then holds:
+  - **A linkable set.** The weekly pass asks again for every prefix it checks (the cache is bypassed for
+    a pass's own checks, so that a pass is a fresh look), in an order that repeats (failures, reason, last
+    check, item ID). The set of prefixes, twenty bits for each distinct password, is a fingerprint of the
+    vault that survives a change of address or a VPN: the same set next week is the same vault.
+  - **Its size.** Requests per pass is the number of distinct prefixes, close to the number of distinct
+    passwords (two that share a prefix cost one request).
+  - **Its changes.** A changed password is one prefix leaving the set and another arriving, with the day; a
+    new item is a new prefix.
+  - **Grouping by item.** An item with several password fields sends its requests back to back, before the
+    spacing and jitter that separate items, so the service sees which prefixes belong to one item.
+  - **A match against known people.** Whoever holds breach data with identities can compare the set with
+    the prefixes of a named person's leaked passwords. A prefix is twenty bits, so a set of a few hundred
+    coincides with one given leaked password by chance about once in a few thousand vaults: one match with
+    a named person's leaked password is suggestive, two or three are close to naming them, and each says
+    that leaked password is probably still in use. These are estimates from the prefix length, not
+    measurements.
+
+  This is the upper bound, not the rule for every device: in a household another device's synced check
+  stands in for this device's own for up to 28 days (`maximumSyncDeferral`, §13.9), so a device may send
+  only part of its set in a given week, and the household's devices then show as several partial sets.
+  It is inherent in using the range API for a whole vault from one address, and padding (`Add-Padding`)
+  hides response sizes, not requests. Shuffling the weekly order with the injected generator and spreading
+  one item's fields over separate steps would remove the order and the per-item grouping; neither removes
+  the set, its size or its changes. Not built; for the owner to weigh against F9.2's weekly pass. What is
+  promised is therefore what F9.1 says and no more: no password, no full hash, no item title and no
+  account identifier leaves the device. It is not that the service learns nothing about the vault.
 - **Whoever reads the device at rest** (A2, A3, A8). Finds nothing derived from a password in the clear:
-  no hash, no prefix, no reuse token, no breach result (ADR 0005).
+  no hash, no prefix, no reuse token, no breach result (ADR 0005). What the files themselves show is their
+  number (one range record per vault and distinct prefix checked, an index and a ledger) and their modification
+  times (when a password was last checked); their lengths say nothing, since every range record is padded to a
+  32 KiB bucket before it is sealed (review §Z, Z89).
 - **A malicious household member** (A4) chooses the items a victim's device analyses, so the cost of one
-  item, and the request rate whatever the items, are bounded.
+  item, and the request rate whatever the items, are bounded. A4 also reads the victim device's synced scan
+  times (§13.9), and a check answered from the prefix cache costs no request and so no pacing token: with one
+  cache for every vault, the gaps between those times said which of A4's probe items hit a range the device had
+  cached for some password in a vault A4 is not in, a confirmation oracle over that vault's passwords. The cache
+  is partitioned by vault (`PwnedRangeCache` files every range under the vault whose check fetched it), so a probe
+  in a shared vault is answered only by ranges fetched for that vault (review §Z, Z88). The same prefix in two
+  vaults costs two requests.
 
 ### 13.2 Pwned Passwords (F9.1)
 
@@ -2309,9 +3859,11 @@ there is no host to configure. The session owns one `HygieneEngine` for its life
   (`EnvelopeKind.accountHeader`, as for quick unlock's wrapped AUK), and named by
   `HMAC(local key, label ‖ message)`, so a name says nothing about the prefix it holds. The cache
   (`SealedPwnedRangeCache`) holds nothing in memory: each lookup and store goes through the session, which
-  refuses while locked, so its `lock()` has nothing to drop. One record per prefix (`CachedPwnedRange.encoded()`)
-  and a sealed index (prefix, fetch time, size) bound it to 512 prefixes and 32 MiB by default, expired ranges
-  first, then the oldest. The index lists at most 4,096 prefixes and one listing more does not decode, so
+  refuses while locked, so its `lock()` has nothing to drop. One record per vault and prefix, named from both
+  (`CachedPwnedRange.encodedPadded()`, padded to `paddingBucket`, 32 KiB, so a record's length does not say how many
+  suffixes its range holds) and a sealed index (vault, prefix, fetch time, size; format 2) bound it to 512 records and
+  32 MiB by default, expired ranges first, then the oldest. The index lists at most 4,096 records and one listing
+  more does not decode, so
   `HygieneSettings.cacheCapacity` is clamped to that (`maximumCacheCapacity`): above it, the index would be read as
   empty and every record it named left on disk, never evicted. A record planted from another account, or sealed by another device of this account (which has the
   keyset and this device's ID but not its secret), does not open and answers nothing. An older ledger of this
@@ -2444,7 +3996,24 @@ vault will store it** (`StoredItemSize`, at most 768 KiB against `ItemCodec`'s 1
 a control character as six bytes, every field carries a sync stamp, and every line of the notes is stored
 again with two identifiers, so 512 KiB as written can be megabytes as stored; an entry over the bound is
 skipped and listed, never reported as imported and then refused by the vault. The estimate is an upper
-bound by construction and the adversarial suite checks it against `ItemMerge.stamped` and `ItemCodec`.
+bound by construction and the adversarial suite checks it against `ItemMerge.stamped` and `ItemCodec`. The
+estimates are summed too, against **512 MiB stored for the whole import** (`maximumTotalStoredBytes`, counted
+in `add` and `addArchived` as each draft is kept; reaching it fails the file): a row of a title and 2,700 line
+feeds of notes is under 3 KB of CSV and about 730 KiB stored, so without it a 3 MB file (or a 1PUX of a
+hundredth of that, compressed) committed hundreds of megabytes of sealed rows, published to every device of the
+account (review §Z, Z81). The budget is above what a million small fields store, so it binds only on shapes that
+store far more than they count.
+
+The file's dates (created, modified, when each earlier version was replaced) are kept, bounded here to the
+years 1970 to 9999 only, since this module has no clock. The session bounds them by its own before a preview is
+shown, off its actor (`ImportResult.boundingDates(notAfter:)`, `AwayWork.importDates`, reported as
+`futureDateBounded`), a passkey's creation date inside its field included, in the item and its history (review
+finding Z132): sync keeps `modifiedAt` from
+going backwards, so one date in the year 9000 would otherwise stick on every device and keep the "old password"
+check from firing. An archive's AutoFill field metadata (`autofill.*`: the extension's report rate limits and
+flags) is not restored, and is reported (`autoFillStateNotRestored`): it describes the vault the archive came
+from, and a far-future `autofill.lastReport` would silence that field's relying-party reports for good (review
+§Z, Z85).
 `InterchangeLimits.standard` holds these ceilings; an initialiser can tighten any of them and clamps each
 argument to `1...ceiling`, so no caller can loosen one. A file that cannot be read as
 what it claims to be ends in exactly one `InterchangeError`; a problem with one entry (too large, a repeated
@@ -2583,6 +4152,35 @@ and new `url` fields are *reported* (`DuplicateMatch.newHosts`, `hasNewSignInFie
 `additions(of:to:)`) and added only when `MergeChoices` names the host or the field the person accepted;
 there is no "accept all". Field values are compared as bytes.
 
+**A new entry can reach an existing secret too** (review finding Z62). An item is ranked against every other by
+its scopes, in every vault, whatever its user name: an entry scoped one label below a saved login (`login.bank.example`
+beside `bank.example`) outranks it there, the extension then neither lists nor releases the saved login on that host,
+and the next password the person saves there is offered to the imported item, whose other scopes the file chose. An
+entry the file marks archived (or, from an archive, excluded from suggestions) hides the saved login the same way
+while offering nothing. So the preview judges every entry, duplicate or not, against what the gate ranks among
+(`SavedSites`, every vault, trashed items and policy-refused scopes left out) and reports an `ImportConcern` for one
+that would hide a saved account on a host it is offered on (`hidden`), stand beside one (`beside`: a tie, or an item
+of a shared vault next to the person's own), or name a host that resembles a saved site or cannot be verified by eye
+(`lookAlikeHosts`, by `SavedSites.Prepared.standing`; an entry's own other hosts vouch for nothing, being the file's
+too, and each is compared with them for resemblance only, so `amaz0n.com` beside `amazon.com` in one entry needs the
+decision: at most 32 × 31 comparisons an entry, charged to the budget, review finding Z74). An entry the source had in
+its trash is judged like any other (`isTrashed`): it is saved into the trash in the one write that creates it, never
+live in between, and a later restore from the trash asks nothing, so the decision is made here (Z73). Hosts past
+the preview's comparison budget (`VaultSession.maximumImportHostComparisons`) are `uncheckedHosts` and need the
+decision as well; the overlap is charged to the same budget (the saved items it ranks, which a shared vault's
+members can make many on one host; review finding Z79), and an entry past it is `overlapIsTruncated`. `commitImport` refuses without a decision for every such entry (`decisionRequired`):
+`keepBoth` imports it, knowing what it does, `skip` leaves it out. The import screen lists them with the accounts
+they would hide, named with their vaults, and shows every entry's hosts through `MergeHost` (ASCII, registrable
+domain, reach). Duplicates are still looked for in the chosen vault only; the concern covers the other vaults. A
+merge's accepted hosts are judged the same way at commit (review finding Z75): a host that would make the existing
+item hide or stand beside another account, or that resembles a saved site, is refused
+(`mergeNeedsConfirmation`, the preview kept) unless `MergeChoices.confirmedHosts` names it, which the screen sets
+when the person accepts it a second time after a warning naming those accounts.
+
+The duplicate screen also shows, in full, the values a merge adds with no per-field choice (other fields, tags and
+the notes text; secrets behind Show), not only their labels (review finding Z67): a link or a phone number in a text
+field is read as the item's own once it is there.
+
 URLs are in that list because of what an export does with them. An entry's URL that says more than its
 host is kept as a website field, and a second review found the consequence: merged by default, the
 attacker's `https://evil.example/login` became a field of the bank's item, widened nothing in this app, and
@@ -2631,8 +4229,8 @@ read off the header) and `previewArchiveImport(_:passphrase:secretKey:into:optio
 the drafts with the items of the chosen vault (`DuplicateDetector.matches`) and return an `ImportPreview`: the
 `ImportReport`, a summary per entry (title, kind, state, hosts, login names, and the apex hosts added beside a `www`
 host, `apexScopesAdded`, from the report's `apexScopeAdded` lines: `ImportOptions.matchApexOfWWWHosts`, on unless the
-person turns it off, applies to the other managers' formats; an archive's scopes come back as they were) and the
-matches; for an archive also
+person turns it off on the import screen before the file is read, applies to the other managers' formats; an
+archive's scopes come back as they were), the matches and the concerns (`ImportConcern`, above); for an archive also
 its identifier and creation time (`archiveID`, `archiveCreatedAt`), set only once it has opened, so they are the
 values the manifest authenticated, and the restore screen shows the date: A1 can put an older archive in place of
 the newest, and every archive under the same passphrase and Secret Key opens. **Nothing is written, and the
@@ -2642,7 +4240,7 @@ preview holds no secret**: the drafts stay inside the actor (`pendingImport`), a
 drafts and throws `noPendingImport` instead of keeping them. The values a merge would add, with every
 value in full for the duplicate screen, come from `importAdditions(preview:importedID:existingID:)` while it is
 shown. `commitImport(_:decisions:)` checks every decision before writing anything: an entry that matches an
-existing item must have one (`decisionRequired`), and a merge may only go into an item it was matched with
+existing item, or that the preview raised a concern about, must have one (`decisionRequired`), and a merge may only go into an item it was matched with
 (`unknownMatch`); an entry with no match and no decision is added. Then each entry goes through the vault's own
 write path. A new item is stamped by `ItemMerge.stamped` as this device's write, its scopes checked against
 `ScopePolicy`, and committed on the condition that no row has its ID (`commitItem`), keeping the history and the
@@ -2680,16 +4278,51 @@ that are not deleted; records that would not open are returned beside the report
 not left out silently. The standing warning is `InterchangeGuide.plaintextExportWarning`
 (`VaultSession.plaintextExportWarning`). File protection is the app's: the doc comment says
 `FileProtectionType.completeUnlessOpen` or stronger, a place the person chooses, never the App Group container.
-The app does it so (`ExportModel`, `ExportView`): the bytes stay in zeroising memory (`SecureBytes`) until the person
-saves, are then written by the app itself into a folder of its own in the temporary directory, with
-`.completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves the file where the
-person chooses; the staged copy is removed when the mover is done, on cancel, when the screen closes and at every lock,
-and the bytes are zeroised once saved. Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about
-what the exporter stages. Where the mover copies rather than moves (another file provider), the copy's protection is
-the provider's. macOS has no protection classes: the file is as safe as the folder the person picks, which is why the
-warning says not to pick a synced one. The screen models also drop the export's bytes, the merge review and typed
-passwords on every lock, from `VaultSession.lockEvents()` rather than from views going away (review of the account
-screens, findings 5 and 6).
+The app does it so (`ExportModel`, `ExportView`). The session returns the file in zeroising memory
+(`PlaintextExport.bytes` is `SecureBytes`, the exporter's array moved out of its result and wiped while it was the only
+reference to its buffer; review §Z, Z83), and the model keeps that until the person saves. It is then written by the
+app itself, one copy made straight from protected storage and wiped once written, into the **staging folder**
+(`StagingFolder`: one fixed, backup-excluded folder, `<temporary directory>/Watchword Staging/`, with a sub-folder per
+file), with `.completeFileProtectionUnlessOpen` on iOS, and handed to the system's file mover, which moves the file
+where the person chooses. The staged copy is removed when the mover is done, on cancel, when the screen closes and at
+every lock; and the whole folder is swept independently of any model's state at launch (before the session is built,
+and at the first window's start only: a second window must not delete the file another window's mover is presenting,
+review finding Z99), at every unlock, at every lock (`StagingSweeper`, on the lock signal) and at termination (macOS
+`applicationWillTerminate`, iOS `willTerminateNotification`, which also fire the lock signal so every screen model
+drops what it holds). A process that dies with the mover up (a crash, a force quit, a jetsam kill, power loss) leaves
+the file until the next launch, with its protection class on iOS and none on macOS; no later than that (review §Z,
+Z80, Z90). A lock that lands while the mover is up (the idle auto-lock included: no activity is recorded while the
+system's sheet is up) removes the file under it, and that save fails: the person exports again after unlocking.
+The sweep also removes the `Export-<UUID>` folders earlier builds staged in, and only those: exactly that name, a
+real directory holding one regular file (an unsandboxed build's temporary directory is the user's; review finding
+Z129). The staging folder's own path is not trusted: anything at it but a real directory (a link, a file) is
+removed and the folder made again, without intermediate directories, before anything is written (Z129). What the exporters build on the
+way (the CSV or JSON text, the ZIP's parts) is ordinary memory and is not wiped, like every decoded item's `String`s
+(SEC4, D5). Not `fileExporter` with `FileWrapper.fileAttributes`, which says nothing about what the exporter stages.
+Where the mover copies rather than moves (another file provider), the copy's protection is the provider's. macOS has
+no protection classes: the file is as safe as the folder the person picks, which is why the warning says not to pick
+a synced one. The screen models also drop the export's bytes, the merge review and typed passwords on every lock,
+from `VaultSession.lockEvents()` rather than from views going away (review of the account screens, findings 5 and 6).
+
+The plaintext exporters leave out only the person's own trash (`Item.isTrashedByPerson`, `trashedItemOmitted`); an
+item sync left in the trash is nobody's discard and is written as a live item, with `syncTrashExported`, since the
+report is what a person moving away reads before deleting this copy (review §Z, Z87; X4 for restore).
+
+**The Emergency Kit goes the same way (PRD F5.1).** `VaultSession.emergencyKit(password:)` re-derives the account
+password in the call, as an export does: the Secret Key is the one secret that still matters once the device is
+back with its owner, and whoever holds the unlocked app, quick-unlocked or not, must not read it out (review §Z,
+Z86). `unconfirmedEmergencyKit()` shows the kit the person has not yet confirmed saving again without asking twice,
+only while the account records no confirmation and the session's keys were opened with the password (creation,
+enrolment, a password unlock); otherwise `accountPasswordRequired`, and the vault opens. `EmergencyKitModel` asks for
+the password from Settings, and offers the confirmation there while the account records none, so a person who only
+quick-unlocks can still confirm the kit (review finding Z131); and writes the PDF (`EmergencyKitDocument.write`, which zeroes its rendered buffer) into the staging folder
+with `.completeFileProtection` on iOS, for the file mover; the staged copy goes like an export's, and nothing holds
+the PDF in a view's state. The kit and the screen say to print it or keep it on a device of one's own, never in a
+synced folder (`EmergencyKitText.storageWarning`): saved beside the vault's ciphertext and archives, it would leave
+the password as the only barrier against A1 (ADR 0008). Core Graphics and Core Text keep copies of their own while
+drawing, which nothing here can wipe (review §Z, Z84). A lock can land after the session's last epoch check and
+reach the screen model before the call returns there; `EmergencyKitModel` and `ExportModel` count the locks they
+hear and keep nothing from a call a lock overtook (the export's bytes are wiped; review finding Z127).
 
 **The encrypted Watchword archive (PRD F8.4; ADR 0008).** A versioned, portable, whole-account backup that only
 Watchword reads, made of the vault's own envelope format (`AccountArchive` in `WatchwordCrypto`):
@@ -2720,6 +4353,15 @@ Ks    = HKDF-SHA256(ikm: SK, salt: accountID, info: "WW-archive-2SKD-v1")
 AWK   = HKDF-SHA256(ikm: Kp ‖ Ks, salt: archiveID ‖ accountID, info: "WW-archive-key-v1")
 ```
 
+**The file.** A backup is saved as `Watchword Backup <date>.watchwordbackup`. Both apps declare the type
+(`com.ericsuh.watchword.backup`, conforming to `public.data`; `UTExportedTypeDeclarations` in `Apps/project.yml`,
+the identifier and extension being `ExportKind`'s constants, which a test holds to the spec), so the system names
+the file a "Watchword Backup" and the restore screen's picker offers backups only. The type is exported and never
+handled: the apps register no document type (`CFBundleDocumentTypes`), so opening a backup from Files, Finder or a
+message does not start Watchword, and the only way a file reaches `AccountArchive.parse` is the person choosing it
+on the restore screen (owner decision, 2026-11-17: the convenience was not worth an entry point any app, page or
+sender could use). A backup whose extension was changed is not offered until it is renamed.
+
 Why the Secret Key and not the passphrase alone (ADR 0008): the likeliest place for a backup file is the cloud drive
 the vault syncs through, adversary A1's. The account's ciphertext there resists offline guessing because of the
 Secret Key; an archive protected by the passphrase alone would be the one object beside it that A1 could guess at.
@@ -2730,7 +4372,21 @@ Each entry's plaintext is a type byte and its content: `1` a vault (its ID and n
 an item came from; the name's UTF-8 cut to 1,024 bytes at a scalar boundary, so it always decodes, and an entry
 that does not parse is listed as skipped), `2` an item exactly as `ItemCodec` stores it, history, trash, archived mark and unresolved
 values included. `exportArchive(vaults:passphrase:password:)` requires the account password like a plaintext export
-(someone holding an unlocked device must not be able to take the vault away under a passphrase of their own).
+(someone holding an unlocked device must not be able to take the vault away under a passphrase of their own). An
+archive this app wrote must restore, so a restore is not held to the limits of another app's file
+(`InterchangeLimits.standard`) but to `InterchangeLimits.archive`, sized to what the vault and the format accept: the
+format's 200,000 entries, the vault's 1 MiB item payload, 16,384 parts in one item, one field for every 64 bytes of
+the largest archive (no field `ItemCodec` writes is shorter), and 1 GiB stored over the whole archive. Whatever a
+restore would still not bring back is found when the archive is made: `exportArchive` runs the items through the
+restore's own assembler off the actor (`ArchivedItems.restoreCheck`, `AwayWork.archiveRestoreCheck`) and returns it
+(`ArchiveExport.restoreCheck`), and the export screen lists it before the person relies on the file (review §Z,
+Z82). The restore screen offers the archive's trash, which is otherwise left out and reported. Those limits are for
+an archive opened with this device's own Secret Key. One opened with a Secret Key typed from a Kit (a restore into a
+new account) may be one A7 sealed under an account of its own and handed over with its Kit, which the code cannot
+tell from the person's own: it keeps the format's item count and the per-item bounds, and has the import-wide
+budgets of another app's file (`InterchangeLimits.archiveOfAnotherAccount`: 512 MiB stored, a million fields,
+100,000 scope derivations, 32 URLs an item; review finding Z128). The restore check says when this account's archive
+would not restore into a new account under those budgets (`limitReachedInAnotherAccount`).
 
 **Reading one checks everything before decrypting anything.** `AccountArchive.parse` bounds the file (256 MiB),
 the entry count (200,000, and against the bytes that could hold it, before anything is allocated), every length,
@@ -2793,7 +4449,8 @@ Package.swift (SwiftPM, tools 6.0, Swift 6 language mode)
   Sources/WatchwordAutoFill     credential provider request model, TOTP, passkey
                                 authenticator, identity planner (§9.2)             [milestone 5; extension adapter open]
   Sources/WatchwordSharing      membership chain, verified contacts, invitations,
-                                key grants, rotation plans                         [milestone 4; protocol core
+                                vault sharing codes (board port), key grants,
+                                rotation plans                                     [milestone 4; protocol core
                                                                                     and session wiring done;
                                                                                     transports, UI open]
   Sources/WatchwordHygiene      HIBP clients, scan schedule, strength estimator,

@@ -55,6 +55,8 @@ extension CredentialProviderModel {
                     try await self.makeAssertion(
                         itemID: record.itemID, fieldID: fieldID, request: request, presence: presence,
                         expecting: identity.credentialID))
+            } catch let needed as NeedsThePerson {
+                return .requiresInteraction(needed.reason)
             } catch {
                 switch Self.blocked(error) {
                 case .refused(.passkey(.userVerificationRequired)): return .requiresInteraction(.userVerification)
@@ -68,6 +70,11 @@ extension CredentialProviderModel {
         } catch {
             return Self.silentFailure(error)
         }
+    }
+
+    /// An identity handed back without the person that only the person can choose: answered `requiresInteraction`.
+    private struct NeedsThePerson: Error {
+        let reason: InteractionReason
     }
 
     private func makeAssertion(
@@ -86,6 +93,11 @@ extension CredentialProviderModel {
         let snapshot = try await load()
         let authorization = try Self.unwrap(
             ReleaseGate.authorize(itemID: itemID, for: [relyingParty.serviceIdentifier], in: snapshot))
+        // The system's sheet names no vault: a member's passkey beside an item of another vault for this relying
+        // party is not published, and a stale identity of it is the person's to choose in the list (Z70).
+        if credentialID != nil, snapshot.meetsAnotherTrustClass(authorization.item, on: authorization.host) {
+            throw NeedsThePerson(reason: .ambiguousMatch)
+        }
         var credential = try Self.unwrap(authorization.passkey(fieldID: fieldID))
         // Before anything else is done with it: the stored relying party, exactly (the authenticator checks again).
         guard credential.relyingPartyID == relyingParty.value else {
@@ -126,12 +138,15 @@ extension CredentialProviderModel {
         case .write(let blob):
             // A write that loses a race is reported as not written and the assertion is still good. A vault that
             // locks during the write yields no assertion at all: `storeLargeBlob` rethrows the lock.
+            let now = await clock.now()
             if credential.largeBlob == blob {
                 largeBlob = .write(didWrite: true)
+            } else if !Self.admitsLargeBlobWrite(blob, fieldID: fieldID, in: authorization.item, now: now) {
+                largeBlob = .write(didWrite: false)
             } else {
                 credential.largeBlob = blob
                 largeBlob = .write(
-                    didWrite: try await storeLargeBlob(credential, fieldID: fieldID, in: authorization.item))
+                    didWrite: try await storeLargeBlob(credential, fieldID: fieldID, in: authorization.item, at: now))
             }
         case nil:
             break
@@ -139,12 +154,63 @@ extension CredentialProviderModel {
         return try await releasing(PasskeyAssertionResult(assertion: assertion, prf: prf, largeBlob: largeBlob))
     }
 
-    private func storeLargeBlob(_ credential: PasskeyCredential, fieldID: UUID, in item: Item) async throws -> Bool {
+    /// How often a relying party may replace one passkey's largeBlob (review finding Z66): as often as a report may
+    /// change a field.
+    public static let largeBlobInterval: TimeInterval = reportInterval
+
+    /// The most an item may hold, by `estimatedSize`, after any write the model makes for a remote party (a
+    /// largeBlob write, a credential-update report, a conditional passkey upgrade): half the vault's payload limit
+    /// (`ItemCodec.maximumPayloadLength`, 1 MiB), leaving the person's own edits room whatever a site wrote (review
+    /// findings Z66, Z71).
+    public static let remoteWriteItemBudget = 512 * 1024
+
+    /// `remoteWriteItemBudget`, under the name Z66 gave it for largeBlob writes.
+    public static let largeBlobItemBudget = remoteWriteItemBudget
+
+    /// Whether a write a remote party asked for, turning `item` into `updated`, keeps the item within
+    /// `remoteWriteItemBudget`. Every change of a field keeps the fields as they were in a history entry that is
+    /// never pruned (F1.4), so the estimate is the item as written plus one entry holding `item`'s fields. A meta-only
+    /// change (a report's flag) counts like any other: the vault records it the same way.
+    static func admitsRemoteWrite(_ updated: Item, over item: Item) -> Bool {
+        estimatedSize(of: updated) + estimatedSize(of: item.fields) <= remoteWriteItemBudget
+    }
+
+    /// Whether a relying party's write of `blob` into the passkey `fieldID` of `item` may be made. Every write keeps
+    /// the field's earlier value in the item's history, which is never pruned (F1.4), so the number of writes is
+    /// bounded in time (one per `largeBlobInterval`) and in effect (none that would take the item, with that history
+    /// entry, past `largeBlobItemBudget`). A refused write is reported as not written; the assertion stands.
+    static func admitsLargeBlobWrite(_ blob: Data, fieldID: UUID, in item: Item, now: Date) -> Bool {
+        guard let field = item.fields.first(where: { $0.id == fieldID }) else { return false }
+        if let last = field.lastLargeBlobWriteAt, now.timeIntervalSince(last) < largeBlobInterval { return false }
+        // The write adds a history entry holding every field as it is now, and the blob, as base64url, to the field:
+        // counted on top of the old blob, so never less than `admitsRemoteWrite` would find.
+        let afterWrite = estimatedSize(of: item) + estimatedSize(of: item.fields) + (blob.count * 4 + 2) / 3
+        return afterWrite <= remoteWriteItemBudget
+    }
+
+    /// A lower bound on the bytes an item's encoding holds: its text, every field's and every history entry's.
+    /// The encoding adds names and punctuation, which the budget's margin covers.
+    static func estimatedSize(of item: Item) -> Int {
+        item.title.utf8.count + item.notes.utf8.count + item.scopes.reduce(0) { $0 + $1.host.utf8.count }
+            + estimatedSize(of: item.fields) + item.history.reduce(0) { $0 + estimatedSize(of: $1.fields) }
+    }
+
+    static func estimatedSize(of fields: [Field]) -> Int {
+        fields.reduce(0) { total, field in
+            total + field.label.utf8.count + field.value.utf8.count
+                + field.meta.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count }
+        }
+    }
+
+    private func storeLargeBlob(
+        _ credential: PasskeyCredential, fieldID: UUID, in item: Item, at now: Date
+    ) async throws -> Bool {
         guard let position = item.fields.firstIndex(where: { $0.id == fieldID }),
             let value = try? credential.fieldValue()
         else { return false }
         var updated = item
         updated.fields[position].value = value
+        updated.fields[position].setTimestamp(now, for: Field.lastLargeBlobWriteKey)
         do {
             _ = try await save(updated, replacing: item)
             return true
@@ -168,7 +234,9 @@ extension CredentialProviderModel {
             let named = candidates.filter(\.matchesUserName)
             let newItem = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).proposal
             let suggested: PasskeyDestination
-            if named.count == 1 {
+            // An item of a shared vault is never the destination picked for the person: every member of that vault
+            // could use the passkey, and a member can have put the item there for this (review finding Z60).
+            if named.count == 1, !named[0].vault.isShared {
                 suggested = .existingItem(named[0].itemID)
             } else {
                 suggested = newItem.besideExisting == nil ? .newItem : .newItemBesideExisting
@@ -217,8 +285,14 @@ extension CredentialProviderModel {
     /// (every field of the request, the user handle included, is the page's to vary, and each passkey added is a
     /// version in a history that is never pruned): it can turn the password login the person already keeps for
     /// that very site into a login with one passkey. Nor does it ever add a scope, so a login saved for
-    /// `www.shop.example` is not upgraded by a relying party `shop.example`. Anything else is
-    /// `refused(.noItemToUpgrade)`, and the site is free to ask again with UI.
+    /// `www.shop.example` is not upgraded by a relying party `shop.example`.
+    ///
+    /// And the item must be in a vault only this account reads (review finding Z60). A member of a shared vault who
+    /// may write (adversary A4) can put a login there with the person's user name, scoped to the relying party: it
+    /// would be the one match where the person's own login is saved for `www.` alone, and the new passkey's private
+    /// key would be sealed under a key the member holds, with nobody asked. An item of a shared vault is upgraded
+    /// only from the registration sheet, which names the vault. Anything else is `refused(.noItemToUpgrade)`, and
+    /// the site is free to ask again with UI.
     public func registerPasskeyWithoutInteraction(
         _ request: PasskeyRegistrationRequest, presence: PersonPresence = .absent
     ) async -> SilentOutcome<PasskeyRegistrationResult> {
@@ -229,15 +303,15 @@ extension CredentialProviderModel {
             }
             let snapshot = try await self.load()
             guard !request.user.name.isEmpty,
-                case .fill(let match) = AutoFillGate.decide(
-                    for: relyingParty.serviceIdentifier, among: snapshot.rankable),
-                snapshot.isInUse(match.item), match.item.field(.password) != nil,
+                case .fill(let match) = snapshot.decide(for: relyingParty.serviceIdentifier),
+                snapshot.isInUse(match.item), !snapshot.isShared(match.item), match.item.field(.password) != nil,
                 match.item.loginNames.contains(request.user.name),
                 // Any passkey field counts, whatever it decodes to and whoever it is for.
                 !match.item.fields.contains(where: { $0.kind == .passkey })
             else { throw Blocked.refused(.noItemToUpgrade) }
             return .success(
-                try await self.register(request, destination: .existingItem(match.item.id), presence: presence))
+                try await self.register(
+                    request, destination: .existingItem(match.item.id), presence: presence, withoutInteraction: true))
         }
         do {
             return try await run()
@@ -247,7 +321,8 @@ extension CredentialProviderModel {
     }
 
     private func register(
-        _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence
+        _ request: PasskeyRegistrationRequest, destination: PasskeyDestination, presence: PersonPresence,
+        withoutInteraction: Bool = false
     ) async throws -> PasskeyRegistrationResult {
         let relyingParty = try Self.validate(request)
         guard request.userVerification != .required || presence == .verified else {
@@ -265,14 +340,19 @@ extension CredentialProviderModel {
             guard item.fields.filter({ $0.kind == .passkey }).count < Self.maximumPasskeysPerItem else {
                 throw Blocked.refused(.passkey(.tooManyCredentials))
             }
+            // The items are read again here, so the check is made again on what is written to.
+            guard !withoutInteraction || !snapshot.isShared(item) else { throw Blocked.refused(.noItemToUpgrade) }
             existing = item
         }
+        let newItemVault = try Self.newItemVault(in: snapshot)
+        guard !withoutInteraction || existing != nil else { throw Blocked.refused(.noItemToUpgrade) }
         var newItemScope = relyingParty.scope
-        if destination == .newItemBesideExisting,
-            let shared = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot).sharedScope
-        {
+        let proposed = try Self.newItem(for: relyingParty, userName: request.user.name, in: snapshot)
+        if destination == .newItemBesideExisting, let shared = proposed.sharedScope {
             newItemScope = shared
         }
+        // The sheet showed the relying party's look-alike warning: choosing a new item there confirmed it (Z78).
+        let confirmedHosts: Set<String> = proposed.proposal.warning != nil ? [newItemScope.host] : []
         let backedUp = try await backedUp()
         let now = await clock.now()
         var generator = random
@@ -323,6 +403,10 @@ extension CredentialProviderModel {
         if let existing {
             var updated = existing
             updated.fields.append(field)
+            // A conditional upgrade is the relying party's write: it may not take the item past the budget (Z71).
+            guard !withoutInteraction || Self.admitsRemoteWrite(updated, over: existing) else {
+                throw Blocked.refused(.noItemToUpgrade)
+            }
             stored = try await save(updated, replacing: existing)
         } else {
             var fields: [Field] = []
@@ -332,16 +416,11 @@ extension CredentialProviderModel {
                 )
             }
             fields.append(field)
-            let vaultID: UUID
-            do {
-                vaultID = try await vault.defaultVaultID()
-            } catch {
-                throw Self.blocked(error)
-            }
             stored = try await save(
                 Item(
-                    id: itemID, vaultID: vaultID, title: relyingParty.value, scopes: [newItemScope], fields: fields),
-                replacing: nil)
+                    id: itemID, vaultID: newItemVault.id, title: relyingParty.value, scopes: [newItemScope],
+                    fields: fields),
+                replacing: nil, confirmingHosts: confirmedHosts)
         }
         return PasskeyRegistrationResult(
             relyingPartyID: relyingParty.value, credentialID: credential.credentialID,
@@ -464,7 +543,8 @@ extension CredentialProviderModel {
             {
                 entries.append(
                     PasskeyEntry(
-                        itemID: item.id, fieldID: field.id, title: item.title, userName: credential.userName,
+                        itemID: item.id, fieldID: field.id, vault: snapshot.vault(of: item), title: item.title,
+                        userName: credential.userName,
                         relyingPartyID: credential.relyingPartyID, credentialID: credential.credentialID,
                         reportedUnknown: field.reportedUnknownAt != nil))
             }
@@ -480,9 +560,11 @@ extension CredentialProviderModel {
         guard let host = try? HostNormalizer.normalize(relyingParty.serviceIdentifier) else {
             throw Blocked.refused(.passkey(.relyingPartyRejected(.notCanonical(relyingParty.value))))
         }
-        return newItemProposal(
-            title: relyingParty.value, narrow: relyingParty.scope, on: host, userName: userName, warning: nil,
-            in: snapshot)
+        // A relying party nothing is saved for that resembles a saved site: the sheet shows the warning before an
+        // item scoped to it is made, as the save sheet does (PRD F11.3, F11.7).
+        return try newItemProposal(
+            title: relyingParty.value, narrow: relyingParty.scope, on: host, userName: userName,
+            warning: snapshot.offered(on: host).isEmpty ? warning(for: [host], in: snapshot) : nil, in: snapshot)
     }
 
     /// Logins in use with `userName` that are scoped at or under the relying party and are not candidates: the
@@ -501,7 +583,9 @@ extension CredentialProviderModel {
         }
         .prefix(maximumCredentialListCount)
         .map {
-            PasskeyRegistrationCandidate(itemID: $0.id, title: $0.title, userName: userName, matchesUserName: true)
+            PasskeyRegistrationCandidate(
+                itemID: $0.id, vault: snapshot.vault(of: $0), title: $0.title, userName: userName,
+                matchesUserName: true)
         }
     }
 
@@ -514,10 +598,13 @@ extension CredentialProviderModel {
         }
         let candidates = authorized.map {
             PasskeyRegistrationCandidate(
-                itemID: $0.item.id, title: $0.item.title, userName: $0.item.loginNames.first { !$0.isEmpty } ?? "",
+                itemID: $0.item.id, vault: snapshot.vault(of: $0.item), title: $0.item.title,
+                userName: $0.item.loginNames.first { !$0.isEmpty } ?? "",
                 matchesUserName: !userName.isEmpty && $0.item.loginNames.contains(userName))
         }
-        return candidates.filter(\.matchesUserName) + candidates.filter { !$0.matchesUserName }
+        // Items with the user name first, and among those the person's own before a shared vault's.
+        let ordered = candidates.filter { !$0.vault.isShared } + candidates.filter(\.vault.isShared)
+        return ordered.filter(\.matchesUserName) + ordered.filter { !$0.matchesUserName }
     }
 }
 

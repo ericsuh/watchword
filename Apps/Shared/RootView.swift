@@ -1,5 +1,6 @@
 import SwiftUI
 import WatchwordKit
+import WatchwordPresentation
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
@@ -30,7 +31,9 @@ struct RootView: View {
         case .onboarding:
             OnboardingView()
         case .emergencyKit(let kit):
-            EmergencyKitView(kit: kit, isOnboarding: true)
+            if let context = model.screenContext {
+                EmergencyKitView(context: context, privacy: model.privacy, kit: kit)
+            }
         case .locked:
             UnlockView()
         case .unlocked:

@@ -128,4 +128,71 @@ struct SharedVaultScenarioTests {
         #expect(try await owner.session.item(id: library.id).notes == "Renew in March")
         #expect(try await writer.session.item(id: library.id).notes == "Renew in March")
     }
+
+    @Test("a shared vault is renamed by its owner or an administrator; a member is refused, and the role decides")
+    func renamingASharedVault() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(
+            roles: [.administrator, .readWrite, .readOnly], seed: 450)
+        let (administrator, writer, reader) = (members[0], members[1], members[2])
+        let everyone = [owner, administrator, writer, reader]
+
+        // What the screens are told.
+        #expect(try await owner.session.sharedVaultStatus(vaultID).mayRename)
+        #expect(try await administrator.session.sharedVaultStatus(vaultID).mayRename)
+        #expect(try await !writer.session.sharedVaultStatus(vaultID).mayRename)
+        #expect(try await !reader.session.sharedVaultStatus(vaultID).mayRename)
+
+        // What the session does: the refusal is typed, and comes before anything is sealed.
+        await #expect(throws: SharedVaultError.renameRefused) {
+            try await writer.session.renameVault(id: vaultID, to: "Member's name")
+        }
+        await #expect(throws: SharedVaultError.writeRefused(.readOnly)) {
+            try await reader.session.renameVault(id: vaultID, to: "Reader's name")
+        }
+        try await Self.syncAll(everyone)
+        for account in everyone {
+            #expect(try await account.session.vaults().first { $0.id == vaultID }?.name == "Household")
+        }
+        try await administrator.session.renameVault(id: vaultID, to: "Family")
+        try await Self.syncAll([administrator] + everyone)
+        for account in everyone {
+            #expect(try await account.session.vaults().first { $0.id == vaultID }?.name == "Family")
+        }
+
+        // A member's own vaults are theirs to name: the Personal vault, and one that is not shared.
+        let personal = try #require(try await writer.session.vaults().first { $0.isPersonal })
+        #expect(try await writer.session.renameVault(id: personal.id, to: "Mine").name == "Mine")
+        let own = try await writer.session.createVault(name: "Garden")
+        #expect(try await writer.session.renameVault(id: own.id, to: "Allotment").name == "Allotment")
+
+        // The role decides, in both directions, as soon as the device has the record.
+        try await owner.session.changeRole(of: writer.accountID, in: vaultID, to: .administrator)
+        try await owner.session.changeRole(of: administrator.accountID, in: vaultID, to: .readWrite)
+        try await Self.syncAll(everyone)
+        #expect(try await writer.session.sharedVaultStatus(vaultID).mayRename)
+        #expect(try await !administrator.session.sharedVaultStatus(vaultID).mayRename)
+        await #expect(throws: SharedVaultError.renameRefused) {
+            try await administrator.session.renameVault(id: vaultID, to: "Once more")
+        }
+        try await writer.session.renameVault(id: vaultID, to: "Home")
+        try await Self.syncAll([writer] + everyone)
+        for account in everyone {
+            #expect(try await account.session.vaults().first { $0.id == vaultID }?.name == "Home")
+            #expect(try await account.session.quarantinedVersions().isEmpty)
+        }
+
+        // A rename made before the device heard that the role had ended is never published: the next sync ingests
+        // the record before any log, takes the name out and holds it aside here, and nobody else ever sees it.
+        try await writer.session.renameVault(id: vaultID, to: "Not yet synced")
+        try await owner.session.changeRole(of: writer.accountID, in: vaultID, to: .readWrite)
+        try await Self.syncAll([writer] + everyone)
+        for account in everyone {
+            #expect(try await account.session.vaults().first { $0.id == vaultID }?.name == "Home")
+        }
+        #expect(try await writer.session.quarantinedVersions().contains { $0.kind == .vaultMetadata })
+        for account in [owner, administrator, reader] {
+            #expect(try await account.session.quarantinedVersions().isEmpty)
+        }
+    }
 }

@@ -41,6 +41,9 @@ public enum InterchangeSessionError: Error, Equatable, Sendable {
     /// this one was being read, and its drafts were dropped rather than kept.
     case noPendingImport
     /// An entry that duplicates an existing item has no decision: the person must choose skip, keep both or merge.
+    /// Also an entry the preview raised a concern about (`ImportPreview.concerns`): it would hide a saved account from
+    /// AutoFill, stand beside one, or scope a new item to a look-alike host, and is imported only if the person says
+    /// so (`keepBoth`) or skipped.
     case decisionRequired(importedID: UUID)
     /// A merge into an item the entry was not matched with, or a decision for an entry the preview does not hold.
     case unknownMatch(importedID: UUID)
@@ -52,6 +55,10 @@ public enum InterchangeSessionError: Error, Equatable, Sendable {
     /// `lock()` ran during a commit. The first `saved` entries were written; the rest were not, and the preview is
     /// gone with the lock.
     case importInterrupted(saved: Int)
+    /// A merge accepts hosts that would hide or stand beside an account AutoFill offers, or that resemble a saved
+    /// site, and `MergeChoices.confirmedHosts` does not name them (review finding Z75). `concern` says what each would
+    /// do; nothing was written and the preview is kept.
+    case mergeNeedsConfirmation(importedID: UUID, concern: ImportConcern)
 }
 
 /// What an import would do, for the person to review before anything is written. Holds no secret: the drafts stay
@@ -66,6 +73,9 @@ public struct ImportPreview: Sendable, Equatable {
     public var entries: [ImportPreviewEntry]
     /// Entries that duplicate items already in `vaultID`; each needs a decision before `commitImport`.
     public var matches: [DuplicateMatch]
+    /// Entries that would change what AutoFill offers for a site already saved, in any vault, or that would scope a
+    /// new item to a look-alike host; each needs a decision too (review finding Z62).
+    public var concerns: [ImportConcern] = []
     /// For an encrypted Watchword archive, its identifier and when it was made, as sealed: set only once the archive
     /// has opened, so they are the authenticated values (the manifest covers the header). The restore screen shows
     /// the date, so that an older archive put in place of the newest (A1 can replace files in the cloud drive, and
@@ -82,6 +92,8 @@ public struct ImportPreviewEntry: Sendable, Hashable, Identifiable {
     public var state: ImportedState
     public var reference: ImportEntryReference
     public var hosts: [String]
+    /// The entry's scopes as the draft holds them: each host with how far it reaches, for the review to show.
+    public var scopes: [ServiceScope] = []
     public var loginNames: [String]
     /// The apex hosts the import added as scopes beside a `www` host the file named (`ImportOptions.matchApexOfWWWHosts`,
     /// on by default; owner decision, 2026-11-16), each also in `hosts`: the widening the preview must show. From the
@@ -89,8 +101,48 @@ public struct ImportPreviewEntry: Sendable, Hashable, Identifiable {
     public var apexScopesAdded: [String]
 }
 
-/// The person's choice for one imported entry. Entries without a decision and without a match are added as new
-/// items; an entry with a match must have one.
+/// What importing one entry as a new item would do to AutoFill, where that needs the person's decision (review
+/// finding Z62; adversary A7, whoever hands over the file).
+///
+/// A new entry was taken to hold only the file's own secrets, so only a merge was guarded. But an item is ranked
+/// against every other by its scopes: an entry scoped one label below a saved login outranks it, the extension then
+/// neither lists nor releases the saved login there, and the next password the person saves on that site is offered
+/// to the imported item, whose other scopes are the file's to choose. An entry the file marks archived does the same
+/// without ever being listed. So before anything is written the preview says, by the gate's own ranking
+/// (`SavedSites`), which saved accounts each entry would hide or stand beside, in every vault, and which of its hosts
+/// resemble a saved site without being it. The entry is imported only with an explicit decision.
+public struct ImportConcern: Sendable, Hashable, Identifiable {
+    public var importedID: UUID
+    /// Saved accounts the entry would outrank on a host they are offered on now: the extension would stop offering
+    /// them there.
+    public var hidden: [AffectedAccount]
+    /// Saved accounts it would be offered beside: the person would choose between them on every fill, and a saved
+    /// password could be offered to either.
+    public var beside: [AffectedAccount]
+    /// The entry's scopes cover more saved hosts than were examined: `hidden` and `beside` are not everything.
+    public var overlapIsTruncated: Bool
+    /// Hosts of the entry that resemble a saved site without being it, or cannot be verified by eye (PRD F11.7).
+    public var lookAlikeHosts: [HostConfirmation]
+    /// Hosts that were not compared with what is saved, because the import as a whole would have cost too many
+    /// comparisons (`VaultSession.maximumImportHostComparisons`). Not known to be ordinary, so they need the decision.
+    public var uncheckedHosts: [String]
+    /// The file marks the entry archived: it would rank, and hide what it outranks, without ever being offered.
+    public var isArchived: Bool
+    /// The file (an archive) marks the entry excluded from suggestions: the same as archived, for AutoFill.
+    public var isExcludedFromSuggestions: Bool = false
+    /// The file has the entry in its trash: it is saved into the trash, where it ranks for nothing until the person
+    /// restores it, and a restore asks nothing, so the decision is made here (review finding Z73).
+    public var isTrashed: Bool = false
+
+    public var id: UUID { importedID }
+
+    public var isEmpty: Bool {
+        hidden.isEmpty && beside.isEmpty && !overlapIsTruncated && lookAlikeHosts.isEmpty && uncheckedHosts.isEmpty
+    }
+}
+
+/// The person's choice for one imported entry. Entries without a decision, without a match and without a concern
+/// are added as new items; an entry with a match or a concern must have one.
 public struct ImportDecision: Sendable, Hashable {
     public var resolution: DuplicateResolution
     /// The existing item a merge goes into: one of the entry's matches.
@@ -134,8 +186,11 @@ public struct ImportOutcome: Sendable, Equatable {
 }
 
 /// A plaintext export: the file's bytes, what the format could not carry, and the items that could not be read.
-public struct PlaintextExport: Sendable, Hashable {
-    public var bytes: [UInt8]
+public struct PlaintextExport: Sendable {
+    /// The file, in zeroising memory. The exporter's array was moved here and wiped while it was the only reference
+    /// to its buffer (review §Z, Z83); what the exporters build on the way (the CSV or JSON text, the ZIP's parts)
+    /// is ordinary memory and is not wiped, like every decoded item's `String`s (SEC4, D5).
+    public var bytes: SecureBytes
     public var report: ExportReport
     /// Records in the chosen vaults that would not open, and so are not in the file. Show them with the report.
     public var unreadable: [UUID]
@@ -147,6 +202,9 @@ public struct ArchiveExport: Sendable, Hashable {
     public var vaultCount: Int
     /// Records in the chosen vaults that would not open, and so are not in the archive.
     public var unreadable: [UUID]
+    /// What a restore of this archive would not bring back, if anything (review §Z, Z82): the archive holds it, but
+    /// this version's restore would skip it or refuse the file. Checked with the restore's own assembler and limits.
+    public var restoreCheck: ArchiveRestoreCheck = ArchiveRestoreCheck()
 }
 
 /// The drafts of one import, between preview and commit. Session state; `lock()` drops it.
@@ -156,6 +214,31 @@ struct PendingImport: Sendable {
     let vaultID: UUID
     let result: ImportResult
     let matches: [DuplicateMatch]
+    /// Entries with an `ImportConcern`: each needs a decision as a match does.
+    let concerned: Set<UUID>
+}
+
+/// A draft's scopes and state: what the import's review compares with the saved items, and nothing secret.
+struct DraftScopes: Sendable {
+    let id: UUID
+    let scopes: [ServiceScope]
+    let state: ImportedState
+    /// Archived by the file's state or by the item itself (an archive restores the flag as it was).
+    var isArchived = false
+    var isExcludedFromSuggestions = false
+
+    init(id: UUID, scopes: [ServiceScope], state: ImportedState) {
+        self.id = id
+        self.scopes = scopes
+        self.state = state
+        isArchived = state == .archived
+    }
+
+    init(_ entry: ImportedEntry) {
+        self.init(id: entry.item.id, scopes: entry.item.scopes, state: entry.state)
+        isArchived = entry.state == .archived || entry.item.archived
+        isExcludedFromSuggestions = entry.item.excludedFromSuggestions
+    }
 }
 
 /// The long steps the session runs off its actor (`awayFromSession`), so that `lock()` never waits for them.
@@ -170,6 +253,19 @@ enum AwayWork: Sendable, Hashable {
     case passwordCheck
     /// A new archive's key derivation, under this account's parameters.
     case archiveKeyDerivation
+    /// A new archive's items run through the restore's assembler, to report what it would not bring back (Z82).
+    case archiveRestoreCheck
+    /// An import's drafts compared with what is saved: which accounts each would hide, and which hosts are
+    /// look-alikes. Linear in the file for a fixed vault, but the file and the vault are both large.
+    case importReview
+    /// Another account's device registry replayed along the password changes it publishes (Z10): up to
+    /// `maximumMemberBranches` replays a step, of a registry its account fills.
+    case memberRegistry
+    /// A candidate account header's derivation under its own KDF parameters (up to the ceiling, its author's
+    /// choice), at the lock screen or in `followPasswordChange` (Z14).
+    case candidateDerivation
+    /// Every date an import keeps bounded by the clock (Z85), over up to 200,000 drafts (review finding Z132).
+    case importDates
 }
 
 /// What an archive entry holds: the first byte of its plaintext.
@@ -263,11 +359,15 @@ extension VaultSession {
         }
         defer { secretKey.zeroise() }
         _ = try requireKeys(since: epoch)
+        // An archive opened with this device's own Secret Key is this account's; one opened with a key typed from a
+        // Kit may be A7's, sealed under an account of its own, and gets a file's budgets (review finding Z128).
+        let limits: InterchangeLimits = text == nil ? .archive : .archiveOfAnotherAccount
         let fork = ForkedGenerator(forkingFrom: &random)
         let result = try await awayFromSession(.archiveDerivation, since: epoch) { () -> ImportResult in
             var fork = fork
             let entries = try Self.archivedEntries(of: archive, passphrase: passphrase, secretKey: secretKey)
-            return try ArchivedItems.importEntries(entries, into: vaultID, options: options, using: &fork)
+            return try ArchivedItems.importEntries(
+                entries, into: vaultID, limits: limits, options: options, using: &fork)
         }
         return try await stage(
             result, vaultID: vaultID, since: epoch, generation: generation,
@@ -298,7 +398,7 @@ extension VaultSession {
     /// condition that no row has its ID, keeping the history and the creation and modification times the file
     /// gave it and none of its sync metadata; a merge is an edit of the existing item (`DuplicateDetector.merged`
     /// over the item as it is now, with only the hosts and fields in `MergeChoices`). An entry the source had in its
-    /// trash is saved and then moved to the trash.
+    /// trash is saved into the trash, in the one write that creates it (review finding Z73).
     ///
     /// Every decision is checked before anything is written. The preview is consumed whatever happens.
     public func commitImport(_ preview: UUID, decisions: [UUID: ImportDecision]) async throws -> ImportOutcome {
@@ -321,6 +421,12 @@ extension VaultSession {
         for importedID in matched.keys where decisions[importedID] == nil {
             throw InterchangeSessionError.decisionRequired(importedID: importedID)
         }
+        // In the file's order, so the same entry is named every time.
+        for entry in pending.result.entries
+        where pending.concerned.contains(entry.item.id) && decisions[entry.item.id] == nil {
+            throw InterchangeSessionError.decisionRequired(importedID: entry.item.id)
+        }
+        try await checkMergedHosts(pending, decisions: decisions)
         pendingImport = nil
 
         var outcome = ImportOutcome()
@@ -332,10 +438,11 @@ extension VaultSession {
                 case .skip:
                     outcome.skipped.append(importedID)
                 case .keepBoth:
-                    let created = try await createImported(entry.item, in: pending.vaultID, since: pending.epoch)
+                    // An entry from the source's trash is created in the trash: never live, not even between two
+                    // writes a lock or an error could separate (Z73).
+                    let created = try await createImported(
+                        entry.item, in: pending.vaultID, trashed: entry.state == .trashed, since: pending.epoch)
                     outcome.created.append(created)
-                    // Saved even if this fails; the failure is listed beside it.
-                    if entry.state == .trashed { try await trash(id: created) }
                 case .merge:
                     // Checked above.
                     guard let existingID = decision.existingID else { continue }
@@ -379,7 +486,7 @@ extension VaultSession {
         let chosen = try await exportedItems(vaults, account: record, since: epoch)
         let now = await clock.now()
         _ = try requireKeys(since: epoch)
-        let result: ExportResult
+        var result: ExportResult
         switch format {
         case .applePasswordsCSV:
             result = PasswordCSV.exportApplePasswords(chosen.items)
@@ -397,7 +504,12 @@ extension VaultSession {
                     exporterRelyingPartyID: relyingPartyID, accountID: record.accountID, timestamp: now))
         }
         _ = try requireKeys(since: epoch)
-        return PlaintextExport(bytes: result.bytes, report: result.report, unreadable: chosen.unreadable)
+        // Moved out of the result first, so the array is the buffer's only reference and the wipe reaches it rather
+        // than a copy-on-write duplicate (Z83).
+        var bytes = result.bytes
+        result.bytes = []
+        let contents = SecureBytes(wiping: &bytes)
+        return PlaintextExport(bytes: contents, report: result.report, unreadable: chosen.unreadable)
     }
 
     /// An encrypted Watchword archive of the items of `vaults` (PRD F8.4; docs/02-architecture.md §14.1): every item
@@ -453,12 +565,94 @@ extension VaultSession {
             archiveID: archiveID, accountID: accountID, createdAt: now, wrappingKey: wrappingKey, salt: salt,
             parameters: parameters, using: &random)
         _ = try requireKeys(since: epoch)
+        let fork = ForkedGenerator(forkingFrom: &random)
+        let check = try await awayFromSession(.archiveRestoreCheck, since: epoch) { () -> ArchiveRestoreCheck in
+            var fork = fork
+            return ArchivedItems.restoreCheck(items, using: &fork)
+        }
         return ArchiveExport(
             bytes: bytes, itemCount: chosen.items.count, vaultCount: chosen.vaults.count,
-            unreadable: chosen.unreadable)
+            unreadable: chosen.unreadable, restoreCheck: check)
     }
 
     // MARK: - Helpers
+
+    /// A host a merge adds makes the existing item offered there, which can hide or stand beside another account as a
+    /// new entry's host can (review finding Z75): a duplicate of the Shop login that adds `login.bank.example` takes
+    /// the bank's sign-in page from the saved Bank login. The screen asks a second time for a look-alike only, so the
+    /// session judges every accepted host like a new entry's, against `SavedSites`, and refuses the first merge whose
+    /// host needs a confirmation that `MergeChoices.confirmedHosts` does not give. Before anything is written; the
+    /// preview is kept.
+    private func checkMergedHosts(_ pending: PendingImport, decisions: [UUID: ImportDecision]) async throws {
+        let merging = pending.result.entries.compactMap { entry -> (Item, ImportDecision)? in
+            guard let decision = decisions[entry.item.id], decision.resolution == .merge,
+                !decision.choices.hosts.isEmpty
+            else { return nil }
+            return (entry.item, decision)
+        }
+        guard !merging.isEmpty else { return }
+        let existing = Dictionary(
+            try await items(inVaults: [pending.vaultID]).items.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let sites = try await savedSites()
+        let targetIsShared =
+            try await vaults(includingDeleted: true).first { $0.id == pending.vaultID }?.isShared ?? true
+        _ = try requireKeys(since: pending.epoch)
+        let requests = merging.compactMap { imported, decision -> MergedHosts? in
+            guard let existingID = decision.existingID, let item = existing[existingID] else { return nil }
+            let held = Set(item.scopes.map(\.host))
+            let added = imported.scopes.filter { decision.choices.hosts.contains($0.host) && !held.contains($0.host) }
+            guard !added.isEmpty else { return nil }
+            return MergedHosts(
+                importedID: imported.id, existing: item, added: added, confirmed: decision.choices.confirmedHosts)
+        }
+        guard !requests.isEmpty else { return }
+        let concerns = try await awayFromSession(.importReview, since: pending.epoch) {
+            Self.mergeConcerns(requests, among: sites, isOwnVault: !targetIsShared)
+        }
+        if let first = concerns.first {
+            throw InterchangeSessionError.mergeNeedsConfirmation(importedID: first.importedID, concern: first)
+        }
+    }
+
+    /// The hosts one merge adds to an existing item, and those the person confirmed.
+    struct MergedHosts: Sendable {
+        let importedID: UUID
+        let existing: Item
+        let added: [ServiceScope]
+        let confirmed: Set<String>
+    }
+
+    /// What the unconfirmed hosts of each merge would do, for the merges where that is anything. Pure; run off the
+    /// actor. The existing item is among what is saved: it is left out of what a host would hide or stand beside, and
+    /// its own scopes are the item's (the person's word in a vault of their own) beside the new host.
+    nonisolated static func mergeConcerns(
+        _ merges: [MergedHosts], among sites: SavedSites, isOwnVault: Bool
+    ) -> [ImportConcern] {
+        let prepared = sites.prepared()
+        var concerns: [ImportConcern] = []
+        for merge in merges {
+            var concern = ImportConcern(
+                importedID: merge.importedID, hidden: [], beside: [], overlapIsTruncated: false, lookAlikeHosts: [],
+                uncheckedHosts: [], isArchived: merge.existing.archived,
+                isExcludedFromSuggestions: merge.existing.excludedFromSuggestions)
+            for scope in merge.added.filter(ScopePolicy.isAcceptable) where !merge.confirmed.contains(scope.host) {
+                let overlap = prepared.overlap(
+                    ofAdding: [scope], inVault: merge.existing.vaultID, isOwnVault: isOwnVault)
+                concern.hidden += overlap.hidden.filter { $0.itemID != merge.existing.id }
+                concern.beside += overlap.beside.filter { $0.itemID != merge.existing.id }
+                concern.overlapIsTruncated = concern.overlapIsTruncated || overlap.isTruncated
+                if case .needsConfirmation(let resembles) = prepared.standing(
+                    ofNewHost: scope.host, beside: merge.existing.scopes, inSharedVault: !isOwnVault,
+                    inVault: merge.existing.vaultID)
+                {
+                    concern.lookAlikeHosts.append(HostConfirmation(host: scope.host, resembles: resembles))
+                }
+            }
+            if !concern.isEmpty { concerns.append(concern) }
+        }
+        return concerns
+    }
 
     private func requireWritableVault(_ vaultID: UUID, since epoch: UInt64) async throws {
         let keys = try requireKeys(since: epoch)
@@ -482,12 +676,29 @@ extension VaultSession {
     ) async throws -> ImportPreview {
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
+        // The file's dates are kept (created, modified, history, a passkey's creation), so none may be later than this
+        // clock's now: sync keeps `modifiedAt` monotonic, and one date in the future would stick on every device
+        // (Z85). A pass over every draft, so off the actor (Z132).
+        let now = await clock.now()
+        let result = try await awayFromSession(.importDates, since: epoch) { result.boundingDates(notAfter: now) }
         let existing = try await items(inVaults: [vaultID]).items
         _ = try requireKeys(since: epoch)
         guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
         let matches = DuplicateDetector.matches(imported: result.entries.map(\.item), existing: existing)
+        // Against every vault, as the gate ranks: duplicates are a matter of one vault, AutoFill is not.
+        let sites = try await savedSites()
+        let targetIsShared = try await vaults(includingDeleted: true).first { $0.id == vaultID }?.isShared ?? true
+        _ = try requireKeys(since: epoch)
+        // Only what the comparison needs leaves the actor: no field of a draft.
+        let entries = result.entries.map(DraftScopes.init)
+        let concerns = try await awayFromSession(.importReview, since: epoch) {
+            Self.importConcerns(entries, among: sites, vaultID: vaultID, isOwnVault: !targetIsShared)
+        }
+        guard generation == importGeneration else { throw InterchangeSessionError.noPendingImport }
         let id = UUID.random(using: &random)
-        pendingImport = PendingImport(id: id, epoch: epoch, vaultID: vaultID, result: result, matches: matches)
+        pendingImport = PendingImport(
+            id: id, epoch: epoch, vaultID: vaultID, result: result, matches: matches,
+            concerned: Set(concerns.map(\.importedID)))
         var apexAdded: [ImportEntryReference: [String]] = [:]
         for record in result.report.warnings {
             if case .apexScopeAdded(_, let apex) = record.warning { apexAdded[record.entry, default: []].append(apex) }
@@ -497,10 +708,65 @@ extension VaultSession {
             entries: result.entries.map {
                 ImportPreviewEntry(
                     id: $0.item.id, title: $0.item.title, kind: $0.kind, state: $0.state, reference: $0.reference,
-                    hosts: $0.item.scopes.map(\.host), loginNames: $0.item.loginNames,
+                    hosts: $0.item.scopes.map(\.host), scopes: $0.item.scopes, loginNames: $0.item.loginNames,
                     apexScopesAdded: apexAdded[$0.reference] ?? [])
             },
-            matches: matches, archiveID: archive?.id, archiveCreatedAt: archive?.createdAt)
+            matches: matches, concerns: concerns, archiveID: archive?.id, archiveCreatedAt: archive?.createdAt)
+    }
+
+    /// The comparisons of a host with a saved scope that one import preview makes at most. A host costs one per
+    /// saved scope; past the budget the remaining hosts are reported as unchecked, which needs the person's decision
+    /// like a look-alike: an import of tens of thousands of entries into a vault of thousands is then reviewed in
+    /// parts rather than waited for.
+    public nonisolated static var maximumImportHostComparisons: Int { 20_000_000 }
+
+    /// What each draft would do to AutoFill, by the gate's own view of what is saved. Pure; run off the actor.
+    ///
+    /// A host is judged against what is saved, and compared with the entry's other scopes for resemblance only
+    /// (`standing(ofNewHost:resemblingOnly:)`): those are the file's too and vouch for nothing, but `amaz0n.com`
+    /// beside `amazon.com` in one entry is a look-alike of it (review finding Z74). An entry holds at most
+    /// `maximumURLsPerItem` (32) scopes, so that is at most 32 × 31 comparisons an entry, linear in the file, and
+    /// they are charged to the budget with the rest. An entry the source had in its trash is reviewed like any other
+    /// (Z73): a restore from the trash asks nothing.
+    nonisolated static func importConcerns(
+        _ entries: [DraftScopes], among sites: SavedSites, vaultID: UUID, isOwnVault: Bool,
+        budget comparisons: Int = maximumImportHostComparisons
+    ) -> [ImportConcern] {
+        let prepared = sites.prepared()
+        let cost = max(1, prepared.comparisonsPerHost)
+        var budget = comparisons
+        var concerns: [ImportConcern] = []
+        for entry in entries where !entry.scopes.isEmpty {
+            let scopes = entry.scopes
+            // The overlap is charged to the same budget (review finding Z79): a shared vault's members can put any
+            // number of items on one host, and every entry ranks them. Past the budget it is reported truncated,
+            // which needs the decision like an unchecked host.
+            let overlap = prepared.overlap(
+                ofAdding: scopes, inVault: vaultID, isOwnVault: isOwnVault, limit: max(0, budget))
+            budget -= overlap.comparisons
+            var lookAlikes: [HostConfirmation] = []
+            var unchecked: [String] = []
+            for scope in scopes {
+                let others = scopes.filter { $0.host != scope.host }
+                guard budget >= cost + others.count else {
+                    unchecked.append(scope.host)
+                    continue
+                }
+                budget -= cost + others.count
+                if case .needsConfirmation(let resembles) = prepared.standing(
+                    ofNewHost: scope.host, resemblingOnly: others, inSharedVault: !isOwnVault, inVault: vaultID)
+                {
+                    lookAlikes.append(HostConfirmation(host: scope.host, resembles: resembles))
+                }
+            }
+            let concern = ImportConcern(
+                importedID: entry.id, hidden: overlap.hidden, beside: overlap.beside,
+                overlapIsTruncated: overlap.isTruncated, lookAlikeHosts: lookAlikes, uncheckedHosts: unchecked,
+                isArchived: entry.isArchived, isExcludedFromSuggestions: entry.isExcludedFromSuggestions,
+                isTrashed: entry.state == .trashed)
+            if !concern.isEmpty { concerns.append(concern) }
+        }
+        return concerns
     }
 
     /// Runs `work` off the session's actor, then requires that no `lock()` came meanwhile (CLAUDE.md: `lock()`
@@ -536,8 +802,11 @@ extension VaultSession {
     }
 
     /// Saves an imported draft as a new item of `vaultID`: a write of this device's like any other, but keeping the
-    /// draft's history and times (which `save` would replace) and none of its sync metadata.
-    private func createImported(_ draft: Item, in vaultID: UUID, since epoch: UInt64) async throws -> UUID {
+    /// draft's history and times (which `save` would replace) and none of its sync metadata. `trashed` puts it in
+    /// the trash in the same write, as the person's own trash from now (Z73).
+    private func createImported(
+        _ draft: Item, in vaultID: UUID, trashed: Bool, since epoch: UInt64
+    ) async throws -> UUID {
         for scope in draft.scopes {
             do {
                 try ScopePolicy.validate(scope)
@@ -548,10 +817,11 @@ extension VaultSession {
         guard let record = try await loadAccount() else { throw VaultError.noAccount }
         let keys = try requireKeys(since: epoch)
         let vaultKey = try await writableVaultKey(vaultID, keys: keys, account: record)
+        let now = await clock.now()
         _ = try requireKeys(since: epoch)
         var item = draft
         item.vaultID = vaultID
-        item.trashedAt = nil
+        item.trashedAt = trashed ? now : nil
         item.keptAfterDeletion = false
         let revision = try nextRevision(in: vaultID, above: nil, account: record)
         item.version = revision.version

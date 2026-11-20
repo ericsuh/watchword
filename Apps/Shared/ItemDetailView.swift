@@ -6,7 +6,8 @@ struct ItemDetailView: View {
     @Environment(AppModel.self) private var model
     let item: Item
     let onEdit: () -> Void
-    @State private var revealed: Set<UUID> = []
+    /// Hidden again whenever the app resigns active or the screen is captured (`ScreenPrivacy`, F5.7, Z95).
+    @State private var revealed = RevealedSecrets<UUID>()
     @State private var confirmingTrash = false
 
     var body: some View {
@@ -17,8 +18,19 @@ struct ItemDetailView: View {
             ConflictSection(item: item)
             Section {
                 Text(item.title).font(.title2.bold()).accessibilityIdentifier("detail.title")
+                // The host as it resolves (a Cyrillic look-alike shows as `xn--…`, never as the name it imitates) and
+                // how far the scope reaches (review finding Z61).
                 ForEach(item.scopes, id: \.host) { scope in
-                    Label(scope.host, systemImage: "globe")
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(HostText.ascii(scope.host))
+                            Text(HostText.reach(of: scope)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "globe")
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(AccessibilityID.Detail.scope(scope.host))
                 }
             }
             Section("Fields") {
@@ -70,7 +82,7 @@ struct ItemDetailView: View {
         HStack {
             VStack(alignment: .leading) {
                 Text(field.label).font(.caption).foregroundStyle(.secondary)
-                if field.kind.isSecret && !revealed.contains(field.id) {
+                if field.kind.isSecret && !revealed.isRevealed(field.id, under: model.privacy) {
                     Text("••••••••").accessibilityLabel("Hidden")
                 } else {
                     // Secrets are not selectable: a system Copy would bypass the expiring, local-only clipboard (F5.6).
@@ -83,11 +95,12 @@ struct ItemDetailView: View {
             }
             Spacer()
             if field.kind.isSecret {
-                Button(revealed.contains(field.id) ? "Hide" : "Show") {
+                Button(revealed.isRevealed(field.id, under: model.privacy) ? "Hide" : "Show") {
                     model.recordActivity()
-                    if revealed.contains(field.id) { revealed.remove(field.id) } else { revealed.insert(field.id) }
+                    revealed.toggle(field.id, under: model.privacy)
                 }
                 .buttonStyle(.borderless)
+                .disabled(!model.privacy.mayReveal)
             }
             Button("Copy") {
                 model.recordActivity()

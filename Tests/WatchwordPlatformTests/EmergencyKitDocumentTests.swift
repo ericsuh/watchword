@@ -23,6 +23,23 @@
             #expect(text.contains("cannot recover your account"))
         }
 
+        /// Z84: the app writes the kit itself, into its swept staging folder, and the page says where not to keep it.
+        @Test("write puts the same page at the URL given, which says not to keep it in a synced folder")
+        func written() throws {
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: folder) }
+            let url = folder.appendingPathComponent("Kit.pdf")
+            try EmergencyKitDocument.write(Self.kit, to: url, options: [.withoutOverwriting])
+            let document = try #require(PDFDocument(url: url))
+            let text = try #require(document.string)
+            #expect(text.contains(Self.kit.secretKey))
+            #expect(text.split(whereSeparator: \.isWhitespace).joined(separator: " ").contains("iCloud Drive"))
+            #expect(throws: (any Error).self) {
+                try EmergencyKitDocument.write(Self.kit, to: url, options: [.withoutOverwriting])
+            }
+        }
+
         @Test("the QR code decodes to the setup code")
         func qrCode() throws {
             let image = CIImage(cgImage: try EmergencyKitDocumentProbe.qrImage(for: Self.kit))

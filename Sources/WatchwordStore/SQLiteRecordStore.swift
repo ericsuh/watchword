@@ -11,9 +11,11 @@
     /// odd is reported as `malformedRow` rather than repaired.
     ///
     /// The schema version is `PRAGMA user_version`. A database from a newer schema is refused rather than misread.
-    /// Tables for the sync change log and the HIBP cache arrive with milestones 3 and 6.
+    /// Tables for the sync change log and the HIBP cache arrive with milestones 3 and 6. Version 2 adds
+    /// `device_migration`, the account record's `migration` (review of round 10, Z181), at most one row, written and
+    /// cleared with the account row in one transaction.
     public final class SQLiteRecordStore: RecordStore {
-        public static let schemaVersion = 1
+        public static let schemaVersion = 2
 
         private let connection: SQLiteConnection
 
@@ -77,6 +79,13 @@
             ) STRICT
             """
         static let recordsIndex = "CREATE INDEX records_by_vault ON records (vault_id, kind)"
+        static let migrationTable = """
+            CREATE TABLE device_migration (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                previous_device_id BLOB NOT NULL CHECK (length(previous_device_id) = 16),
+                authenticator BLOB NOT NULL
+            ) STRICT
+            """
 
         /// `(type, name, table, sql)` for every entry `sqlite_schema` may hold.
         static let expectedSchema: Set<[SQLiteValue]> = [
@@ -84,6 +93,7 @@
             [.text("table"), .text("records"), .text("records"), .text(recordsTable)],
             [.text("index"), .text("records_by_vault"), .text("records"), .text(recordsIndex)],
             [.text("index"), .text("sqlite_autoindex_records_1"), .text("records"), .null],
+            [.text("table"), .text("device_migration"), .text("device_migration"), .text(migrationTable)],
         ]
 
         private func migrate() throws {
@@ -97,6 +107,10 @@
                     try connection.execute(Self.recordsTable)
                     try connection.execute(Self.recordsIndex)
                     try connection.execute("PRAGMA user_version = 1")
+                }
+                if version < 2 {
+                    try connection.execute(Self.migrationTable)
+                    try connection.execute("PRAGMA user_version = 2")
                 }
                 try verifySchema()
             }
@@ -142,6 +156,14 @@
             guard let iterations = UInt32(exactly: iterations), let saltLength = Int(exactly: saltLength),
                 let outputLength = Int(exactly: outputLength)
             else { throw RecordStoreError.malformedRow("account.kdf") }
+            let migrations = try connection.query(
+                "SELECT previous_device_id, authenticator FROM device_migration WHERE singleton = 1")
+            var migration: DeviceMigration?
+            if let found = migrations.first {
+                guard found.count == 2 else { throw RecordStoreError.malformedRow("device_migration") }
+                migration = DeviceMigration(
+                    previousDeviceID: try Self.uuid(found[0]), authenticator: try Self.blob(found[1]))
+            }
             return AccountRecord(
                 accountID: try Self.uuid(row[0]),
                 deviceID: try Self.uuid(row[1]),
@@ -155,7 +177,8 @@
                 keysetVersion: try Self.version(row[11]),
                 credentialGeneration: try Self.version(row[12]),
                 createdAt: Date(timeIntervalSince1970: try Self.real(row[13])),
-                emergencyKitConfirmedAt: try Self.optionalReal(row[14]).map(Date.init(timeIntervalSince1970:))
+                emergencyKitConfirmedAt: try Self.optionalReal(row[14]).map(Date.init(timeIntervalSince1970:)),
+                migration: migration
             )
         }
 
@@ -179,8 +202,9 @@
             try connection.transaction {
                 // Validated inside the transaction (BEGIN IMMEDIATE holds the write lock), so another process — the
                 // AutoFill extension — cannot change what was checked before it is written.
-                try change.validate(currentAccount: try loadAccount()) { try record($0)?.version }
-                if let account = change.newAccount {
+                let current = try loadAccount()
+                try change.validate(currentAccount: current) { try record($0)?.version }
+                if let account = change.accountToStore(currentAccount: current) {
                     try connection.query(
                         """
                         INSERT OR REPLACE INTO account (singleton, account_id, device_id, personal_vault_id,
@@ -200,6 +224,15 @@
                             .real(account.createdAt.timeIntervalSince1970),
                             account.emergencyKitConfirmedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                         ])
+                    // The migration as `accountToStore` resolved it: kept, set or cleared, never the copy a writer
+                    // read before its awaits (review of round 11, Z186).
+                    try connection.execute("DELETE FROM device_migration")
+                    if let migration = account.migration {
+                        try connection.query(
+                            "INSERT INTO device_migration (singleton, previous_device_id, authenticator) "
+                                + "VALUES (1, ?, ?)",
+                            [Self.value(migration.previousDeviceID), .blob(migration.authenticator)])
+                    }
                 }
                 for key in change.allDeletions {
                     try connection.query(
@@ -227,7 +260,7 @@
 
         public func eraseAll() throws {
             try connection.transaction {
-                try connection.execute("DELETE FROM records; DELETE FROM account;")
+                try connection.execute("DELETE FROM records; DELETE FROM account; DELETE FROM device_migration;")
             }
             // secure_delete overwrote the rows in the main file and VACUUM drops the freed pages, but in WAL mode the
             // old pages (every superseded envelope and account header) are still in `-wal` until a checkpoint resets
@@ -347,4 +380,8 @@
             return try real(value)
         }
     }
+
+    /// A failure of the database itself: it stops a sync rather than refusing the object being merged (review finding
+    /// Z39).
+    extension SQLiteConnection.Failure: StorageFailure {}
 #endif

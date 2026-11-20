@@ -99,7 +99,9 @@ public enum WriteRefusal: Sendable, Hashable {
 
 /// Which of an account's writes count once it may no longer write: the commitment an administrator's device puts in
 /// the record that removes a member who could write, carries out their departure, or makes them read-only
-/// (docs/02-architecture.md §8.7).
+/// (docs/02-architecture.md §8.7). The record that ends an administrator's role carries one too, a demotion to
+/// read-write included: it is then the bound on what only an administrator may write, the vault's description
+/// (`AdministratorStanding`), and says nothing about the items of a member who may still write.
 ///
 /// The bytes are the integrator's: this module signs them, bounds them, and gives every device the same ones. What
 /// they must do is let any device decide, from the cut and a write alone, whether that write is inside it, with the
@@ -149,6 +151,21 @@ public enum WriteStanding: Sendable, Hashable {
         case .ended(_, _, let refusal), .nothingCounts(let refusal): return refusal
         }
     }
+}
+
+/// Which of an account's descriptions of the vault count: what only the owner and administrators may write, its name
+/// (docs/02-architecture.md §8.7; owner decision of 2026-11-17). Asked, like `WriteStanding`, before merging a
+/// description another account wrote and again about the one held whenever the ledger's head changes; and, like it, a
+/// rule the clients keep, not cryptography: every member holds the vault key.
+public enum AdministratorStanding: Sendable, Hashable {
+    /// The owner, or an administrator now. Every description the account signed counts.
+    case holdsRole
+    /// An administrator once, not now: demoted (to read-write as to read-only), removed or gone. Exactly the
+    /// descriptions inside `cut` count, on every device, whenever it meets them. `author` is the member as the chain
+    /// listed them when the role ended.
+    case ended(cut: WriteCut, author: Member)
+    /// Never an administrator here, or the vault was deleted: no description of the account's counts.
+    case neverHeld
 }
 
 /// A vault's membership after one verified record: who the members are, in which roles, and which vault key is

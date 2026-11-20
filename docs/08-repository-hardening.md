@@ -65,7 +65,7 @@ JSON
 ```
 
 If another third-party action is ever genuinely needed, add it to `patterns_allowed` **pinned to a
-SHA** (`owner/repo@<40-hex>`), which also keeps the nightly `action-pinning-audit` job happy. Bumping
+SHA** (`owner/repo@<40-hex>`), which `mise run audit:actions` also requires, on every pull request. Bumping
 `claude-code-action` means updating both entries: its own SHA, and the `setup-bun` SHA in that
 release's `action.yml`.
 
@@ -89,6 +89,61 @@ label created as `Screenshots` works too. The comment job asks for `actions: rea
 list the run's own artifacts; neither needs a repository setting changed. Do not add any `Screenshots` job
 to the required checks in step 5: the workflow skips most pull requests, and a required check that is skipped counts
 as passing while one that never reports blocks the merge.
+
+### 1.2 The `staging` environment
+
+`claude-pr.yml` holds the repository's one secret (`07-supply-chain.md` §3.2), and its `authorize` job cannot be what
+protects it: on three of its four triggers GitHub runs the pull request's own copy of the workflow, and any workflow on
+a branch of this repository may name `environment: staging`. What decides who reads the secret is the environment.
+Nothing in the tree creates it or shows how it is set, so it is created here and printed in step 9.
+
+```sh
+# The secret lives in the environment and nowhere else. A repository secret of either name would be readable by
+# every workflow, whatever the environment's rules; this should print nothing.
+gh secret list --repo ericsuh/watchword
+
+# One required reviewer (the owner), and only selected refs may deploy. `prevent_self_review` stays false: on a
+# single-owner repository the person who asks for a review is the only one who can approve it.
+owner_id=$(gh api users/ericsuh --jq .id)
+gh api -X PUT repos/ericsuh/watchword/environments/staging --input - <<JSON
+{
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [{ "type": "User", "id": $owner_id }],
+  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true }
+}
+JSON
+
+# The refs the workflow runs from: the default branch (`issue_comment`) and pull-request merge refs (the other
+# three triggers). Nothing else.
+gh api -X POST repos/ericsuh/watchword/environments/staging/deployment-branch-policies \
+  -f name=main -f type=branch
+gh api -X POST repos/ericsuh/watchword/environments/staging/deployment-branch-policies \
+  -f name='refs/pull/*/merge' -f type=branch
+
+# One of the two, as an environment secret (the command prompts for the value; it is never on a command line).
+gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo ericsuh/watchword --env staging
+```
+
+Whether GitHub matches `refs/pull/*/merge` as written is not something these commands can show: after running them,
+open a pull request and confirm that a `Review` run reaches the approval prompt rather than being refused for its
+ref, and adjust the pattern if it is refused.
+
+With the reviewer set, every Claude run waits for an approval, the owner's own included. That approval is the
+control, so it is worth ten seconds each time:
+
+- **Which workflow is asking.** The pending deployment names its workflow and job. It should be `Claude PR`, job
+  `Review` or `Respond`. A deployment to `staging` from any other workflow is a workflow someone added to reach the
+  secret: reject it.
+- **Whether the pull request touches `.github/`.** On `pull_request`, `pull_request_review` and
+  `pull_request_review_comment`, what runs with the secret is the pull request's copy of the workflow files. If the
+  pull request changes anything under `.github/`, read that change before approving, or reject and ask for the
+  review with an `@claude` comment instead: `issue_comment` runs the default branch's copy.
+- **Whose pull request it is.** An approval on a stranger's pull request is the case `07-supply-chain.md` §3.2
+  records as open: the review reads text its author wrote, with the secret in reach.
+
+If the pull-request triggers are ever dropped from `claude-pr.yml`, remove the `refs/pull/*/merge` policy in the same
+change: the environment can then admit the default branch alone, and a pushed branch can no longer ask at all.
 
 ## 2. Set up commit signing locally (prerequisite for step 8)
 
@@ -198,7 +253,22 @@ removes the human read of the diff that is the actual control.
 
 Require one check, `Required checks`: the last job in `ci.yml`, which needs every other job there
 and fails unless each succeeded — both package-test legs, the adversarial suite, strict memory
-safety, lint, and the macOS and iOS-simulator app tests on the `xcode-27` (macOS 27) runner. The
+safety, lint (with the script tests and the action-pinning and mise-pin audits), the macOS and
+iOS-simulator app tests and the two Release builds on the `xcode-27` (macOS 27) runner.
+
+"Each succeeded" is judged leg by leg, from the API, not from `needs.*.result`. A matrix job's result is not its
+legs' together: in run 44175108735 the `Package tests (Xcode 16.4 / macOS 15)` leg waited 33 minutes for a runner
+and was cancelled by the platform without running a step, `needs.package-tests.result` was still `success`, and this
+check passed (`06-adversarial-review.md` Z119). So the job lists every job of its own run attempt
+(`gh api …/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs`, every page) and fails unless each one but itself is
+`completed` with conclusion `success`, and unless the names are exactly the list it expects (`EXPECTED` in the step,
+which a script test holds equal to the jobs and matrix legs in the file): a leg still queued fails it rather than
+being waited for, and so does a leg that was never created. A failed request or an empty listing fails it too. That
+is why this job, alone in `ci.yml`, has `actions: read` (`07-supply-chain.md` §3.2). A re-run is judged by the new
+attempt's listing, which in that run's attempt 2 listed every job, the ones carried over included; GitHub's REST
+description does not say so, and if a later attempt ever listed less, the gate would fail, not pass.
+
+The
 individual jobs still show as their own checks on a pull request; they are not listed here because
 their names carry the runner and Xcode (`Package tests (Xcode 27 / macOS 27)`), and a required
 check that no longer reports blocks every merge until someone edits this setting. That is what
@@ -323,6 +393,16 @@ gh api repos/ericsuh/watchword/actions/permissions --jq '{enabled, allowed_actio
 gh api repos/ericsuh/watchword/actions/permissions/selected-actions
 gh api repos/ericsuh/watchword/actions/permissions/workflow
 
+echo "— staging environment (the one secret; step 1.2) —"
+gh api repos/ericsuh/watchword/environments/staging \
+  --jq '{reviewers: [.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login],
+         self_review_prevented: [.protection_rules[] | select(.type == "required_reviewers") | .prevent_self_review],
+         branch_policy: .deployment_branch_policy}'
+gh api repos/ericsuh/watchword/environments/staging/deployment-branch-policies \
+  --jq '[.branch_policies[] | {name, type}]'
+gh api repos/ericsuh/watchword/environments/staging/secrets --jq '[.secrets[].name]'
+gh api repos/ericsuh/watchword/actions/secrets --jq '[.secrets[].name]'
+
 echo "— security features —"
 gh api repos/ericsuh/watchword --jq '.security_and_analysis'
 
@@ -339,6 +419,12 @@ Expected: one context, `Required checks`, with `strict: true`, `admins: true`, n
 SHA-pinned entries above,
 `default_workflow_permissions: "read"`, secret scanning and push protection `enabled`, code
 scanning `configured` for `["swift"]`, and one active tag ruleset.
+
+For `staging`: `reviewers: ["ericsuh"]` (an empty list means anyone who can push a branch can run a job that reads
+the secret), `branch_policy` with `custom_branch_policies: true` and `protected_branches: false`, exactly the two
+policies `main` and `refs/pull/*/merge`, one environment secret (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`),
+and an empty list of repository secrets. A 404 on the first command means the environment was never created with
+rules: GitHub makes an unprotected one the first time a workflow names it.
 
 One context is correct only while `Analyze (swift)` stays advisory (step 3.1). If that decision
 is revisited, this sentence is the second place to update.

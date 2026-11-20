@@ -39,6 +39,32 @@ struct EncodedState: Codable {
     /// Absent in a row written before ADR 0009.
     var stashUnsaved: Bool?
     var stashGeneration: UInt64?
+    /// Absent in a row written before conflict copies were examined (§7.5).
+    var examinedCopies: [String: Int]?
+    var handOnOwed: Bool?
+    /// Absent in a row written before unread copies were put last (R17).
+    var unreadCopies: [String: Int]?
+    /// Absent in a row written before unread names took turns (R19).
+    var unreadCopiesExamined: [String: UInt64]?
+    /// Absent in a row written before a reset could be answered (§7.10).
+    var ownUnlistedThrough: UInt64?
+    var handedOn: Snapshot?
+    var storeResetSuspected: Bool?
+    var highestOwnSnapshot: UInt64?
+    /// Absent in a row written before a device move recorded having synced (V49).
+    var syncedBefore: Bool?
+    /// Absent in a row written before a device move's question could end (V52).
+    var startedOverByMove: Bool?
+    /// Absent in a row written before review findings Z33 and Z38.
+    var retryUnfinished: Bool?
+    var quarantineDropped: [String]?
+    /// Absent in a row written before review findings Z147 and Z149.
+    var quarantineCrowded: UInt64?
+    var collectedThrough: UInt64?
+    /// Absent in a row written before the review of round 12, and wherever it is empty.
+    var restoredUnpublished: [Stamp]?
+    /// Absent in a row written before the state was signed (review finding Z20): such a row does not verify.
+    var authenticator: Data?
 
     init(_ state: SyncState) {
         func stamps(_ map: [RecordKey: RecordStamp]) -> [Stamp] {
@@ -63,6 +89,26 @@ struct EncodedState: Codable {
         snapshotCoverage = Self.strings(state.snapshotCoverage)
         stashUnsaved = state.stashUnsaved
         stashGeneration = state.stashGeneration
+        examinedCopies = Dictionary(uniqueKeysWithValues: state.examinedCopies.map { ($0.key.name, $0.value) })
+        handOnOwed = state.handOnOwed
+        unreadCopies =
+            state.unreadCopies.isEmpty
+            ? nil : Dictionary(uniqueKeysWithValues: state.unreadCopies.map { ($0.key.name, $0.value) })
+        unreadCopiesExamined =
+            state.unreadCopiesExamined.isEmpty
+            ? nil : Dictionary(uniqueKeysWithValues: state.unreadCopiesExamined.map { ($0.key.name, $0.value) })
+        ownUnlistedThrough = state.ownUnlistedThrough
+        handedOn = state.handedOn.map { Snapshot(name: $0.snapshot.name, coverage: Self.strings($0.holding)) }
+        storeResetSuspected = state.storeResetSuspected
+        highestOwnSnapshot = state.highestOwnSnapshot
+        syncedBefore = state.syncedBefore ? true : nil
+        startedOverByMove = state.startedOverByMove ? true : nil
+        retryUnfinished = state.retryUnfinished
+        quarantineDropped = state.quarantineDropped.map(\.uuidString).sorted()
+        quarantineCrowded = state.quarantineCrowded
+        collectedThrough = state.collectedThrough
+        restoredUnpublished = state.restoredUnpublished.isEmpty ? nil : stamps(state.restoredUnpublished)
+        authenticator = Data(state.authenticator)
     }
 
     /// The state, or `nil` if anything in it is not what `init(_:)` writes.
@@ -100,6 +146,42 @@ struct EncodedState: Codable {
         }
         state.stashUnsaved = stashUnsaved ?? false
         state.stashGeneration = stashGeneration ?? 0
+        for (name, count) in examinedCopies ?? [:] {
+            guard let location = SyncObjectLocation(name: name), count >= 0 else { return nil }
+            state.examinedCopies[location] = count
+        }
+        state.handOnOwed = handOnOwed ?? false
+        for (name, count) in unreadCopies ?? [:] {
+            guard let location = SyncObjectLocation(name: name), count >= 0 else { return nil }
+            state.unreadCopies[location] = count
+        }
+        for (name, examined) in unreadCopiesExamined ?? [:] {
+            guard let location = SyncObjectLocation(name: name) else { return nil }
+            state.unreadCopiesExamined[location] = examined
+        }
+        state.ownUnlistedThrough = ownUnlistedThrough
+        if let handedOn {
+            guard let location = SyncObjectLocation(name: handedOn.name), location.kind == .snapshot,
+                let holding = Self.uuids(handedOn.coverage)
+            else { return nil }
+            state.handedOn = HandedOn(snapshot: location, holding: holding)
+        }
+        state.storeResetSuspected = storeResetSuspected ?? false
+        state.highestOwnSnapshot = highestOwnSnapshot ?? 0
+        state.syncedBefore = syncedBefore ?? false
+        state.startedOverByMove = startedOverByMove ?? false
+        state.retryUnfinished = retryUnfinished ?? false
+        for device in quarantineDropped ?? [] {
+            guard let id = UUID(uuidString: device) else { return nil }
+            state.quarantineDropped.insert(id)
+        }
+        state.quarantineCrowded = quarantineCrowded
+        state.collectedThrough = collectedThrough ?? 0
+        for stamp in restoredUnpublished ?? [] {
+            guard let (key, value) = stamp.decoded else { return nil }
+            state.restoredUnpublished[key] = value
+        }
+        state.authenticator = authenticator.map { Array($0) } ?? []
         return state
     }
 

@@ -19,7 +19,8 @@ import WatchwordCrypto
 ///   5 rotateKey     —
 ///   6 deleteVault   —
 /// vaultKeyID 16  keyEpoch u64
-/// writeCutLength u16 (0...2048), write cut       (empty unless the operation ends an account's permission to write)
+/// writeCutLength u16 (0...2048), write cut       (empty unless the operation ends an account's permission to write
+///                                                 or its administrator role)
 /// memberCount u16 (1...64), then per member, strictly ascending by account ID:
 ///   account 16  role u8  since u64  X25519 key 32  Ed25519 key 32  bundle self-signature 64
 /// signature 64                                   (nothing after)
@@ -139,9 +140,10 @@ public struct MembershipRecord: Sendable, Hashable {
     public let operation: Operation
     public let vaultKeyID: UUID
     public let keyEpoch: UInt64
-    /// Which of an account's writes still count, when the operation ends that account's permission to write: a
-    /// removal or departure of a member who could write, or a change of role to read-only (§8.7). `WriteCut.nothing`
-    /// on every other record. Being signed with the rest, it is the same on every device that accepts the record.
+    /// Which of an account's writes still count, when the operation ends that account's permission to write (a
+    /// removal or departure of a member who could write, a change of role to read-only) or its administrator role
+    /// (any of those for an administrator, and a demotion to read-write; §8.7). `WriteCut.nothing` on every other
+    /// record. Being signed with the rest, it is the same on every device that accepts the record.
     public let writeCut: WriteCut
     /// The member list after the operation, in ascending order of account ID.
     public let entries: [Entry]

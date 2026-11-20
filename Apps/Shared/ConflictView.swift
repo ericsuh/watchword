@@ -1,5 +1,6 @@
 import SwiftUI
 import WatchwordModel
+import WatchwordPresentation
 import WatchwordSync
 
 /// Values written on different devices at the same time, kept side by side until the person chooses (PRD F7.6). The
@@ -8,7 +9,8 @@ import WatchwordSync
 struct ConflictSection: View {
     @Environment(AppModel.self) private var model
     let item: Item
-    @State private var revealed: Set<ItemGroup> = []
+    /// Hidden again whenever the app resigns active or the screen is captured (`ScreenPrivacy`, F5.7, Z95).
+    @State private var revealed = RevealedSecrets<ItemGroup>()
 
     var body: some View {
         let conflicts = ItemMerge.conflicts(of: item).sorted { $0.key < $1.key }
@@ -22,20 +24,17 @@ struct ConflictSection: View {
                             Text(name).font(.headline)
                             Spacer()
                             if choices.contains(where: Self.isSecret) {
-                                Button(revealed.contains(group) ? "Hide" : "Show") {
+                                Button(revealed.isRevealed(group, under: model.privacy) ? "Hide" : "Show") {
                                     model.recordActivity()
-                                    if revealed.contains(group) {
-                                        revealed.remove(group)
-                                    } else {
-                                        revealed.insert(group)
-                                    }
+                                    revealed.toggle(group, under: model.privacy)
                                 }
                                 .buttonStyle(.borderless)
+                                .disabled(!model.privacy.mayReveal)
                             }
                         }
                         ForEach(Array(choices.enumerated()), id: \.offset) { index, value in
                             HStack {
-                                Text(Self.describe(value, revealed: revealed.contains(group)))
+                                Text(Self.describe(value, revealed: revealed.isRevealed(group, under: model.privacy)))
                                     .textSelection(.disabled)
                                     .accessibilityIdentifier("conflict.\(name).\(index).value")
                                 Spacer()

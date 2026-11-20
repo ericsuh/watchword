@@ -150,7 +150,10 @@ public struct VaultKeyGrant: Sendable, Hashable {
         } catch {
             throw CryptoError.authenticationFailed
         }
+        // Marked as having arrived by grant, which its wrap under the recipient's keyset then authenticates: the
+        // vault is one a membership chain governs, on every device of the account (`VaultKey.arrivedByGrant`).
         return VaultKey(
-            vaultID: vaultID, key: try EncryptionKey(keyID: keyID, material: SecureBytes(wiping: &plaintext)))
+            vaultID: vaultID, key: try EncryptionKey(keyID: keyID, material: SecureBytes(wiping: &plaintext)),
+            arrivedByGrant: true)
     }
 }

@@ -158,6 +158,10 @@ Requirement IDs are stable and referenced from the test plan.
   the client; it is **not** cryptographic, and the UI must say so.
 - F4.6 Per-item sharing is expressed as "move to a shared vault" so that the sharing model has one
   mechanism.
+- F4.7 Only a shared vault's owner or an administrator can rename it; a member who may otherwise write
+  cannot. Like read-only, the rule is kept by every member's client (which refuses its own account's
+  rename and counts nobody else's that breaks it), not by cryptography. A vault that is not shared, and
+  the Personal vault, are renamed by their account as before.
 
 ### 5.5 Unlock, lock, and local protection (F5)
 
@@ -177,7 +181,14 @@ Requirement IDs are stable and referenced from the test plan.
   key material and decrypted items in memory.
 - F5.6 Clipboard copies expire (default 60 s) and use the "local only"/expiry pasteboard options.
 - F5.7 Screenshots/screen recording of secret fields are discouraged on iOS by marking secure text
-  fields; secrets are hidden from the app switcher snapshot.
+  fields; secrets are hidden from the app switcher snapshot. A revealed secret (a field shown, the Secret
+  Key on the Emergency Kit) is hidden again when the app stops being active or the screen starts being
+  recorded, mirrored or shared, and cannot be revealed while it is; on macOS the app's windows ask to be
+  left out of screen capture (`NSWindow.sharingType = .none`), which is not promised to show a shared
+  screen or a recording blank until docs/04's manual check passes on a current macOS (later versions are
+  reported to capture such windows anyway; review finding Z134), and window restoration is not yet
+  turned off (Z96). Nothing here stops a camera, or a capture the system does not report
+  (docs/04-test-plan.md, F5.7).
 
 ### 5.6 AutoFill and platform integration (F6)
 

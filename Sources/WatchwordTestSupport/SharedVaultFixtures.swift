@@ -36,17 +36,24 @@ public struct SharingAccount: Sendable {
         bundle.fingerprint.safetyNumber
     }
 
+    /// `store` is the device's record store (a test's hook over one); a fresh in-memory store by default.
     public static func make(
         over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory, seed: UInt64,
-        hygiene: HygieneSettings? = nil
+        hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil, board: (any SharingBoard)? = nil,
+        store: (any RecordStore)? = nil
     ) async throws -> SharingAccount {
-        let vault = TestVault.syncing(over: transport, seed: seed, hygiene: hygiene)
+        let syncState = InMemorySyncStateStore()
+        let sync =
+            configuration.map { SyncSettings(state: syncState, transport: transport, configuration: $0) }
+            ?? SyncSettings(state: syncState, transport: transport)
+        let vault = TestVault(store: store ?? InMemoryRecordStore(), sync: sync, seed: seed, hygiene: hygiene)
         try await vault.createAccount()
         let state = InMemorySharingStateStore()
         let contacts = InMemoryVerifiedContactStore()
         let shareAccess = RecordingShareAccess()
         await vault.session.configureSharing(
-            SharingSettings(state: state, contacts: contacts, directory: directory, shareAccess: shareAccess))
+            SharingSettings(
+                state: state, contacts: contacts, directory: directory, shareAccess: shareAccess, board: board))
         let bundle = try await vault.session.publicKeyBundle()
         await directory.publish(bundle)
         // Publishes the account's registry, which other members check this device's signatures against.
@@ -54,6 +61,29 @@ public struct SharingAccount: Sendable {
         return SharingAccount(
             vault: vault, state: state, contacts: contacts, shareAccess: shareAccess,
             accountID: bundle.accountID, bundle: bundle)
+    }
+
+    /// Another device of this account (PRD F5.2), enrolled from the transport with the password and the Secret Key,
+    /// unlocked, with sharing configured over sharing state and contacts of its own: pins, ledgers and stream
+    /// indexes are per device (review finding S35), so it starts with none. `modifiedClient` makes it an adversary's
+    /// modified client (`VaultSession.playModifiedClient`, Z162): it writes, accepts and publishes in a shared vault
+    /// whatever its ID, where an honest client whose ID does not commit refuses to. `syncState` is its sync state store.
+    public func enrolledDevice(
+        deviceID: UUID? = nil, over transport: any SyncTransport, directory: InMemoryKeyBundleDirectory,
+        modifiedClient: Bool = false, syncState: (any SyncStateStore)? = nil
+    ) async throws -> SharingAccount {
+        let device = try await vault.enrolledDevice(deviceID: deviceID, over: transport, syncState: syncState)
+        if modifiedClient { await device.session.playModifiedClient() }
+        let state = InMemorySharingStateStore()
+        let contacts = InMemoryVerifiedContactStore()
+        let shareAccess = RecordingShareAccess()
+        await device.session.configureSharing(
+            SharingSettings(state: state, contacts: contacts, directory: directory, shareAccess: shareAccess))
+        try await device.session.unlock(password: TestVault.password)
+        try await device.session.sync()
+        return SharingAccount(
+            vault: device, state: state, contacts: contacts, shareAccess: shareAccess, accountID: accountID,
+            bundle: bundle)
     }
 
     /// Invites `invitee` to `vaultID` the way a person does: compares their safety number first, then invites; the
@@ -65,17 +95,47 @@ public struct SharingAccount: Sendable {
         let invitation = try await session.invite(invitee.accountID, to: vaultID, as: role)
         try await invitee.session.acceptInvitation(invitation, ownerEvidence: .safetyNumber(owner.safetyNumber))
     }
+
+    /// Runs a vault sharing code session with `joiner` the way two people do (ADR 0010): this account shows the
+    /// number, the joiner types it, this account types the joiner's six digits, and the joiner types this account's.
+    /// Each ends with the other pinned. Returns the two final statuses.
+    @discardableResult
+    public func checkSharingCode(with joiner: SharingAccount) async throws -> (
+        starter: SharingCodeStatus, joiner: SharingCodeStatus
+    ) {
+        let started = try await session.startSharingCodeSession()
+        _ = try await joiner.session.joinSharingCodeSession(number: try Self.require(started.number))
+        _ = try await session.refreshSharingCodeSession()
+        let shown = try await joiner.session.refreshSharingCodeSession()
+        let accepted = try await session.enterSharingCode(try Self.require(shown.ownCode))
+        let done = try await joiner.session.enterSharingCode(try Self.require(accepted.ownCode))
+        return (accepted, done)
+    }
+
+    struct MissingValue: Error {}
+
+    static func require<T>(_ value: T?) throws -> T {
+        guard let value else { throw MissingValue() }
+        return value
+    }
 }
 
 /// A transport, a key directory and the accounts that share through them.
 public struct SharedVaultHousehold: Sendable {
     public let transport = InMemorySyncTransport()
     public let directory = InMemoryKeyBundleDirectory()
+    /// Where the household's vault sharing code sessions meet (ADR 0010).
+    public let board = InMemorySharingBoard()
 
     public init() {}
 
-    public func account(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> SharingAccount {
-        try await SharingAccount.make(over: transport, directory: directory, seed: seed, hygiene: hygiene)
+    public func account(
+        seed: UInt64, hygiene: HygieneSettings? = nil, configuration: SyncConfiguration? = nil,
+        store: (any RecordStore)? = nil
+    ) async throws -> SharingAccount {
+        try await SharingAccount.make(
+            over: transport, directory: directory, seed: seed, hygiene: hygiene, configuration: configuration,
+            board: board, store: store)
     }
 
     /// An owner with a new shared vault called `name`, and one member per role, each invited and joined.
@@ -103,6 +163,7 @@ public struct SharedVaultHousehold: Sendable {
 public actor WithholdingTransport: SyncTransport {
     public let base: InMemorySyncTransport
     private var frozen: [String: Set<String>] = [:]
+    private var hidden: Set<String> = []
 
     public init(base: InMemorySyncTransport) {
         self.base = base
@@ -113,12 +174,18 @@ public actor WithholdingTransport: SyncTransport {
         frozen[prefix] = Set(await base.list(prefix: prefix))
     }
 
+    /// From now on exactly these objects are withheld from this view, whatever else is created.
+    public func withhold(_ names: Set<String>) {
+        hidden.formUnion(names)
+    }
+
     public func reveal() {
         frozen = [:]
+        hidden = []
     }
 
     private func isWithheld(_ name: String) -> Bool {
-        frozen.contains { prefix, shown in name.hasPrefix(prefix) && !shown.contains(name) }
+        hidden.contains(name) || frozen.contains { prefix, shown in name.hasPrefix(prefix) && !shown.contains(name) }
     }
 
     public func list(prefix: String) async throws -> [String] {
@@ -140,11 +207,22 @@ public actor WithholdingTransport: SyncTransport {
 }
 
 extension SharedVaultHousehold {
+    /// Another device of `account`, its ID committing to the account (Z157) unless `deviceID` names it. A device
+    /// named that way is an adversary's, under another device's ID (S33), so it is a modified client too (Z162): an
+    /// honest one would refuse to accept an invitation or write in a shared vault with an ID that commits to nothing.
+    public func secondDevice(of account: SharingAccount, deviceID: UUID? = nil) async throws -> SharingAccount {
+        try await account.enrolledDevice(
+            deviceID: deviceID, over: transport, directory: directory, modifiedClient: deviceID != nil)
+    }
+
     /// An account whose view of the transport the store controls.
     public func withheldAccount(seed: UInt64, hygiene: HygieneSettings? = nil) async throws -> (
         account: SharingAccount, view: WithholdingTransport
     ) {
         let view = WithholdingTransport(base: transport)
-        return (try await SharingAccount.make(over: view, directory: directory, seed: seed, hygiene: hygiene), view)
+        return (
+            try await SharingAccount.make(over: view, directory: directory, seed: seed, hygiene: hygiene, board: board),
+            view
+        )
     }
 }

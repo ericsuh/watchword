@@ -24,9 +24,18 @@ public enum ExportKind: String, Hashable, Sendable, CaseIterable, Identifiable {
 
     public var isPlaintext: Bool { self != .archive }
 
+    /// The uniform type identifier of an encrypted archive, which both apps declare as an exported type
+    /// (`Apps/project.yml`, `UTExportedTypeDeclarations`) so that a backup has a name and the restore screen's file
+    /// picker offers backups only. The apps deliberately register no document type for it: nothing outside Watchword
+    /// can hand it a file to open (owner decision, 2026-11-17; docs/02-architecture.md §14.1).
+    public static let archiveTypeIdentifier = "com.ericsuh.watchword.backup"
+
+    /// The archive's file name extension, the one tag of `archiveTypeIdentifier`.
+    public static let archiveFileExtension = "watchwordbackup"
+
     public var fileExtension: String {
         switch self {
-        case .archive: return "wwarchive"
+        case .archive: return Self.archiveFileExtension
         case .applePasswordsCSV: return "csv"
         case .onePUX: return "1pux"
         }
@@ -34,7 +43,7 @@ public enum ExportKind: String, Hashable, Sendable, CaseIterable, Identifiable {
 }
 
 /// A finished export, as the screen shows it. The bytes stay in the model, in zeroising memory, until
-/// `ExportModel.stage` writes them where the system's file mover takes them, and go at `discardFile`.
+/// `ExportModel.stage` writes them into the `StagingFolder` for the system's file mover, and go at `discardFile`.
 public struct ExportFile: Hashable, Sendable {
     /// One export: a new one is a new file even with the same report.
     public let id: UUID
@@ -70,24 +79,35 @@ public final class ExportModel: LockSensitive {
 
     private let context: ScreenContext
     private let now: @Sendable () -> Date
+    /// Where a file is written for the file mover; swept whole at launch, lock, unlock and termination (Z80).
+    public let staging: StagingFolder
     /// The file's bytes: plaintext for every format but the archive. Zeroised by `discardFile`.
     private var contents: SecureBytes?
     /// Where `stage` wrote them, until the file mover has taken them or the export is dropped.
-    private var stagingDirectory: URL?
+    private var stagedFile: URL?
 
-    public init(context: ScreenContext, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(
+        context: ScreenContext, staging: StagingFolder = .standard, now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.context = context
+        self.staging = staging
         self.now = now
         context.locks?.register(self)
     }
 
-    /// On every lock: the bytes, any staged copy and the typed password and passphrase go (finding 6).
+    /// On every lock: the bytes, any staged copy and the typed password and passphrase go (finding 6), and the
+    /// staging folder is swept whatever this model remembers of it (Z80).
     public func dropOnLock() {
+        drops += 1
         discardFile()
+        staging.sweep()
         password = ""
         passphrase = ""
         passphraseConfirmation = ""
     }
+
+    /// How many locks this model has heard: an export whose calls a lock overtook keeps nothing (Z127).
+    private var drops = 0
 
     /// Whether the model still holds a file's bytes (for tests: the bytes themselves never leave but by `stage`).
     public var holdsContents: Bool { contents != nil }
@@ -126,24 +146,38 @@ public final class ExportModel: LockSensitive {
         self.passphrase = ""
         passphraseConfirmation = ""
         discardFile()
+        // A lock can land after the session's last check and reach this model before a call returns here: the bytes
+        // that call hands back are wiped, not kept (review finding Z127).
+        let drops = self.drops
+        defer { if self.drops != drops { discardFile() } }
         await perform {
             let session = context.session
             let stamp = Self.stamp(self.now())
             switch kind {
             case .archive:
-                let archive = try await session.exportArchive(
+                var archive = try await session.exportArchive(
                     vaults: vaultIDs, passphrase: passphrase, password: password)
                 var bytes = archive.bytes
+                archive.bytes = []
                 contents = SecureBytes(wiping: &bytes)
+                guard self.drops == drops else { return }
+                // What a restore would not bring back, if anything (Z82): before the person relies on the file.
+                let lines =
+                    archive.restoreCheck.restoresEverything
+                    ? [] : InterchangeWording.lines(for: archive.restoreCheck, titles: try await Self.titles(session))
                 file = ExportFile(
                     id: UUID(), kind: kind, filename: "Watchword Backup \(stamp).\(kind.fileExtension)",
-                    itemCount: archive.itemCount, lines: [], unreadableCount: archive.unreadable.count)
+                    itemCount: archive.itemCount, lines: lines, unreadableCount: archive.unreadable.count)
             case .applePasswordsCSV, .onePUX:
                 let format: PlaintextExportFormat = kind == .onePUX ? .onePUX : .applePasswordsCSV
                 let export = try await session.exportPlaintext(format, vaults: vaultIDs, password: password)
+                guard self.drops == drops else {
+                    export.bytes.zeroise()
+                    return
+                }
                 let titles = try await Self.titles(session)
-                var bytes = export.bytes
-                contents = SecureBytes(wiping: &bytes)
+                // Already zeroising memory, the session's own (Z83): no copy is made here.
+                contents = export.bytes
                 file = ExportFile(
                     id: UUID(), kind: kind, filename: "Watchword Export \(stamp).\(kind.fileExtension)",
                     itemCount: export.report.exportedCount,
@@ -153,18 +187,21 @@ public final class ExportModel: LockSensitive {
         }
     }
 
-    /// Writes the file into a new directory of its own under `directory`, with `options` (on iOS the app passes
+    /// Writes the file into a folder of its own in `staging`, with `options` (on iOS the app passes
     /// `.completeFileProtectionUnlessOpen`, so the file is never readable at rest while the device is locked), for the
     /// system's file mover to take where the person chooses. Returns the file's URL. The staged copy is removed by
-    /// `finishSaving` or `discardFile`, whichever comes first (PRD F8.4; review of the account screens, finding 5).
-    public func stage(in directory: URL, options: Data.WritingOptions) throws -> URL {
+    /// `finishSaving` or `discardFile`, whichever comes first (PRD F8.4; review of the account screens, finding 5),
+    /// and with the whole folder at the next launch, lock, unlock or termination if the process lives that long (Z80).
+    public func stage(options: Data.WritingOptions) throws -> URL {
         guard let contents, let file else { throw CocoaError(.fileNoSuchFile) }
         removeStagedCopy()
-        let folder = directory.appendingPathComponent("Export-" + UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        stagingDirectory = folder
-        let url = folder.appendingPathComponent(file.filename, isDirectory: false)
-        try Data(contents.unprotectedCopy()).write(to: url, options: options.union(.withoutOverwriting))
+        let url = try staging.stage(named: file.filename) { url in
+            // One copy, straight from protected storage, wiped once written (Z83).
+            var data = Data(contents)
+            defer { data.resetBytes(in: data.startIndex..<data.endIndex) }
+            try data.write(to: url, options: options.union(.withoutOverwriting))
+        }
+        stagedFile = url
         return url
     }
 
@@ -191,8 +228,8 @@ public final class ExportModel: LockSensitive {
     }
 
     private func removeStagedCopy() {
-        if let stagingDirectory { try? FileManager.default.removeItem(at: stagingDirectory) }
-        stagingDirectory = nil
+        if let stagedFile { staging.remove(stagedFile) }
+        stagedFile = nil
     }
 
     static func titles(_ session: VaultSession) async throws -> [UUID: String] {
