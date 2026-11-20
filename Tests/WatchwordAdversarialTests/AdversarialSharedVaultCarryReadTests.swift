@@ -8,6 +8,20 @@ import WatchwordTestSupport
 
 @testable import WatchwordKit
 
+extension VaultSession {
+    /// For tests: the vault as a take-out that ended at the current head earlier in this session leaves it (S65's
+    /// `takenOutAgainst`), as one that returned at its first guard before a replay was asked for would.
+    func markTakenOutAgainstTheCurrentHead(_ vaultID: UUID) {
+        let head = sharing.vaults[vaultID]?.ledger.state.hash.bytes
+        sharing.vaults[vaultID]?.takenOutAgainst = head
+    }
+
+    /// For tests: the membership head this device holds for `vaultID`.
+    func sharedHead(_ vaultID: UUID) -> [UInt8]? {
+        sharing.vaults[vaultID]?.ledger.state.hash.bytes
+    }
+}
+
 // The review of round 22 (docs/06-adversarial-review.md Z254) and of PR #22's seventh merge (Z258): reads of a vault's
 // sync state that decide whether a restore's work is carried before the vault merges, or is left alone by the
 // take-out, where one that failed was read as "nothing there"; and the review of round 23 (Z262): a take-out that
@@ -255,6 +269,73 @@ extension AdversarialSharedVaultTests {
             _ = try await relaunched.session.syncAll()
             try await owner.session.sync()
         }
+        let settled = try await relaunched.session.item(id: bank.id)
+        #expect(settled.field(.password)?.value == "bank-password", "the demoted member's late write was kept")
+    }
+
+    /// Threat: as above (A4's late write, a take-out's one failed state read, a replay owed), merged into the hygiene
+    /// branch, where S65 asks of a settling pass that the take-out before it saw the head it ends on
+    /// (`takenOutAgainst`). The PoC above relaunches the session, which leaves `takenOutAgainst` unset, so there S65
+    /// alone settles nothing; but a take-out that returned at its first guard at the current head earlier in a session
+    /// leaves it set, and a take-out that throws afterwards leaves it so. Here the demotion is ingested by a sync made
+    /// while locked (no take-out), and the vault marked as such a take-out leaves it: only `takeOutsOwed` keeps the
+    /// replay after the failed take-out from settling the basis, and the late write is taken out in the same sync.
+    @Test("a take-out that fails at the head it last saw is not settled away by the replay after it")
+    func takeOutThatFailedAtTheHeadItLastSawIsNotSettledAway() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 950)
+        let (demoted, demotedView) = try await household.withheldAccount(seed: 967)
+        let (member, memberView) = try await household.withheldAccount(seed: 984)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(demoted, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        let bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, demoted, member])
+        var before = try await demoted.session.item(id: bank.id)
+        before.title = "Written while read-write"
+        try await demoted.session.save(before)
+        try await Self.syncAll([demoted, owner, member])
+
+        await demotedView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        await memberView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        try await owner.session.changeRole(of: demoted.accountID, in: vaultID, to: .readOnly)
+        try await demoted.session.save(
+            Self.setting(.password, to: "late-password", in: try await demoted.session.item(id: bank.id)))
+        try await demoted.session.sync()
+        try await member.session.sync()
+        #expect(try await member.session.item(id: bank.id).field(.password)?.value == "late-password")
+        try await owner.session.sync()
+
+        await member.session.lock()
+        let sync = try #require(member.vault.sync)
+        let failing = LoadFailingSyncState(base: sync.state, vaultID: vaultID)
+        let relaunched = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock,
+            sync: SyncSettings(state: failing, transport: sync.transport, configuration: sync.configuration),
+            seed: 985, deviceKeys: member.vault.deviceKeys)
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        // Locked, the sync ingests the demotion and takes nothing out (Z253).
+        try await relaunched.session.unlock(password: TestVault.password)
+        _ = try? await relaunched.session.sharedVaultStatus(vaultID)
+        await relaunched.session.lock()
+        let headBefore = await relaunched.session.sharedHead(vaultID)
+        await memberView.reveal()
+        _ = try await relaunched.session.syncAll()
+        let head = await relaunched.session.sharedHead(vaultID)
+        #expect(head != nil && head != headBefore, "the locked sync did not ingest the demotion: nothing is tested")
+        try await relaunched.session.unlock(password: TestVault.password)
+        _ = try? await relaunched.session.sharedVaultStatus(vaultID)
+        await relaunched.session.markTakenOutAgainstTheCurrentHead(vaultID)
+        await relaunched.session.requestReplay(vaultID)
+        #expect(await relaunched.session.replayIsRequested(vaultID), "no replay owed: nothing is tested")
+        await failing.arm(skipping: 2)
+        let first = try? await relaunched.session.syncAll()
+        #expect(first?.sharing[vaultID]?.failure != nil, "the take-out did not fail: nothing is tested")
+        #expect(await failing.failed == 1, "not one read failed: nothing is tested")
+        #expect(await relaunched.session.sharedHead(vaultID) == head, "the head moved: S65 alone would hold")
         let settled = try await relaunched.session.item(id: bank.id)
         #expect(settled.field(.password)?.value == "bank-password", "the demoted member's late write was kept")
     }
