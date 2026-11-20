@@ -366,8 +366,8 @@ extension VaultSession {
                 let requests = sharedReplayRequests(vaultID)
                 // A take-out that returned with nothing decided (no basis could be worked out, `judgedBasis`) leaves
                 // it owed: this replay publishes nothing either, as the first pass did not (Z270), and the vault is
-                // held below. Merged so at round 25, for every publishing pass of this branch's `runSync`: the
-                // first, which hands on after a reset (`handingOn`), and this one, postponed or not (`replayPostponed`).
+                // held below. Merged so at round 25, for every publishing pass of this branch's `runSync`: the first,
+                // which hands on after a reset (`handingOn`), and this one, postponed or not (`replayPostponed`).
                 let owedStill = takeOutsOwed.contains(vaultID)
                 let replayPublishing = shared.publishing && !carrying.contains(vaultID) && !owedStill
                 if owedStill, shared.publishing { owedUnpublished.insert(vaultID) }
