@@ -47,9 +47,10 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     case snapshotWithheldForReview
     /// Versions kept aside for the person to look at (`quarantined` and `heldAside`).
     case keptAside(Int)
-    /// This device's deletions are not going out, because an item it moved or made has reached nobody else: it is in
-    /// a shared vault this account may not write to now, or one not set up here, or was held aside
-    /// (`AccountSyncReport.deletionsHeldBack`).
+    /// This device's deletions are not going out, because an item it moved, made or changed has reached nobody else:
+    /// it is in a shared vault this account may not write to now, or one not set up here, or was held aside
+    /// (`AccountSyncReport.deletionsHeldBack`). "Changed" since the review of round 25 (Z278): an edit made over a
+    /// write that stops counting is held aside as this device's own, and holds the deletions back like a move's copy.
     case deletionsHeldBack
     /// This device's deletions, in every vault, are not going out because these items of a shared vault hold an edit
     /// that has reached nobody else, made under an earlier identity of this device or by a device that is not counted
@@ -152,9 +153,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .keptAside(let count):
             return "\(count) change(s) were held aside for you to review. See Held-Aside Changes."
         case .deletionsHeldBack:
-            return "Deletions made on this device are waiting. Something it moved or added has not reached your "
-                + "other devices: it is in a shared vault this device cannot write to now, or was held aside. They "
-                + "go out once it has, or once you discard it under Held-Aside Changes."
+            return "Deletions made on this device are waiting. Something it moved, added or changed has not reached "
+                + "your other devices: it is in a shared vault this device cannot write to now, or was held aside. "
+                + "They go out once it has, or once you discard it under Held-Aside Changes."
         case .copiesReachedNobody(let copies):
             let shown = copies.prefix(3).map(\.phrase)
             let more = copies.count > shown.count ? " and \(copies.count - shown.count) more" : ""

@@ -239,6 +239,22 @@ struct WordingTests {
         #expect(SyncSummary(report).notices.contains(.deletionsHeldBack))
     }
 
+    /// Review of round 25 (Z278, finding 6, pre-existing): an edit this device made over a write that stops counting
+    /// is taken out and held aside as its own (Z44), and holds every deletion back like a move's copy, under the
+    /// generic notice, which said "Something it moved or added": untrue of an edit. It says changed too, and still
+    /// names the way out.
+    @Test("the generic held-back notice is true of an edit held aside, not only of a move or an addition")
+    func deletionsHeldBackWording() {
+        var report = AccountSyncReport()
+        report.deletionsHeldBack = [UUID()]
+        #expect(SyncSummary(report).notices.contains(.deletionsHeldBack))
+        let text = SyncNotice.deletionsHeldBack.text
+        #expect(text.contains("Something it moved, added or changed has not reached your other devices"))
+        #expect(!text.contains("moved or added has"), "an edit held aside is neither moved nor added")
+        #expect(text.contains("or was held aside"))
+        #expect(text.contains("once you discard it under Held-Aside Changes"))
+    }
+
     /// Review of round 25 (Z273): the notice said "and so do its changes in that vault" where the vault's first pass,
     /// not owed, had published and only the replay's take-out failed, beside a headline saying changes were sent.
     /// Where any such vault sent some in the sync, it says only that changes made there may wait; the deletions wait
