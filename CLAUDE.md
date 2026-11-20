@@ -795,8 +795,12 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   A state read that throws counts as work to carry, and a vault whose re-record fails merges nothing first (Z254); the
   take-out does not run on a state it cannot read (Z258), and a take-out that began for a judged basis and did not
   finish leaves it unsettled by any replay until one has (`takeOutsOwed`, Z262; a replay whose take-out throws waits);
-  while it is owed the vault publishes nothing in its first pass (Z270), and one still owed after the replay loop holds
-  every deletion, named (`takeOutUnfinished`, its own notice, Z268).
+  while it is owed the vault publishes nothing in its first pass (Z270) or its replay (Z276), and one still owed after
+  the replay loop holds every deletion, named (`takeOutUnfinished`, its own notice, Z268; it says the vault's changes
+  wait only where `takeOutUnfinishedSentNothing` holds every such vault, Z273). A take-out saves the judged head
+  unsettled before its first row goes (Z274), so a relaunch replays what it took out: never let a take-out remove a
+  row while the saved head still reads settled. The rebuilding guard's clearing of an owed entry is what lets a rebuild
+  end (Z275): keep it.
   Never decide a carry or a take-out on a `try?` read, and never let a pass settle a basis its take-out did not act
   on. A key read that throws is never "no key" (`ownDeviceKey(of:)`, Z265): only an absent key registers a new device,
   and an unlocked sync held back by the key alone says so (`ownDeviceKeyWait`), never "when you unlock" (Z264), as does

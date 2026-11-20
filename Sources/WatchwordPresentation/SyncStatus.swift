@@ -136,7 +136,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "over. It tries again at each sync. Nothing has been lost."
         case .deviceKeyUnreadable:
             // "Until it can", not "changes were downloaded": a sync stopped before it downloaded anything (a reset
-            // store, review of round 25, Z271) can stand beside this; worded as PR #22 words it.
+            // store, found merging round 24 into PR #22, Z271) can stand beside this; worded as PR #22 words it.
             return "This device could not read its own key from the Keychain, which can happen while the device is "
                 + "locked. Until it can, changes are downloaded, and none are applied or sent. It tries again at each "
                 + "sync. Nothing has been lost."

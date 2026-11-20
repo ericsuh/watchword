@@ -726,16 +726,15 @@ Z265): only a key the Keychain says is absent registers this installation as a n
 download. An unlocked sync held back by the key alone says which (`AccountSyncReport.ownDeviceKeyWait`: the key could
 not be read, or the device is still registering), worded as such and never "when you unlock" (Z264), and so does one
 held back by an incomplete move (`movePendingWhileUnlocked`: applied once the device has finished moving its sync
-records, Z271). And every vault
-state, stash, released deletion and chain row the sync signs is checked, synchronously before its signature, against
-what the sync began with (`SyncStateWrites`: the device ID, the lock epoch, and that it began as a writer; PR #22's
-V66), so a sync that outlives a lock, an unlock or a new ID saves none of what it loaded for the old. The epoch clause
-carries the other two across the awaits between a check and the store's write (Z255). Its cost: a lock and an unlock
-between a push's create and its save leave the segment published and the state unsaved, so the next sync reports its
-place taken (`ownStreamConflict`) and holds deletions for that sync, and the one after recovers (Z257). An unlock that
-registers a restored device and makes, or waits for, its move during a sync begun locked finds every vault's state as it
-left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands the unlock after the decision,
-`lockedSyncDecidesOnTheAccountAfterItsAwaits` before it).
+records, Z271). And every vault state, stash, released deletion and chain row the sync signs is checked, synchronously
+before its signature, against what the sync began with (`SyncStateWrites`: the device ID, the lock epoch, and that it
+began as a writer; PR #22's V66), so a sync that outlives a lock, an unlock or a new ID saves none of what it loaded for
+the old. The epoch clause carries the other two across the awaits between a check and the store's write (Z255). Its
+cost: a lock and an unlock between a push's create and its save leave the segment published and the state unsaved, so
+the next sync reports its place taken (`ownStreamConflict`) and holds deletions for that sync, and the one after
+recovers (Z257). An unlock that registers a restored device and makes, or waits for, its move during a sync begun locked
+finds every vault's state as it left it (Z249, Z253; `lockedSyncAcrossTheUnlocksRegistration` lands the unlock after the
+decision, `lockedSyncDecidesOnTheAccountAfterItsAwaits` before it).
 
 **Merger.** `ItemRecordMerger` (in `WatchwordSync`, portable) is the one `RecordMerger` for items: it opens both
 versions through an `ItemSealer`, checks that they are versions of one item, calls `ItemMerge.merge` and seals the
@@ -998,11 +997,16 @@ take-out that did not finish leaves its judged basis unsettled: no replay settle
 begun for it has not ended normally (`takeOutsOwed`), and a replay whose take-out throws waits for the next sync
 (Z262). Settled after one, every later take-out returned at its first guard, and a demoted member's late write merged
 before the demotion was known stayed current here for good. While a vault's take-out is owed, its first pass publishes
-nothing, since what this device holds there may be built on the write to be taken out (Z270); a vault still owed after
-the replay loop, or whose replay's take-out threw, holds every deletion back for that sync and is named
-(`AccountSyncReport.takeOutUnfinished`, its own notice, never `deletionsHeldBack`'s wording, Z268). Only a take-out that
-finishes ends it, and every sync that may write runs one. A take-out owed and found at the judged basis (one that took
-rows out before it threw, the basis since come back) asks for the replay that rebuilds them (Z269). But a row
+nothing, since what this device holds there may be built on the write to be taken out (Z270), nor does its replay
+(Z276); a vault still owed after the replay loop, or whose replay's take-out threw, holds every deletion back for that
+sync and is named (`AccountSyncReport.takeOutUnfinished`, its own notice, never `deletionsHeldBack`'s wording, Z268),
+which says its changes there wait only where nothing of this device's went out there in the sync
+(`takeOutUnfinishedSentNothing`), and otherwise that they may (Z273). Only a take-out that finishes ends it, and every
+sync that may write and reaches the take-out runs one (a disputed vault, and a sync a transport failure stops, do not,
+and neither publishes, Z277). Before its first row goes, a take-out saves the judged head unsettled, so that rows it
+took out before it threw are rebuilt by a replay after any relaunch, whatever the basis does, not only while
+`takeOutsOwed` remembers it (Z274); a take-out owed and found at the judged basis asks for the replay too (Z269), and
+the rebuilding guard's clearing of an owed entry is what lets a rebuild end (Z275). But a row
 is read only where it can decide something (Z239): by a move only where no state verifies, and to add to it what the
 vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault that may be shared
 whose state does not verify, or that has none (`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248),
@@ -1798,9 +1802,11 @@ Not solved here, and to be decided with integration:
   entry naming this device that the sync state does not know holds the deletions back, as before Z54, until the
   quarantine holds none; a quarantine that cannot be read holds them back and forgets nothing. A shared
   vault's second replay in a sync defers deletions like every other pass, and deletions go out after the replays
-  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so;
-  where the cause is a copy nobody received (an edit of a non-committing device ID of the account's registry, Z170),
-  `copiesNobodyReceived` names the items, and the summary names each by title and vault with what releases it (Z171).
+  (Z55). While they are held, `AccountSyncReport.deletionsHeldBack` names the vault and the sync summary says so, as
+  something this device moved, added or changed that has not reached the others (an edit made over a write that stops
+  counting is held aside as this device's own as well, Z278); where the cause is a copy nobody received (an edit of a
+  non-committing device ID of the account's registry, Z170), `copiesNobodyReceived` names the items, and the summary
+  names each by title and vault with what releases it (Z171).
 - **A departed account's log.** What is inside a cut can be checked only against the objects it names, so a
   departed account's segments must not be collected while a device may still need them to judge a cut, or the cut
   must carry what is needed to judge without them.

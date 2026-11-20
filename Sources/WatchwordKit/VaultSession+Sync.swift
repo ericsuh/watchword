@@ -111,7 +111,7 @@ extension VaultSession {
             }
         }
         // Unlocked, and download-only for a move of this installation's sync records that is incomplete: said as such,
-        // never "when you unlock" (review of round 25, Z271, as Z264 for the key).
+        // never "when you unlock" (found merging round 24 into PR #22, Z271, as Z264 for the key).
         report.movePendingWhileUnlocked = keys != nil && report.deviceMigrationIncomplete
         // What this sync's engines, its carry and its re-record may save of a vault's state, decided here with
         // `mayWrite` and checked again as each state or stash is signed (Z253, as PR #22's V66): only while the lock
@@ -194,7 +194,8 @@ extension VaultSession {
         // Z262) as their first pass runs: that pass publishes nothing, since what this device holds there may still be
         // built on a write the take-out is to take out, and every other device would hold such a version aside (S44);
         // the replay's take-out, or the next sync's, decides. Not to wedge: only a take-out that finishes ends it, and
-        // every sync that may write runs one (review of round 24, Z270).
+        // every sync that may write and reaches the take-out runs one (review of round 24, Z270; a disputed vault and
+        // a sync a transport failure stops skip it, and neither publishes, Z277).
         var owedUnpublished: Set<UUID> = []
         for vaultID in try await vaultDirectory(record).keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var vaultReport: SyncReport
@@ -1329,8 +1330,9 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// otherwise, locked included, where "when you unlock" is what is true.
     public var ownDeviceKeyWait: OwnDeviceKeyWait?
     /// The session was unlocked, and this sync only downloaded because a move of this installation's sync records to
-    /// its new device ID is incomplete (`deviceMigrationIncomplete`, review of round 25, Z271): "when you unlock" is
-    /// untrue to a person whose vault is open. `false` while locked, where the next unlock tries the move again.
+    /// its new device ID is incomplete (`deviceMigrationIncomplete`, found merging round 24 into PR #22, Z271): "when
+    /// you unlock" is untrue to a person whose vault is open. `false` while locked, where the next unlock tries the
+    /// move again.
     public var movePendingWhileUnlocked = false
     /// The shared vaults where this device began taking out what no longer counts (`takeOutWhatNoLongerCounts`) and
     /// could not finish, a local store failing or a lock during it (review of round 24, Z268; review of round 25,

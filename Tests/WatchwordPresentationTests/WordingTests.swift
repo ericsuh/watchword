@@ -143,9 +143,9 @@ struct WordingTests {
         #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
     }
 
-    /// Review of round 25 (Z271): an unlocked sync held back by a restore's incomplete move said "will be applied when
-    /// you unlock" to a person whose vault was open, as Z264 found for the key. It says what it waits for; the move's
-    /// own notice stays; locked, the line is as before.
+    /// Found merging round 24 into PR #22 (Z271): an unlocked sync held back by a restore's incomplete move said "will
+    /// be applied when you unlock" to a person whose vault was open, as Z264 found for the key. It says what it waits
+    /// for; the move's own notice stays; locked, the line is as before.
     @Test("an unlocked sync held back by a move says it waits for the move, not for an unlock")
     func movePendingWhileUnlocked() {
         var vault = SyncReport()
@@ -202,7 +202,7 @@ struct WordingTests {
     func ownDeviceKeyWording() {
         #expect(SyncNotice.deviceKeyUnreadable.text.contains("could not read its own key"))
         #expect(!SyncNotice.deviceKeyUnreadable.text.contains("regist"))
-        // A sync stopped before it downloaded anything can stand beside it (review of round 25, Z271).
+        // A sync stopped before it downloaded anything can stand beside it (found merging round 24 into PR #22, Z271).
         #expect(SyncNotice.deviceKeyUnreadable.text.contains("Until it can, changes are downloaded"))
         #expect(!SyncNotice.deviceKeyUnreadable.text.contains("were downloaded"))
         #expect(SyncNotice.deviceRegistering.text.contains("still registering"))
