@@ -206,8 +206,8 @@ extension AdversarialSharedVaultTests {
         #expect(await raw.loadState(vaultID: otherVault)?.restoredUnpublished.isEmpty == false)
 
         // The chain rows gone, and the first vault's state damaged: the other vault's state names the earlier ID.
-        try await member.state.setValue(nil, for: .restoredChain, vaultID: vaultID)
-        try await member.state.setValue(nil, for: .restoredChain, vaultID: otherVault)
+        await member.state.setValue(nil, for: .restoredChain, vaultID: vaultID)
+        await member.state.setValue(nil, for: .restoredChain, vaultID: otherVault)
         var damaged = try #require(await raw.loadState(vaultID: vaultID))
         damaged.authenticator = Array(repeating: 0, count: damaged.authenticator.count)
         await raw.tamper(damaged)

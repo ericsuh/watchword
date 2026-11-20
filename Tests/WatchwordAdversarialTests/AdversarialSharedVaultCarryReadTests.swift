@@ -10,7 +10,8 @@ import WatchwordTestSupport
 
 // The review of round 22 (docs/06-adversarial-review.md Z254) and of PR #22's seventh merge (Z258): reads of a vault's
 // sync state that decide whether a restore's work is carried before the vault merges, or is left alone by the
-// take-out, where one that failed was read as "nothing there". In the suite "shared vaults through the session".
+// take-out, where one that failed was read as "nothing there"; and the review of round 23 (Z262): a take-out that
+// failed so is not settled away by the replay after it. In the suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
     /// Z210's setting: a member's unpublished reorder of a shared item and the owner's concurrent reorder, with IDs
     /// that order so that only a carry made before the merge keeps the member's order, and the member's store restored
@@ -190,5 +191,71 @@ extension AdversarialSharedVaultTests {
         for _ in 0..<2 { _ = try await restored.session.syncAll() }
         try await owner.session.sync()
         #expect((try? await owner.session.item(id: copy.id)) != nil, "the copy never reached the owner")
+    }
+
+    /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, and a sync
+    /// state store that fails the take-out's one read (a busy or damaged database) in a sync where a replay was
+    /// already owed (a key received, a stream's account learnt); the review of round 23 (Z262, a regression of Z258).
+    /// The take-out threw before taking anything out, the vault's first pass was the owed replay, and
+    /// `sharedEngineDidRun` settled the judged basis after it: every later take-out returned at its first guard, and
+    /// the late write stayed current on this device for good, where every other device holds it aside (§8.7 "taken
+    /// out, not only kept out"), to be sealed into this device's later merges as its own work. A take-out that did not
+    /// finish now leaves the basis unsettled (`takeOutsOwed`), and the next take-out, here the replay's in the same
+    /// sync, acts on it.
+    @Test("a take-out that fails on its state read is not settled away by the replay after it")
+    func takeOutThatFailedIsNotSettledAway() async throws {
+        let household = SharedVaultHousehold()
+        let owner = try await household.account(seed: 900)
+        let (demoted, demotedView) = try await household.withheldAccount(seed: 917)
+        let (member, memberView) = try await household.withheldAccount(seed: 934)
+        let vaultID = try await owner.session.createVault(name: "Household").id
+        try await owner.session.shareVault(vaultID)
+        try await owner.invite(demoted, to: vaultID, as: .readWrite, owner: owner)
+        try await owner.invite(member, to: vaultID, as: .readWrite, owner: owner)
+        let bank = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, demoted, member])
+        var before = try await demoted.session.item(id: bank.id)
+        before.title = "Written while read-write"
+        try await demoted.session.save(before)
+        try await Self.syncAll([demoted, owner, member])
+
+        // The demotion is withheld from both members; the demoted member writes late, and the member merges it.
+        await demotedView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        await memberView.withholdNew(under: SharingObjectLocation.vaultPrefix(vaultID))
+        try await owner.session.changeRole(of: demoted.accountID, in: vaultID, to: .readOnly)
+        try await demoted.session.save(
+            Self.setting(.password, to: "late-password", in: try await demoted.session.item(id: bank.id)))
+        try await demoted.session.sync()
+        try await member.session.sync()
+        #expect(try await member.session.item(id: bank.id).field(.password)?.value == "late-password")
+        try await owner.session.sync()
+
+        // The member's device again, over a state store that fails one read of the vault's state: the third of the
+        // next sync, which is the take-out's, with a replay already owed.
+        await member.session.lock()
+        let sync = try #require(member.vault.sync)
+        let failing = LoadFailingSyncState(base: sync.state, vaultID: vaultID)
+        let relaunched = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock,
+            sync: SyncSettings(state: failing, transport: sync.transport, configuration: sync.configuration),
+            seed: 935, deviceKeys: member.vault.deviceKeys)
+        await relaunched.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: household.directory))
+        try await relaunched.session.unlock(password: TestVault.password)
+        await memberView.reveal()
+        _ = try? await relaunched.session.sharedVaultStatus(vaultID)
+        await relaunched.session.requestReplay(vaultID)
+        #expect(await relaunched.session.replayIsRequested(vaultID), "no replay owed: nothing is tested")
+        await failing.arm(skipping: 2)
+        let first = try? await relaunched.session.syncAll()
+        #expect(first?.sharing[vaultID]?.failure != nil, "the take-out did not fail: nothing is tested")
+        #expect(await failing.failed == 1, "not one read failed: nothing is tested")
+        for _ in 0..<3 {
+            _ = try await relaunched.session.syncAll()
+            try await owner.session.sync()
+        }
+        let settled = try await relaunched.session.item(id: bank.id)
+        #expect(settled.field(.password)?.value == "bank-password", "the demoted member's late write was kept")
     }
 }

@@ -154,6 +154,10 @@ extension VaultSession {
             if vault.replayRequests != requestsBefore {
                 vault.needsReconcile = true
                 vault.index.judgedHead = nil
+            } else if takeOutsOwed.contains(vaultID) {
+                // A take-out begun for this basis did not finish: the basis is not settled, and the replay stays asked
+                // for, so that the next take-out, in this sync or the next, acts on it (review of round 23, Z262).
+                vault.needsReconcile = true
             } else if vault.indexRebuilding {
                 // The index is whole again: now take out what no longer counts, and replay once more (S41).
                 vault.indexRebuilding = false
@@ -178,9 +182,11 @@ extension VaultSession {
     }
 
     /// Before a replay that this sync asks for: what no longer counts, taken out if the vault's items were last
-    /// judged against another head (or the index says it must be done again).
-    func prepareSharedReplay(_ vaultID: UUID) async {
-        try? await takeOutWhatNoLongerCounts(vaultID)
+    /// judged against another head (or the index says it must be done again). A take-out that throws throws here, and
+    /// the replay waits for the next sync (review of round 23, Z262): read with `try?`, it was followed at once by the
+    /// replay, which settled the basis the take-out had not acted on.
+    func prepareSharedReplay(_ vaultID: UUID) async throws {
+        try await takeOutWhatNoLongerCounts(vaultID)
     }
 
     /// Shared vaults whose log must be replayed again in this sync: something learnt while merging (a key, a
@@ -1609,17 +1615,23 @@ extension VaultSession {
         let head = vault.ledger.state.hash.bytes
         guard vault.index.judgedHead != basis else {
             sharing.vaults[vaultID]?.takenOutAgainst = head
+            takeOutsOwed.remove(vaultID)
             return
         }
         guard !vault.indexRebuilding else {
             // Never judged against an index being rebuilt: the replay rebuilds it first.
             sharing.vaults[vaultID]?.needsReconcile = true
+            takeOutsOwed.remove(vaultID)
             return
         }
+        // Owed until this take-out ends normally: one that throws below leaves the basis for a replay not to settle
+        // (`sharedEngineDidRun`, review of round 23, Z262).
+        takeOutsOwed.insert(vaultID)
         // What this device wrote and has not published, as its signed sync state has it (Z20). A state that cannot be
         // read throws, and the take-out is left to the next sync, the judged head unmoved (review of PR #22's seventh
-        // merge, Z258): read as none, it judged a restore's uncarried rows, which no segment carried, and took them out
-        // into the quarantine, where nothing carries them.
+        // merge, Z258) and unsettled by any replay until a take-out has run (`takeOutsOwed`, Z262): read as none, it
+        // judged a restore's uncarried rows, which no segment carried, and took them out into the quarantine, where
+        // nothing carries them.
         let ownDevice = account?.deviceID
         let state = try await syncState?.loadState(vaultID: vaultID)
         let published = state?.published ?? [:]
@@ -1665,6 +1677,7 @@ extension VaultSession {
         // Only if the head did not move while the rows were judged (each judgement suspends).
         let unmoved = sharing.vaults[vaultID]?.ledger.state.hash.bytes == head
         sharing.vaults[vaultID]?.takenOutAgainst = unmoved ? head : nil
+        takeOutsOwed.remove(vaultID)
     }
 
     // MARK: - Taking a write cut

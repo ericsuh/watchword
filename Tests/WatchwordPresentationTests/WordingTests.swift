@@ -149,6 +149,47 @@ struct WordingTests {
         #expect(!rest.lowercased().contains("unlock"), "the message is read in the open, unlocked app")
     }
 
+    /// Review of round 23 (Z264): an unlocked sync that only downloaded because this device's own key could not be
+    /// read, or because it has still to register under a key of its own (a restored store), said "will be applied when
+    /// you unlock" to a person whose vault was open. Each says why, and that it is tried again; locked, the line is as
+    /// before.
+    @Test(
+        "a sync held back by this device's own key says why, not when you unlock",
+        arguments: zip(
+            [OwnDeviceKeyWait.unreadable, .registering],
+            [SyncNotice.deviceKeyUnreadable, .deviceRegistering]))
+    func ownDeviceKeyWait(wait: OwnDeviceKeyWait, notice: SyncNotice) {
+        var vault = SyncReport()
+        vault.deferredUntilUnlock = true
+        var report = AccountSyncReport()
+        report.vaults[UUID()] = vault
+        let locked = SyncSummary(report)
+        #expect(locked.headline == "Changes were downloaded and will be applied when you unlock.")
+        #expect(!locked.notices.contains(notice))
+
+        report.ownDeviceKeyWait = wait
+        let summary = SyncSummary(report)
+        #expect(!summary.headline.contains("unlock"), "an open vault is told to unlock")
+        #expect(summary.headline.contains("downloaded"))
+        #expect(summary.notices.contains(notice))
+        #expect(summary.notices.filter { $0 == .deviceKeyUnreadable || $0 == .deviceRegistering }.count == 1)
+        let text = notice.text
+        #expect(text.contains("none were applied or sent") || text.contains("none are applied or sent"))
+        #expect(text.contains("Nothing has been lost"))
+        #expect(text.contains("tries again at each sync"))
+        #expect(!text.contains("when you unlock"))
+        #expect(!text.contains("enrol"), "a key that could not be read is a retry, never a reason to enrol again")
+    }
+
+    @Test("a key that could not be read is a retry, and only a registration under way speaks of registering")
+    func ownDeviceKeyWording() {
+        #expect(SyncNotice.deviceKeyUnreadable.text.contains("could not read its own key"))
+        #expect(!SyncNotice.deviceKeyUnreadable.text.contains("regist"))
+        #expect(SyncNotice.deviceRegistering.text.contains("still registering"))
+        #expect(SyncNotice.deviceRegistering.text.contains("each sync and each unlock"))
+        #expect(!SyncNotice.deviceRegistering.text.contains("was restored"), "a device may be registering unrestored")
+    }
+
     /// Review of round 20 (Z240): a chain row of a restore's earlier device IDs that the sharing store cannot read held
     /// the deletions back, or the move, under the generic notice (something moved has not reached the other devices)
     /// or none, both untrue. The vaults it holds are explained by a notice of their own.

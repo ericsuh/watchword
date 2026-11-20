@@ -841,8 +841,13 @@ are read before awaits (Z253): the account was read at the sync's start, and an 
 the decision, while registering a store restored onto other hardware as a new device, left the sync deciding as the
 earlier ID, still active with no move recorded, and writing under it while the unlock made the move. So `mayWrite`
 also needs a key for the sync's device ID on this installation, read as the last await before the decision (a restored
-store has none for its earlier ID, and never gets one back), and no registration under way. A download remembers what
-it learnt of conflict copies in the vault's state (§7.5), but every vault state, stash, released deletion and chain row
+store has none for its earlier ID, and never gets one back), and no registration under way. That read keeps a failure
+apart from an absent key (`ownDeviceKey(of:)`, Z265): only a key the Keychain says is absent registers this
+installation as a new device, and either makes the sync a download. An unlocked sync held back by the key alone says
+which (`AccountSyncReport.ownDeviceKeyWait`: the key could not be read, or the device is still registering), worded as
+such and never "when you unlock" (Z264); a move pending is said by its own notice and leaves it unset, and a store reset
+or one suspected (§7.10) is said beside it. A download remembers what it learnt of conflict copies in the vault's state
+(§7.5), but every vault state, stash, released deletion and chain row
 the sync signs goes through what the sync began with (`SyncStateWrites`: the device ID, the lock epoch, and that it
 began as a writer), checked synchronously before its signature (this branch's V66; PR #23's Z253, Z256 and Z257 are the
 same mechanism, ported under the same names and extended to the release, the carry and the chain row). So a sync that
@@ -1164,19 +1169,23 @@ state that fails while the chain is read (Z245, a state's failure not reported a
 cannot be read when a sync asks whether it has a restore's work to carry counts as having some, and a vault whose state
 does not verify and whose re-record of what a restore left fails merges nothing in that sync either: merged first, a row
 still holding the earlier ID's work becomes the new ID's before the carry (Z254). The take-out, which leaves those rows
-alone, does not run on a state it cannot read (Z258). But a row is read only where it can decide something (Z239): by a
-move only where no state verifies, and to add to it what the vault's entries name, and by the hold, the report, the
-re-record and Stop Waiting only for a vault that may be shared whose state does not verify, or that has none
-(`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248), so a sharing store that cannot read the rows
-holds back only what depends on them, and an ordinary restore reads none, nor does a device never restored while its
-shared vaults' states verify. One whose shared vault's state is lost or damaged reads every shared vault's row, the
-chain being a union across vaults (Z216), and holds while one cannot be read (Z250). Where one is needed and cannot be
-read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never restored,
-Z240, Z250); the move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when
-the vault opens here and the row is carried, when a version that holds none of the work replaces the row, when the vault
-is deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync
-reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault
-that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
+alone, does not run on a state it cannot read (Z258), and a take-out that did not finish leaves its judged basis
+unsettled: no replay settles a vault's basis while a take-out begun for it has not ended normally (`takeOutsOwed`,
+beside S65's `takenOutAgainst`, which a take-out that throws leaves as it was), and a replay whose take-out throws waits
+for the next sync (Z262). Settled after one, every later take-out returned at its first guard, and a demoted member's
+late write merged before the demotion was known stayed current here for good. But a row is read only where it can
+decide something (Z239): by a move only where no state verifies, and to add to it what the vault's entries name, and by
+the hold, the report, the re-record and Stop Waiting only for a vault that may be shared whose state does not verify, or
+that has none (`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248), so a sharing store that cannot
+read the rows holds back only what depends on them, and an ordinary restore reads none, nor does a device never restored
+while its shared vaults' states verify. One whose shared vault's state is lost or damaged reads every shared vault's
+row, the chain being a union across vaults (Z216), and holds while one cannot be read (Z250). Where one is needed and
+cannot be read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never
+restored, Z240, Z250); the move's own notice says only that it is tried again at each sync and unlock (Z243). The hold
+ends when the vault opens here and the row is carried, when a version that holds none of the work replaces the row, when
+the vault is deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and
+the sync reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for
+a vault that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
 `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
 owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
 later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the

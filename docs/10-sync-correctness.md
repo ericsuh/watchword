@@ -652,7 +652,11 @@ only as an ID this installation holds a key for, decided after its last await, w
 signs a state, a stash, a released deletion or a chain row only for the ID and the keys it began with
 (`SyncStateWrites`: this branch's V66 and PR #23's Z253, one mechanism), which also keeps a sync begun before the move
 was recorded from saving a state under it. A state that cannot be read, or a re-record that fails, makes a vault wait
-for its carry rather than merge first (Z254), and the take-out leaves `o`'s rows alone then too (Z253, Z258).
+for its carry rather than merge first (Z254), and the take-out leaves `o`'s rows alone then too (Z253, Z258). A
+take-out that does not finish keeps the judged basis from being settled by the replay after it (Z262, beside S65's
+check of the head the take-out saw): settled, the head that made a late write stop counting was never acted on here, and
+the write, current on this device alone, went into its later merges as its own work, where every other device holds it
+aside by `J`.
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,
