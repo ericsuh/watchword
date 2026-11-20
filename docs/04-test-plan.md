@@ -864,6 +864,11 @@ that fails after a first pass that published holds deletions (`replayTakeOutFail
 key with a registration under way reports `.registering` (`heldKeyWhileRegistering`, Z272). In "account enrolment and
 device registry", `incompleteMigrationPublishesNothing` checks `movePendingWhileUnlocked` (Z271). In `WordingTests`,
 `takeOutUnfinished` (Z268, Z270), `movePendingWhileUnlocked` and `ownDeviceKeyWording` (Z271).
+Merged into the hygiene branch: `owedTakeOutPublishesNothingInItsReplay` ("shared vaults through the session") checks
+that a vault still owed after its replay's take-out decided nothing (the registry unreadable for that moment) publishes
+nothing in the replay, is named and holds the deletion, and publishes again once a take-out finishes (Z270's merge
+note); `storeResetOverAMovePendingAndAnUnfinishedTakeOut` (`WordingTests`) pins the headline's precedence, a reset store
+over a move pending over the key's wait, with `takeOutUnfinished` beside the reset (Z271's).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

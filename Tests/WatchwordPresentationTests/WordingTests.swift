@@ -241,6 +241,42 @@ struct WordingTests {
         #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
     }
 
+    /// Merge of round 25 into the hygiene branch (Z271 beside §7.10, Z268): which headline wins. A sync that stopped
+    /// at a reset store downloaded nothing, so its headline is the reset's, over an unlocked sync held back by a move
+    /// pending, whose own notice stands beside the question; a move pending is said over the key's wait, which it
+    /// leaves `nil` in a real report; and a take-out that did not finish is named beside the reset, with no notice
+    /// saying changes were downloaded or that something moved reached nobody.
+    @Test("a reset store's headline comes before a move pending, and a move pending before the key's wait")
+    func storeResetOverAMovePendingAndAnUnfinishedTakeOut() {
+        var vault = SyncReport()
+        vault.deferredUntilUnlock = true
+        var report = AccountSyncReport()
+        let vaultID = UUID()
+        report.vaults[vaultID] = vault
+        report.deviceMigrationIncomplete = true
+        report.movePendingWhileUnlocked = true
+        report.transportFailure = .storeReset
+        report.takeOutUnfinished = [vaultID]
+        let summary = SyncSummary(report)
+        #expect(
+            summary.headline == "Sync storage was emptied or reset. Nothing was sent, and nothing was uploaded again.")
+        #expect(summary.notices.contains(.storageNeedsUpload))
+        #expect(summary.notices.contains(.deviceMigrationIncomplete))
+        #expect(summary.notices.contains(.takeOutUnfinished))
+        #expect(!summary.notices.contains(.deletionsHeldBack))
+        for notice in summary.notices { #expect(!notice.text.contains("were downloaded")) }
+        // The upload the question leads to is refused while the move is pending (V51), in words for an open app.
+        let refused = ErrorWording.message(for: VaultError.deviceMigrationIncomplete)
+        #expect(refused.contains("tried again at each sync and each unlock"))
+
+        report.transportFailure = nil
+        #expect(
+            SyncSummary(report).headline
+                == "Changes were downloaded and will be applied once this device has finished moving its sync records.")
+        let moving = SyncSummary.describe(vault, ownDeviceKeyWait: .unreadable, movePending: true)
+        #expect(moving.contains("finished moving its sync records"), "the key's wait was said over the move")
+    }
+
     /// Review of round 24 (Z268): a shared vault's take-out that did not finish holds every deletion back, and the
     /// summary said nothing of it. It says so in its own words: not the generic notice, whose "something moved has not
     /// reached your other devices" is untrue there.
