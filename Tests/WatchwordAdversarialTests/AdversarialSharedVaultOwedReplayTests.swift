@@ -144,9 +144,11 @@ extension AdversarialSharedVaultTests {
     }
 
     /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, and a vault
-    /// whose take-out is owed only from its replay on, its first pass not owed: in production a carried vault's, whose
-    /// first pass is the carry's (review of PR #22's eighth merge, finding 3), stood for by a test hook during the
-    /// first pass; with this account's registry unreadable when the replay's take-out asks for the judged basis, so
+    /// whose take-out is owed only from its replay on, its first pass not owed and publishing: in production a
+    /// take-out run re-entrantly between the first pass and the replay, by a person's removal or rotation during the
+    /// sync (`carryOutRotation`'s reseal; review of PR #22's ninth merge, V75), stood for by a test hook during the
+    /// first pass (a carried vault's first pass is the carry's and publishes nothing, so there the notice says the
+    /// changes wait); with this account's registry unreadable when the replay's take-out asks for the judged basis, so
     /// that it decides nothing. The replay publishes nothing and asks nothing of the vault's unpublished work
     /// (`!owedStill`), so only its joining `owedUnpublished` names it and holds every deletion: without that, the vault
     /// was named nowhere and the deletions went out after what the owed take-out had still to act on (Z262). Its first
@@ -253,6 +255,51 @@ extension AdversarialSharedVaultTests {
         #expect(try await setting.member.vault.store.record(key)?.keyID == current, "the item stayed under the old key")
         let stale = try await relaunched.session.sharedVault(vaultID).ledger.recordsToReseal(
             in: try await relaunched.session.sharedInventory(vaultID))
+        #expect(stale.isEmpty, "records stayed under the old key after the next sync")
+    }
+}
+
+// The review of PR #22's ninth merge (finding 6): a person's rotation carried out while an automatic sync is under way.
+extension AdversarialSharedVaultTests {
+    /// Threat: a demoted member (A4) whose late write this device, an administrator's, merged before it learnt of the
+    /// demotion, and a person's removal or rotation here while an automatic sync is under way (a timer's, §7.9, begun
+    /// after the call's first sync let go of the sync). The rotation goes through: its record is published and
+    /// adopted, and its reseal's take-out takes the late write's row out (S59). The call's own sync then threw
+    /// `syncInProgress`, so the person was told the rotation had failed although it had gone through, and could only
+    /// try again (review of PR #22's ninth merge, V75). The call reports the rotation; the sync after it replays the
+    /// item from what counts and leaves every record under the new key, nothing lost.
+    @Test("a rotation carried out while a sync is under way is reported, and the next sync replays the item")
+    func rotationWhileASyncIsUnderWayIsReported() async throws {
+        let setting = try await Self.owedTakeOut(replayOwed: false, memberRole: .administrator)
+        let (vaultID, session) = (setting.vaultID, setting.relaunched.session)
+        let key = RecordKey(recordID: setting.bank, kind: .item)
+        let oldKey = try await session.sharedVault(vaultID).ledger.state.vaultKeyID
+        try await session.planRotation(.routine, in: vaultID)
+
+        await session.setSyncInFlightForTest(true)
+        let status: RotationStatus
+        do {
+            status = try await session.carryOutRotation(in: vaultID)
+        } catch {
+            await session.setSyncInFlightForTest(false)
+            Issue.record("a rotation that went through was reported as failing: \(error)")
+            return
+        }
+        await session.setSyncInFlightForTest(false)
+        #expect(status == .complete, "the rotation is \(status), not complete")
+        let current = try await session.sharedVault(vaultID).ledger.state.vaultKeyID
+        #expect(current != oldKey, "the rotation's record was not adopted")
+        #expect(
+            (try? await session.item(id: setting.bank)) == nil,
+            "the reseal's take-out took nothing out: nothing is tested")
+
+        // The sync after it replays what the take-out took out, from what counts, under the new key.
+        _ = try await session.syncAll()
+        #expect(try await session.sharedVault(vaultID).plan == nil)
+        #expect(try await session.item(id: setting.bank).field(.password)?.value == "bank-password")
+        #expect(try await setting.member.vault.store.record(key)?.keyID == current, "the item stayed under the old key")
+        let stale = try await session.sharedVault(vaultID).ledger.recordsToReseal(
+            in: try await session.sharedInventory(vaultID))
         #expect(stale.isEmpty, "records stayed under the old key after the next sync")
     }
 }

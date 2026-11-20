@@ -849,7 +849,7 @@ such and never "when you unlock" (Z264). A move pending leaves it unset and is s
 the headline (`movePendingWhileUnlocked`: applied once the device has finished moving its sync records, Z271). A store
 that was reset (§7.10) is said first in the headline, over either, since such a sync downloaded nothing, with the key's
 or the move's notice beside it (merged so at round 25); a reset only suspected is asked about by the next sync that may
-write. A download remembers what it learnt of conflict copies in the vault's state (§7.5), but every vault state, stash,
+write. A download remembers what it learnt of conflict copies in the vault's state (§7.5), but each vault state, stash,
 released deletion and chain row the sync signs goes through what the sync began with (`SyncStateWrites`: the device ID,
 the lock epoch, and that it began as a writer), checked synchronously before its signature (this branch's V66; PR #23's
 Z253, Z256 and Z257 are the same mechanism, ported under the same names and extended to the release, the carry and the
@@ -1194,22 +1194,25 @@ since come back) asks for the replay that rebuilds them (Z269), and records that
 vault, nor any other still in `takeOutsOwed` after the passes (one whose carry did not finish, or whose device ID does
 not commit), sealed again in that sync, by a rotation's reseal step or the catch-up after the logs: the reseal's own
 take-out (S59) would act with no replay after it, and what it took out stood missing until the next sync (V71). A plan
-carried on there still revokes the transport's share and publishes its record, and waits at `.resealing` for the next
-sync, whose take-out, replay and reseal act together; what waits is on the transport under the old key already, and the
-vault publishes nothing while its take-out is owed, so the wait shows a removed member nothing that sealing again at
-once would not. But a row is read only where it can decide something (Z239): by a move only where no state verifies, and
-to add to it what the vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault
-that may be shared whose state does not verify, or that has none (`RestoredChainRead`; Stop Waiting's read guarded as
-the gate's is, Z248), so a sharing store that cannot read the rows holds back only what depends on them, and an ordinary
-restore reads none, nor does a device never restored while its shared vaults' states verify. One whose shared vault's
-state is lost or damaged reads every shared vault's row, the chain being a union across vaults (Z216), and holds while
-one cannot be read (Z250). Where one is needed and cannot be read the sync says so
-(`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never restored, Z240, Z250); the
-move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when the vault opens
-here and the row is carried, when a version that holds none of the work replaces the row, when the vault is deleted or
-this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync reports the rows
-kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault that will not open
-(`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
+carried on there still revokes the transport's share and publishes its record, and waits at `.resealing` until a sync
+whose take-out finishes, where take-out, replay and reseal act together. No owed removal waits for it: nothing is sealed
+again while a removal is owed (S19), so a plan resumed then completes and the removal is planned in the same pass; what
+waits is a leave request, which becomes a departure on this device only at that later sync (V75). What waits to be
+sealed again is either on the transport under the old key already or goes out later inside segments sealed under the
+vault's current key, the new one, and the vault publishes nothing while its take-out is owed, so the wait shows a
+removed member nothing that sealing again at once would not. But a row is read only where it can decide something
+(Z239): by a move only where no state verifies, and to add to it what the vault's entries name, and by the hold, the
+report, the re-record and Stop Waiting only for a vault that may be shared whose state does not verify, or that has none
+(`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248), so a sharing store that cannot read the rows
+holds back only what depends on them, and an ordinary restore reads none, nor does a device never restored while its
+shared vaults' states verify. One whose shared vault's state is lost or damaged reads every shared vault's row, the
+chain being a union across vaults (Z216), and holds while one cannot be read (Z250). Where one is needed and cannot be
+read the sync says so (`AccountSyncReport.restoredChainUnreadable`, worded so that it holds on a device never restored,
+Z240, Z250); the move's own notice says only that it is tried again at each sync and unlock (Z243). The hold ends when
+the vault opens here and the row is carried, when a version that holds none of the work replaces the row, when the vault
+is deleted or this account's membership of it ends (`restoredWorkReleased`: nothing can carry it there, and the sync
+reports the rows kept on this device only, `restoredWorkKeptHere`, Z199), or when the person stops waiting for a vault
+that will not open (`stopWaitingForRestoredWork`, an action of the waiting notice per such vault,
 `SyncNoticeAction.stopWaitingForRestoredWork`, offered and accepted only where the vault has no current key here or its
 owner is disputed, Z205), which leaves the rows on this device alone and marks them so that nothing finds them again;
 later edits of those items reach no member either, and the confirmation says so. Where the bound understates what the
@@ -2312,7 +2315,13 @@ written out against a hostile store. One sync pass, in this order:
    taken out once more before anything is sealed again (S59), because a version sealed under the new key is believed
    by a member who joins later to have been judged with every record up to that key in hand. Where this sync's take-out
    did not finish (`takeOutsOwed`), nothing is sealed again, by a plan or otherwise, since that take-out would have no
-   replay after it in the sync: a plan revokes and publishes, and waits at `.resealing` for the next sync (V71).
+   replay after it in the sync: a plan revokes and publishes, and waits at `.resealing` until a sync whose take-out
+   finishes (V71). An owed removal never waits for such a plan (nothing is resealed while one is owed, so the plan
+   completes first); a leave request does, and becomes a departure on this device only then (V75). A person's removal
+   or rotation (`removeMember`, `rotateVaultKey`) carries its plan out at once, reseal included, then syncs so what
+   it sealed again goes out and what its take-out took out is replayed; where an automatic sync began meanwhile, that
+   sync or the next does both, and the call reports the rotation rather than `syncInProgress`, which said it had failed
+   although it had gone through (V75).
 
 Accepting an invitation passes the ledger the device already holds for that vault ID, if it ever held one
 (`continuing:`), and the owner it knows for it (`knownOwner:`).

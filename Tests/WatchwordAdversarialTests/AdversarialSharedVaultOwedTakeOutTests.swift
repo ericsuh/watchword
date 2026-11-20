@@ -16,9 +16,16 @@ extension VaultSession {
         registrationInFlight = inFlight
     }
 
-    /// For tests: the vault's take-out owed from now on (`takeOutsOwed`), as for a vault whose first pass was not owed
-    /// and whose take-out is owed by its replay: a carried vault's, whose first pass is the carry's and publishes
-    /// nothing.
+    /// For tests: a sync under way (`syncInFlight`), as an automatic one is when it began while a person's removal or
+    /// rotation awaited between its first sync and its last.
+    func setSyncInFlightForTest(_ inFlight: Bool) {
+        syncInFlight = inFlight
+    }
+
+    /// For tests: the vault's take-out owed from now on (`takeOutsOwed`), as for a vault whose take-out became owed
+    /// between its first pass, which was not owed, and its replay: in production a take-out run re-entrantly during
+    /// the sync, by a person's removal or rotation (`carryOutRotation`'s reseal; V72, V75). A carried vault's first
+    /// pass is the carry's and publishes nothing, so there the notice says the changes wait.
     func markTakeOutOwedForTest(_ vaultID: UUID) {
         takeOutsOwed.insert(vaultID)
     }

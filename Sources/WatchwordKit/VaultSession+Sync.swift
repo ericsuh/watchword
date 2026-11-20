@@ -381,6 +381,9 @@ extension VaultSession {
                 let second = try await engine(vaultID).sync(
                     reconcile: true, deferringDeletions: true, publishing: replayPublishing)
                 noteCopyStops(second, in: vaultID)
+                // A belt: a replay that publishes was not owed when it began, so its vault ends the sync unfinished
+                // only through a take-out run re-entrantly during it (a person's removal or rotation, V72, V75), and
+                // there this only says "may wait", the true direction. No test reaches it (`pubreplay` survives).
                 if replayPublishing { publishedIn.insert(vaultID) }
                 // A replay the engine did not begin (the store was reset, §7.10) settles nothing.
                 await sharedEngineDidRun(

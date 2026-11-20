@@ -206,10 +206,15 @@ extension VaultSession {
     /// counts with no replay after it in this sync, so the vault's items stood missing until the next, and the sync
     /// said the take-out had not finished (merged so at round 25, found by `replayLoopTakeOutThatFailsHoldsDeletions`;
     /// the plan's step since the review of PR #22's eighth merge, V71). A plan still revokes the transport's share and
-    /// publishes its record, and is kept at `.resealing`, so another owed removal waits for the next sync to be
-    /// planned. The next sync's take-out and its replay act together, then the reseal. What waits was already on the
-    /// transport under the old key, and the vault publishes nothing while its take-out is owed (Z270), so the wait
-    /// exposes nothing to a removed member that sealing again now would not.
+    /// publishes its record, and is kept at `.resealing` until a sync whose take-out finishes, where the take-out and
+    /// its replay act together, then the reseal. No owed removal waits for such a plan: nothing is sealed again while
+    /// a removal is owed or an outsider holds the key (`recordsToReseal` is empty, S19, Z43), so a plan resumed then
+    /// completes and the removal is planned in the same pass. What a plan at `.resealing` holds back is the leave
+    /// requests (`plan == nil` below): a departure is planned on this device at the next sync whose take-out finishes
+    /// (review of PR #22's ninth merge, V75). What waits is either on the transport under the old key already, or goes
+    /// out later inside segments sealed under the vault's current key, the new one (`syncSeal`), and the vault
+    /// publishes nothing while its take-out is owed (Z270), so the wait shows a removed member nothing that sealing
+    /// again now would not.
     func syncSharedVaultsAfterLogs(account: AccountRecord, reports: inout [UUID: SharedVaultSyncReport]) async {
         guard keys != nil, sharing.settings != nil else { return }
         // Asked as each step is reached: only a take-out that finishes ends it.

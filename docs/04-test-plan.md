@@ -892,6 +892,10 @@ Pinned since that review (V72): a vault owed only from its replay on is named, h
 sent changes (`vaultOwedOnlyFromItsReplayIsNamed`), an owed replay holding a new item is not said in the generic notice
 (`owedReplayHoldsANewItemInItsOwnWords`), and the upload after a reset is refused while a registration is under way
 (`reuploadRefusedWhileRegistering`, "sync with real keys").
+Review of this branch's ninth merge (V75): a person's rotation carried out while an automatic sync is under way is
+reported, not thrown as `syncInProgress`, and the next sync replays what its reseal took out and leaves every record
+under the new key (`rotationWhileASyncIsUnderWayIsReported`, "shared vaults through the session"; fails without the
+fix, the error thrown). The replay's `publishedIn` insert and Z279's save are pinned by nothing (by reading, V75).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.

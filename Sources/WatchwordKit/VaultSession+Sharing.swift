@@ -1234,10 +1234,22 @@ extension VaultSession {
         try await saveSharedVault(vaultID)
     }
 
-    /// Carries the saved plan forward from wherever it stands and syncs, so what it sealed again reaches the others.
+    /// Carries the saved plan forward from wherever it stands and syncs, so what it sealed again reaches the others
+    /// and what the reseal's take-out took out (S59) is replayed.
+    ///
+    /// `removeMember` and `rotateVaultKey` let go of the sync between their first sync and this one, so an automatic
+    /// sync can be under way by now. The rotation has gone through all the same: the plan is saved and carried out as
+    /// far as it goes, and a take-out that took anything out left the vault's basis unsettled and its replay asked for
+    /// (Z274), so the sync in flight or the next one replays and publishes. That sync's `syncInProgress` is therefore
+    /// not this call's failure, and the status is reported: thrown, it told the person the removal or rotation had
+    /// failed although it had not (review of PR #22's ninth merge, V75). Any other failure of the sync is still thrown.
     func carryOutRotation(in vaultID: UUID) async throws -> RotationStatus {
         let status = try await resumeRotation(in: vaultID, resealing: true)
-        try await syncAll()
+        do {
+            try await syncAll()
+        } catch SyncError.syncInProgress {
+            // The sync in flight, or the next, does what this one would have.
+        }
         return status
     }
 
