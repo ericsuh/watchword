@@ -9,6 +9,17 @@ import WatchwordTestSupport
 
 @testable import WatchwordKit
 
+extension VaultSession {
+    /// For tests: what a take-out leaves where it took `key`'s row out (into the quarantine, out of the store) and then
+    /// threw, with the vault still owed, and the basis since come back to the one judged.
+    func leavePartialTakeOut(of key: RecordKey, in vaultID: UUID) async throws {
+        guard let row = try await store.record(key), let syncSettings else { return }
+        try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
+        try await store.commit(StoreChange(conditionalDeletions: [row.key: row.version]))
+        takeOutsOwed.insert(vaultID)
+    }
+}
+
 // The review of round 24 (docs/06-adversarial-review.md Z267 on): a take-out that is owed (`takeOutsOwed`, Z262) and
 // what the sync does meanwhile, in the suite "shared vaults through the session".
 extension AdversarialSharedVaultTests {
@@ -124,5 +135,29 @@ extension AdversarialSharedVaultTests {
         #expect(
             try await setting.sync.state.pendingDeletions(vaultID: setting.personal).isEmpty,
             "the deletion never went out")
+    }
+
+    /// Threat: none but local failure; the review of round 24 (Z269, finding 5, pre-existing). A take-out that took
+    /// rows out of the vault and then threw (a conditional commit lost to a save, a quarantine write) leaves the vault
+    /// owed; if the basis then comes back to the one judged (a revocation it was bound by stops counting), the next
+    /// take-out returns at its judged-basis guard. It cleared the owed entry and asked for nothing, so what it had
+    /// taken out stayed out of the vault, in the quarantine, until some later replay happened to rebuild it: nothing
+    /// lost, but items missing meanwhile. The guard now asks for the replay when it clears an owed entry.
+    @Test("an owed take-out found at the judged basis asks for the replay that rebuilds what it took out")
+    func owedTakeOutAtTheJudgedBasisReplays() async throws {
+        let household = SharedVaultHousehold()
+        let (vaultID, owner, members) = try await household.household(roles: [.readWrite], seed: 30_900)
+        let member = members[0]
+        let saved = try await owner.session.save(Self.bank(in: vaultID))
+        try await Self.syncAll([owner, member])
+        #expect(await member.session.judgementIsSettled(vaultID), "the judgement is not settled: nothing is tested")
+        let key = RecordKey(recordID: saved.id, kind: .item)
+        try await member.session.leavePartialTakeOut(of: key, in: vaultID)
+        #expect(try await member.vault.store.record(key) == nil, "the row was not taken out: nothing is tested")
+
+        try await member.session.syncAll()
+        #expect(try await member.vault.store.record(key) != nil, "what the take-out took out was not rebuilt")
+        #expect(try await member.session.item(id: saved.id).field(.password)?.value == "bank-password")
+        #expect(await member.session.judgementIsSettled(vaultID))
     }
 }

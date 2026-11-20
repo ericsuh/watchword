@@ -1397,7 +1397,10 @@ extension VaultSession {
             let vault = sharing.vaults[vaultID]
         else { return }
         guard vault.index.judgedHead != basis else {
-            takeOutsOwed.remove(vaultID)
+            // An owed take-out may have taken rows out before it threw, and the basis has since come back to the one
+            // judged: a replay rebuilds what of them counts, or they stay out of the vault, in the quarantine, until
+            // some later replay (review of round 24, Z269).
+            if takeOutsOwed.remove(vaultID) != nil { sharing.vaults[vaultID]?.needsReconcile = true }
             return
         }
         guard !vault.indexRebuilding else {
