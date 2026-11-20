@@ -198,7 +198,15 @@ extension VaultSession {
     /// Step 6 of §8.8, after the logs, unlocked: continue a saved plan, plan the removals that are owed and this
     /// account may sign, turn leave requests into rotations as an administrator, and seal again what the ledger
     /// lists. Then save.
-    func syncSharedVaultsAfterLogs(account: AccountRecord, reports: inout [UUID: SharedVaultSyncReport]) async {
+    ///
+    /// `takeOutUnfinished`: the vaults whose take-out did not finish in this sync's passes (`AccountSyncReport`'s,
+    /// Z262, Z268, Z270). Nothing is sealed again there: the reseal's own take-out (S59) would take out what no
+    /// longer counts with no replay after it in this sync, so the vault's items stood missing until the next, and the
+    /// sync said the take-out had not finished. The next sync's take-out and its replay act together, then the reseal
+    /// (merged so at round 25, found by `replayLoopTakeOutThatFailsHoldsDeletions`).
+    func syncSharedVaultsAfterLogs(
+        account: AccountRecord, reports: inout [UUID: SharedVaultSyncReport], takeOutUnfinished: Set<UUID> = []
+    ) async {
         guard keys != nil, sharing.settings != nil else { return }
         for vaultID in sharing.vaults.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
             var report = reports[vaultID] ?? SharedVaultSyncReport()
@@ -247,7 +255,7 @@ extension VaultSession {
                         report.rotation = try await resumeRotation(in: vaultID)
                     }
                 }
-                report.resealed = try await resealSharedVault(vaultID)
+                if !takeOutUnfinished.contains(vaultID) { report.resealed = try await resealSharedVault(vaultID) }
                 try await saveSharedVault(vaultID)
             } catch {
                 report.failure = String(describing: error)

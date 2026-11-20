@@ -410,7 +410,8 @@ extension VaultSession {
             }
         }
         if mayWrite, stopped == nil {
-            await syncSharedVaultsAfterLogs(account: record, reports: &sharingReports)
+            await syncSharedVaultsAfterLogs(
+                account: record, reports: &sharingReports, takeOutUnfinished: report.takeOutUnfinished)
         }
         // The copies that hold every deletion back, by item, for the screen to name (Z171), while the keys this sync
         // started with are still here (Z174).
