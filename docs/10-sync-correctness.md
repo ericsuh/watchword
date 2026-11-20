@@ -621,7 +621,8 @@ cannot be read, or a re-record that fails, makes a vault wait for its carry rath
 take-out leaves `o`'s rows alone then too (Z253, Z258). A take-out that does not finish keeps the judged basis from
 being settled by the replay after it (Z262): settled, the head that made a late write stop counting was never acted on
 here, and the write, current on this device alone, went into its later merges as its own work, where every other
-device holds it aside by `J`.
+device holds it aside by `J`. Meanwhile the vault publishes nothing (Z270): a version built on the write, sent then,
+would be held aside by `J` on every other device; and deletions wait, named (Z268), until a take-out finishes.
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

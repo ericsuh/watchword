@@ -724,7 +724,9 @@ installation, read as the last await before the decision (a restored store has n
 one back), and no registration under way. That read keeps a failure apart from an absent key (`ownDeviceKey(of:)`,
 Z265): only a key the Keychain says is absent registers this installation as a new device, and either makes the sync a
 download. An unlocked sync held back by the key alone says which (`AccountSyncReport.ownDeviceKeyWait`: the key could
-not be read, or the device is still registering), worded as such and never "when you unlock" (Z264). And every vault
+not be read, or the device is still registering), worded as such and never "when you unlock" (Z264), and so does one
+held back by an incomplete move (`movePendingWhileUnlocked`: applied once the device has finished moving its sync
+records, Z271). And every vault
 state, stash, released deletion and chain row the sync signs is checked, synchronously before its signature, against
 what the sync began with (`SyncStateWrites`: the device ID, the lock epoch, and that it began as a writer; PR #22's
 V66), so a sync that outlives a lock, an unlock or a new ID saves none of what it loaded for the old. The epoch clause
@@ -995,7 +997,12 @@ the carry (Z254). The take-out, which leaves those rows alone, does not run on a
 take-out that did not finish leaves its judged basis unsettled: no replay settles a vault's basis while a take-out
 begun for it has not ended normally (`takeOutsOwed`), and a replay whose take-out throws waits for the next sync
 (Z262). Settled after one, every later take-out returned at its first guard, and a demoted member's late write merged
-before the demotion was known stayed current here for good. But a row
+before the demotion was known stayed current here for good. While a vault's take-out is owed, its first pass publishes
+nothing, since what this device holds there may be built on the write to be taken out (Z270); a vault still owed after
+the replay loop, or whose replay's take-out threw, holds every deletion back for that sync and is named
+(`AccountSyncReport.takeOutUnfinished`, its own notice, never `deletionsHeldBack`'s wording, Z268). Only a take-out that
+finishes ends it, and every sync that may write runs one. A take-out owed and found at the judged basis (one that took
+rows out before it threw, the basis since come back) asks for the replay that rebuilds them (Z269). But a row
 is read only where it can decide something (Z239): by a move only where no state verifies, and to add to it what the
 vault's entries name, and by the hold, the report, the re-record and Stop Waiting only for a vault that may be shared
 whose state does not verify, or that has none (`RestoredChainRead`; Stop Waiting's read guarded as the gate's is, Z248),
