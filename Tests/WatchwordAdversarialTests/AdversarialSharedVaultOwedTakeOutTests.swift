@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import WatchwordModel
+import WatchwordPresentation
 import WatchwordSharing
 import WatchwordStore
 import WatchwordSync
@@ -95,6 +96,10 @@ extension AdversarialSharedVaultTests {
         let first = try await relaunched.session.syncAll()
         #expect(await failing.failed == 2, "not both take-outs failed: nothing is tested")
         #expect(first.sharing[vaultID]?.failure != nil, "the take-out's failure was not reported")
+        // Said, in words of its own (Z268): not as something moved that reached nobody.
+        #expect(first.takeOutUnfinished == [vaultID], "the hold was silent")
+        #expect(SyncSummary(first).notices.contains(.takeOutUnfinished))
+        #expect(!SyncSummary(first).notices.contains(.deletionsHeldBack))
         let pending = try await setting.sync.state.pendingDeletions(vaultID: setting.personal)
         #expect(pending.count == 1, "the deletion went out after a take-out that did not finish")
         #expect(try await relaunched.session.item(id: setting.bank).field(.password)?.value == "late-password")
@@ -108,10 +113,12 @@ extension AdversarialSharedVaultTests {
         await again.session.configureSharing(
             SharingSettings(state: member.state, contacts: member.contacts, directory: setting.household.directory))
         try await again.session.unlock(password: TestVault.password)
+        var last = AccountSyncReport()
         for _ in 0..<3 {
-            _ = try await again.session.syncAll()
+            last = try await again.session.syncAll()
             try await setting.owner.session.sync()
         }
+        #expect(last.takeOutUnfinished.isEmpty, "a take-out that finished is still reported unfinished")
         let settled = try await again.session.item(id: setting.bank)
         #expect(settled.field(.password)?.value == "bank-password", "the demoted member's late write was kept")
         #expect(

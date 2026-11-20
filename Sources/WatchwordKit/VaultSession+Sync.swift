@@ -284,6 +284,7 @@ extension VaultSession {
                     // The replay stays asked for (`needsReconcile`), for the next sync.
                     sharingReports[vaultID, default: SharedVaultSyncReport()].failure = String(describing: error)
                     restPublished = false
+                    report.takeOutUnfinished.insert(vaultID)
                     continue
                 }
                 let shared = sharedEngineOptions(
@@ -1299,6 +1300,12 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// own key alone (review of round 23, Z264): its standing active, no new password awaited, no move pending. `nil`
     /// otherwise, locked included, where "when you unlock" is what is true.
     public var ownDeviceKeyWait: OwnDeviceKeyWait?
+    /// The shared vaults where this device began taking out what no longer counts (`takeOutWhatNoLongerCounts`) and
+    /// could not finish, a local store failing (review of round 24, Z268): their replay waits, and no vault's
+    /// deletions went out in this sync, after what the take-out may have put aside of this device's own (Z262). Not
+    /// `deletionsHeldBack`, whose wording (something moved has not reached the other devices) would be untrue here.
+    /// Tried again at the next sync; nothing a member or the sync storage writes can make a take-out throw.
+    public var takeOutUnfinished: Set<UUID> = []
 
     public init() {}
 

@@ -70,6 +70,11 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
     /// (`AccountSyncReport.publishingHeldForCarry`, review of round 14, L4). By vault name, sorted, and how many more
     /// whose names could not be read.
     case publishingHeldForCarry([String], unnamed: Int)
+    /// This device could not finish checking a shared vault's changes against who may write there now (its take-out
+    /// of what no longer counts failed on local storage, `AccountSyncReport.takeOutUnfinished`, review of round 24,
+    /// Z268): deletions made on this device wait until it has. Not `deletionsHeldBack`, which says something moved has
+    /// not reached the other devices, untrue here. Tried again at each sync.
+    case takeOutUnfinished
 
     /// What the person can do about it from the notice itself: none, or one choice per vault it applies to.
     public var actions: [SyncNoticeAction] {
@@ -96,6 +101,7 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
         case .restoredWorkWaiting: return "restoredWorkWaiting"
         case .restoredWorkKeptHere: return "restoredWorkKeptHere"
         case .publishingHeldForCarry: return "publishingHeldForCarry"
+        case .takeOutUnfinished: return "takeOutUnfinished"
         }
     }
 
@@ -182,6 +188,9 @@ public enum SyncNotice: Hashable, Sendable, Identifiable {
                 + "before they go out, this device has to finish carrying over the changes it made "
                 + (one ? "there" : "in each") + " before it was restored. It tries again at each sync. Nothing has "
                 + "been lost."
+        case .takeOutUnfinished:
+            return "This device could not finish checking a shared vault's changes. Until it has, deletions made on "
+                + "this device wait. It tries again at each sync. Nothing has been lost."
         }
     }
 }
@@ -336,6 +345,7 @@ public struct SyncSummary: Hashable, Sendable {
             let named = held.compactMap { $0 }
             notices.append(.publishingHeldForCarry(named.sorted(), unnamed: held.count - named.count))
         }
+        if !report.takeOutUnfinished.isEmpty { notices.append(.takeOutUnfinished) }
         let explained = Set(report.copiesNobodyReceived.keys).union(report.restoredWorkWaiting.keys)
             .union(report.restoredChainUnreadable)
         if !report.deletionsHeldBack.subtracting(explained).isEmpty {

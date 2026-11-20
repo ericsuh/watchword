@@ -184,6 +184,32 @@ struct WordingTests {
         #expect(!SyncNotice.deviceRegistering.text.contains("was restored"), "a device may be registering unrestored")
     }
 
+    /// Review of round 24 (Z268): a shared vault's take-out that did not finish holds every deletion back, and the
+    /// summary said nothing of it. It says so in its own words: not the generic notice, whose "something moved has not
+    /// reached your other devices" is untrue there.
+    @Test("a take-out that did not finish says deletions wait, and not that something moved went nowhere")
+    func takeOutUnfinished() {
+        let vaultID = UUID()
+        var report = AccountSyncReport()
+        report.vaults[vaultID] = SyncReport()
+        #expect(!SyncSummary(report).notices.contains(.takeOutUnfinished))
+        report.takeOutUnfinished = [vaultID]
+        let summary = SyncSummary(report)
+        #expect(summary.notices.contains(.takeOutUnfinished))
+        #expect(!summary.notices.contains(.deletionsHeldBack))
+        let text = SyncNotice.takeOutUnfinished.text
+        #expect(text.contains("could not finish checking a shared vault's changes"))
+        #expect(text.contains("deletions made on this device wait"))
+        #expect(text.contains("tries again at each sync"))
+        #expect(text.contains("Nothing has been lost"))
+        #expect(!text.contains("reached"), "says something has not reached the other devices")
+        #expect(!text.contains("by itself"))
+
+        // A vault held back for another reason still says so.
+        report.deletionsHeldBack.insert(UUID())
+        #expect(SyncSummary(report).notices.contains(.deletionsHeldBack))
+    }
+
     /// Review of round 20 (Z240): a chain row of a restore's earlier device IDs that the sharing store cannot read held
     /// the deletions back, or the move, under the generic notice (something moved has not reached the other devices)
     /// or none, both untrue. The vaults it holds are explained by a notice of their own.
