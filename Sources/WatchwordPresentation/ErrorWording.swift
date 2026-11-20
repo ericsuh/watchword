@@ -135,6 +135,9 @@ public enum ErrorWording {
             return "Something changed on this device since you were asked. Nothing was uploaded; review and try again."
         case .deviceNotRegistered:
             return "This device is not registered with your account yet, so nothing it uploaded would be read."
+        case .deviceKeyUnreadable:
+            return "Watchword couldn't read this device's key just now, which can happen while the device is locked. "
+                + "Nothing was uploaded. Try again."
         default:
             return "Something went wrong. Your vault is unchanged."
         }

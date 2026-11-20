@@ -190,6 +190,31 @@ struct WordingTests {
         #expect(!SyncNotice.deviceRegistering.text.contains("was restored"), "a device may be registering unrestored")
     }
 
+    /// Merge of round 24 into the hygiene branch (Z264 beside §7.10, V70): a sync that stopped at a reset store while
+    /// this device's own key could not be read says the reset first, and the key beside the question, since the key
+    /// holds the upload back too; no notice says changes were downloaded, which such a sync did not do. The upload's
+    /// refusal is a retry, read in the open app.
+    @Test("a reset store with this device's key unreadable says the reset first, and the key beside the question")
+    func storeResetWithTheKeyUnreadable() {
+        var vault = SyncReport()
+        vault.deferredUntilUnlock = true
+        var report = AccountSyncReport()
+        report.transportFailure = .storeReset
+        report.vaults[UUID()] = vault
+        report.ownDeviceKeyWait = .unreadable
+        let summary = SyncSummary(report)
+        let reset = "Sync storage was emptied or reset. Nothing was sent, and nothing was uploaded again."
+        #expect(summary.headline == reset)
+        #expect(summary.notices.contains(.storageNeedsUpload))
+        #expect(summary.notices.contains(.deviceKeyUnreadable))
+        for notice in summary.notices { #expect(!notice.text.contains("were downloaded")) }
+        let refused = ErrorWording.message(for: VaultError.deviceKeyUnreadable)
+        #expect(refused.contains("Nothing was uploaded"))
+        #expect(refused.contains("Try again"))
+        #expect(!refused.contains("enrol"), "a key that could not be read is a retry, never a reason to enrol again")
+        #expect(!refused.contains("unlock"), "the message is read in the open, unlocked app")
+    }
+
     /// Review of round 20 (Z240): a chain row of a restore's earlier device IDs that the sharing store cannot read held
     /// the deletions back, or the move, under the generic notice (something moved has not reached the other devices)
     /// or none, both untrue. The vaults it holds are explained by a notice of their own.

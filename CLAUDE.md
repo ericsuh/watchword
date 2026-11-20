@@ -818,7 +818,8 @@ An import file is hostile (adversary A7); `docs/02-architecture.md` §14 is the 
   the old ID's sync state is recorded, signed (`AccountRecord.migration`, `SignatureDomain.deviceMigration`), in the
   commit that names the new ID, and `completeDeviceMigration` makes it again at each unlock and sync until it is
   complete (Z181): never do any of it under `try?` after that commit, never publish while it is incomplete
-  (`deviceMigrationIncomplete`, worded in the summary; `reuploadAfterStoreReset` refuses then too, V51), never let it
+  (`deviceMigrationIncomplete`, worded in the summary; `reuploadAfterStoreReset` refuses then too, V51, and without a
+  readable key of its own or during a registration, V70), never let it
   forget that the installation had synced or that an upload was unfinished (`startSyncStatesOver`, V49), never register
   a further ID over it, and act on no record the session did not sign. Nothing may make the move fail for good: a
   deletion it cannot sign as the new ID's (no current key for its vault) is parked, never thrown (Z185). The

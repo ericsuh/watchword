@@ -113,6 +113,11 @@ public enum VaultError: Error, Equatable, Sendable {
     /// This device is not registered with the account as it sees the registry (its registration has not been
     /// accepted, or was made with a password since changed), so nothing it uploaded would be read by any device.
     case deviceNotRegistered
+    /// `reuploadAfterStoreReset` was asked while this device's own key could not be read from the Keychain
+    /// (`OwnDeviceKey.unreadable`; the Keychain can be closed while the device itself is locked). The sync it runs
+    /// would only download (`mayWrite`, review of round 22, Z253), and the store, started again, would be left empty:
+    /// nothing was started or uploaded (merge of round 24, V70). A retry, never a reason to enrol again.
+    case deviceKeyUnreadable
     /// The password opened a password change made on another device, and that change's own history removes this
     /// device from the account. It is not followed here: this device keeps the credentials it has, and the change
     /// stays pending (review finding Z1). If the person did remove this device, it is to be erased and enrolled

@@ -847,7 +847,11 @@ none of the earlier ID's rows out (`pendingMoveOnAChainRowTakesNothingOut`, the 
 (`ownDeviceKeyWait`: `.registering` in `lockedSyncDecidesOnTheAccountAfterItsAwaits`, `.unreadable` in
 `unreadableDeviceKey`, which also checks that a key read that throws makes no device key, Z264, Z265). In
 `WordingTests`, `ownDeviceKeyWait` and `ownDeviceKeyWording` check that neither state says "when you unlock" and that
-each says it is tried again (Z264).
+each says it is tried again (Z264). Merged into the hygiene branch: `storeResetWithTheKeyUnreadable` (`WordingTests`)
+checks that a sync stopped at a reset store with the key unreadable says the reset first and the key beside the
+question, with no notice saying changes were downloaded, and that the upload's refusal is a retry (V70); and in
+"shared vaults through the session" `takeOutThatFailedAtTheHeadItLastSawIsNotSettledAway` pins `takeOutsOwed` where
+S65's `takenOutAgainst` still names the current head, which the relaunched PoC above does not (Z262's merge note).
 `LongRunningVaultSimulationTests` restores one device from a backup taken a sixth of the way in, a quarter of the way
 in, while the device it came from goes on under its old ID, and asserts that it happened once per run; its vaults are
 the account's own, so it exercises the carry and the move, not the renaming, which the law tests cover.
@@ -1620,7 +1624,9 @@ other does, and reported as not required on Linux, where they cannot compile.
   into a store the person emptied it asks and publishes nothing, then hands on everything on the yes,
   `restoredIntoEmptiedStoreAsks`; a never-synced installation restored publishes, `neverSyncedRestorePublishes`; an
   upload stopped part-way before the backup still asks after the move, `interruptedUploadAsksAfterMove`; and the upload
-  is refused while the move is incomplete, V51, `reuploadRefusedDuringMove`; once the moved installation has handed
+  is refused while the move is incomplete, V51, `reuploadRefusedDuringMove`, and while this device's own key cannot be
+  read or is absent, V70, `reuploadRefusedWhileTheKeyIsUnreadable` (which also reports the key beside the question,
+  `ownDeviceKeyWait`) and `reuploadRefusedWithoutAKey`; once the moved installation has handed
   on and that snapshot was collected, a later reset another device answers ends here without asking, V52,
   `movedThenHandedOnAsksOnlyOnce`) and "account enrolment and device registry"
   (`AdversarialAccountStoreResetTests`: no account on an emptied store until the person says so, then enrolment; a

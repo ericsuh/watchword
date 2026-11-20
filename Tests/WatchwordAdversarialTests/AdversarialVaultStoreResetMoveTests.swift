@@ -228,4 +228,59 @@ extension AdversarialVaultSyncTests {
         #expect(!answered.storeNeedsReupload)
         #expect(await store.startsAgain == 1)
     }
+
+    /// Threat: none needed but a Keychain that is closed for a moment while the vault is open (the device locked, a
+    /// sync in the background), met by the person's answer to a reset (merge of round 24, V70). The sync an upload runs
+    /// writes nothing without this device's own key, read now (`mayWrite`, Z253), so the upload started the store again
+    /// and left it empty, as V51 says of a move. The call refuses, starts nothing, and works once the key reads again;
+    /// the sync before it says the key is why (`ownDeviceKeyWait`, Z264) beside the question.
+    @Test("the upload after a reset is refused while this device's own key cannot be read")
+    func reuploadRefusedWhileTheKeyIsUnreadable() async throws {
+        let store = ResettableSyncTransport()
+        let keys = UnreadableDeviceKeyStore(base: FakeDeviceKeyStore(seed: 5_200))
+        let a = TestVault(
+            sync: SyncSettings(state: InMemorySyncStateStore(), transport: store), seed: 5_200, deviceKeys: keys)
+        try await a.createAccount()
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Kept", in: vaultID))
+        try await a.session.sync()
+        await store.reset()
+
+        await keys.setUnreadable(true)
+        let report = try await a.session.syncAll()
+        #expect(report.storeNeedsReupload, "the reset was not noticed: nothing is tested")
+        #expect(report.ownDeviceKeyWait == .unreadable)
+        let plan = try await a.session.reuploadPlan()
+        await #expect(throws: VaultError.deviceKeyUnreadable) {
+            try await a.session.reuploadAfterStoreReset(confirming: plan)
+        }
+        #expect(await store.startsAgain == 0, "the store was started again for an upload that could write nothing")
+
+        await keys.setUnreadable(false)
+        let answered = try await a.session.reuploadAfterStoreReset(confirming: try await a.session.reuploadPlan())
+        #expect(!answered.storeNeedsReupload)
+        #expect(answered.ownDeviceKeyWait == nil)
+        #expect(await store.startsAgain == 1)
+    }
+
+    /// Threat: none needed; the same as above for a store whose Keychain holds no key for the device ID the account
+    /// names (restored onto other hardware, before its registration as a new device): the upload's sync would only
+    /// download (Z253), so the call refuses as for a device not registered, and starts nothing (V70).
+    @Test("the upload after a reset is refused while this device has no key of its own here")
+    func reuploadRefusedWithoutAKey() async throws {
+        let store = ResettableSyncTransport()
+        let a = TestVault(sync: SyncSettings(state: InMemorySyncStateStore(), transport: store), seed: 5_300)
+        try await a.createAccount()
+        let vaultID = try #require(await a.session.personalVaultID)
+        _ = try await a.session.save(Self.login("Kept", in: vaultID))
+        try await a.session.sync()
+        await store.reset()
+
+        let plan = try await a.session.reuploadPlan()
+        await a.forgetDeviceKey(accountID: try #require(await a.store.loadAccount()).accountID)
+        await #expect(throws: VaultError.deviceNotRegistered) {
+            try await a.session.reuploadAfterStoreReset(confirming: plan)
+        }
+        #expect(await store.startsAgain == 0, "the store was started again for an upload that could write nothing")
+    }
 }

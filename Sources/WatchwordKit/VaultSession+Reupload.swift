@@ -89,7 +89,8 @@ extension VaultSession {
     /// Nothing local is forgotten, overwritten or deleted: sequence numbers go on from where they were, the stash
     /// and held-aside versions stay where they are, and pending deletions go out as they always do. A shared vault
     /// is not uploaded (`SyncReport.reuploadRefused`, `AccountSyncReport.reuploadRefusals`). Needs the vault
-    /// unlocked, and this device registered, not revoked, and following the current password.
+    /// unlocked, and this device registered, not revoked, and following the current password, with no move pending
+    /// (V51), its own key readable here and no registration under way (V70).
     @discardableResult
     public func reuploadAfterStoreReset(confirming plan: ReuploadPlan) async throws -> AccountSyncReport {
         let epoch = lockEpoch
@@ -112,6 +113,15 @@ extension VaultSession {
         syncInFlight = true
         defer { syncInFlight = false }
         guard try await reuploadPlan() == plan else { throw VaultError.reuploadNotConfirmed }
+        // Nor without a key for this device's ID here, read now, nor while a registration is under way: the sync below
+        // would only download (`mayWrite`, Z253; said as `ownDeviceKeyWait`, Z264), and the store, started again, would
+        // be left empty, as V51 says of a move (merge of round 24, V70). Read as the last await before the store is
+        // touched, the flag after it.
+        switch await ownDeviceKey(of: account) {
+        case .held: if registrationInFlight { throw VaultError.deviceNotRegistered }
+        case .absent: throw VaultError.deviceNotRegistered
+        case .unreadable: throw VaultError.deviceKeyUnreadable
+        }
         _ = try requireKeys(since: epoch)
         // Until each vault has handed on, or the store stands for everything it holds, the question stays open on
         // this device, whatever stops the upload part-way: a lock, the network, the app killed (review finding SR21).

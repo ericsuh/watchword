@@ -1547,9 +1547,12 @@ and the shared vaults that cannot be — for the question; the call takes the pl
 (`reuploadNotConfirmed`) if it no longer describes this device, as `deleteVault` does with its count. It needs the
 vault unlocked, this device registered, not revoked and following the current password, and no device move incomplete
 (`deviceMigrationIncomplete`: the move would start the states over beneath the upload, and the sync publishes
-nothing until it is complete, so the store would be started again and left empty; V51). It holds the session's
-sync lock from before the plan is checked, so no ordinary sync merges anything between the answer and the upload,
-or runs between the two steps. Then:
+nothing until it is complete, so the store would be started again and left empty; V51), nor a key of this device's
+own that cannot be read now (`deviceKeyUnreadable`), is absent, or is being registered (`deviceNotRegistered`): the
+sync would write nothing without it (`mayWrite`, §7.5), which left the store started again and empty in the same way
+(V70, from the merge of PR #23's round 24, whose `ownDeviceKey(of:)` it reads, the last await before the store is
+touched). It holds the session's sync lock from before the plan is checked, so no ordinary sync merges anything between
+the answer and the upload, or runs between the two steps. Then:
 
 1. `SyncTransport.startStoreAgain()`: the one call that may recreate a store this device has seen and found missing.
    CloudKit saves the zone again (deleting it first where CloudKit says its key was reset, and taking a deletion
