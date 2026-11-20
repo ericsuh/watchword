@@ -16,13 +16,25 @@ extension VaultSession {
         registrationInFlight = inFlight
     }
 
-    /// For tests: what a take-out leaves where it took `key`'s row out (into the quarantine, out of the store) and then
-    /// threw, with the vault still owed, and the basis since come back to the one judged.
+    /// For tests: what a take-out left where it took `key`'s row out (into the quarantine, out of the store) and then
+    /// threw, with the vault still owed, and the basis since come back to the one judged. Since Z274 a take-out saves
+    /// the judged head unsettled before its first row goes, so this is the state of one before then; the judged-basis
+    /// guard's request for a replay (Z269) stays, and this pins it.
     func leavePartialTakeOut(of key: RecordKey, in vaultID: UUID) async throws {
         guard let row = try await store.record(key), let syncSettings else { return }
         try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
         try await store.commit(StoreChange(conditionalDeletions: [row.key: row.version]))
         takeOutsOwed.insert(vaultID)
+    }
+
+    /// For tests: the vault's judged basis comes back to the head last judged and saved (a revocation the basis was
+    /// bound by stops counting), stood for by moving that judged head to the basis as it is now, saved. An unsettled
+    /// head (`nil`) is one no basis equals, and is left as it is.
+    func basisComesBackToTheJudgedHead(_ vaultID: UUID) async throws {
+        guard sharing.vaults[vaultID]?.index.judgedHead != nil, let basis = await judgedBasis(vaultID) else { return }
+        sharing.vaults[vaultID]?.index.judgedHead = basis
+        sharing.vaults[vaultID]?.indexChanged = true
+        try await saveSharedVault(vaultID)
     }
 }
 
@@ -199,6 +211,51 @@ extension AdversarialSharedVaultTests {
         #expect(try await member.vault.store.record(key) != nil, "what the take-out took out was not rebuilt")
         #expect(try await member.session.item(id: saved.id).field(.password)?.value == "bank-password")
         #expect(await member.session.judgementIsSettled(vaultID))
+    }
+
+    /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, and a record
+    /// store whose listing fails once in the middle of the sharing pass's take-out (a busy or damaged database), after
+    /// it has taken the late write's row out; the review of round 25 (Z274, finding 2, Z269 across a relaunch). The
+    /// take-out throws with the row out of the vault and the vault owed (`takeOutsOwed`), which is in memory. If the
+    /// basis then comes back to the head last judged and the app is relaunched, the next take-out found
+    /// `judgedHead == basis` with nothing owed, asked for no replay, and the item stayed missing from the vault (held
+    /// aside in the quarantine) until some later replay. The take-out now saves the judged head unsettled before the
+    /// first row goes, so a relaunch takes out and replays, and the item is rebuilt from what counts.
+    @Test("a take-out that took a row out and threw leaves the basis unsettled, so a relaunch rebuilds the item")
+    func partialTakeOutReplaysAfterARelaunch() async throws {
+        let setting = try await Self.owedTakeOut(replayOwed: false)
+        let (member, vaultID) = (setting.member, setting.vaultID)
+        let key = RecordKey(recordID: setting.bank, kind: .item)
+        await setting.relaunched.session.lock()
+        let listing = ListingFailingStore(base: member.vault.store)
+        let failing = TestVault(
+            store: listing, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: setting.sync, seed: 937, deviceKeys: member.vault.deviceKeys)
+        await failing.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: setting.household.directory))
+        try await failing.session.unlock(password: TestVault.password)
+        #expect(try await member.vault.store.record(key) != nil)
+        // The take-out lists the vault's items, takes the late write out, and fails listing its description.
+        await listing.failListings(of: .vaultMetadata, times: 1)
+        let first = try await failing.session.syncAll()
+        #expect(await listing.refused == 1, "no listing failed: nothing is tested")
+        #expect(first.sharing[vaultID]?.failure != nil, "the take-out's failure was not reported")
+        #expect(first.takeOutUnfinished == [vaultID], "the take-out finished: nothing is tested")
+        #expect(try await member.vault.store.record(key) == nil, "the row was not taken out: nothing is tested")
+
+        // The basis comes back to the head last judged (stood for), and the app is relaunched.
+        try await failing.session.basisComesBackToTheJudgedHead(vaultID)
+        await failing.session.lock()
+        let again = TestVault(
+            store: member.vault.store, keychain: member.vault.keychain, biometrics: member.vault.biometrics,
+            clock: member.vault.clock, sync: setting.sync, seed: 938, deviceKeys: member.vault.deviceKeys)
+        await again.session.configureSharing(
+            SharingSettings(state: member.state, contacts: member.contacts, directory: setting.household.directory))
+        try await again.session.unlock(password: TestVault.password)
+        for _ in 0..<2 { _ = try await again.session.syncAll() }
+        #expect(try await member.vault.store.record(key) != nil, "what the take-out took out stayed out, relaunched")
+        #expect(try await again.session.item(id: setting.bank).field(.password)?.value == "bank-password")
+        #expect(await again.session.judgementIsSettled(vaultID))
     }
 
     /// Threat: a demoted member (A4) whose late write this device merged before it learnt of the demotion, the person's
