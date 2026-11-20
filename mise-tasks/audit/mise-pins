@@ -2,7 +2,8 @@
 #MISE description="Fail if CI and cloud sessions pin different mise releases or linux-x64 checksums"
 #
 # mise is pinned twice: install-mise.sh for CI runners, and cloud-setup.sh, which is pasted into the cloud environment's
-# setup field and so cannot read a shared file from the checkout. This keeps a bump from updating only one of them.
+# setup field and so cannot read a shared file from the checkout. This keeps a bump from updating only one of them; it
+# runs on every pull request (ci.yml's lint job) and in `check`.
 set -euo pipefail
 
 pin() { # pin <file> <variable> -> the quoted value assigned to `readonly <variable>=` in <file>

@@ -180,9 +180,7 @@ public enum HostNormalizer {
             candidate = String(candidate.dropFirst().dropLast())
         }
         if candidate.contains(":") {
-            let hexOrSeparator = candidate.allSatisfy { $0.isHexDigit || $0 == ":" || $0 == "." }
-            let colonCount = candidate.filter { $0 == ":" }.count
-            guard hexOrSeparator, colonCount >= 2 else { throw HostNormalizationError.invalidHost(raw) }
+            guard isIPv6Literal(candidate) else { throw HostNormalizationError.invalidHost(raw) }
             return NormalizedHost(vouchedFor: candidate)
         }
 
@@ -204,6 +202,69 @@ public enum HostNormalizer {
             throw HostNormalizationError.labelTooLong(String(overlong))
         }
         return NormalizedHost(vouchedFor: candidate)
+    }
+
+    /// The longest textual IPv6 address: six groups of four, then a dotted quad
+    /// (`ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255`).
+    static let maxIPv6Length = 45
+
+    /// Whether `text` is an IPv6 address as RFC 4291 §2.2 writes one: eight groups of one to four hexadecimal digits,
+    /// at most one `::` standing for one or more groups of zeros, and optionally a dotted-quad IPv4 tail of four
+    /// decimal octets in place of the last two groups. Parsed on ASCII bytes, bounded first (review finding Z64): the
+    /// branch it replaces accepted any run of hex digits, colons and dots (`a::b.cafe.de`, a megabyte of `a:`, and,
+    /// through `Character.isHexDigit`, fullwidth digits) and skipped every other check on the host.
+    static func isIPv6Literal(_ text: String) -> Bool {
+        let bytes = Array(text.utf8)
+        guard bytes.count >= 2, bytes.count <= maxIPv6Length else { return false }
+        let colon = UInt8(ascii: ":")
+        func isHex(_ byte: UInt8) -> Bool {
+            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+        }
+        func isDottedQuad(_ part: ArraySlice<UInt8>) -> Bool {
+            let octets = part.split(separator: UInt8(ascii: "."), omittingEmptySubsequences: false)
+            guard octets.count == 4 else { return false }
+            return octets.allSatisfy { octet in
+                guard (1...3).contains(octet.count),
+                    octet.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }),
+                    let value = Int(String(decoding: octet, as: UTF8.self)), value <= 255
+                else { return false }
+                return true
+            }
+        }
+        // Count the groups on each side of a single `::`.
+        func groups(_ part: ArraySlice<UInt8>, last: Bool) -> Int? {
+            guard !part.isEmpty else { return 0 }
+            let pieces = part.split(separator: colon, omittingEmptySubsequences: false)
+            var count = 0
+            for (index, piece) in pieces.enumerated() {
+                if last, index == pieces.count - 1, piece.contains(UInt8(ascii: ".")) {
+                    guard isDottedQuad(piece) else { return nil }
+                    count += 2
+                } else {
+                    guard (1...4).contains(piece.count), piece.allSatisfy(isHex) else { return nil }
+                    count += 1
+                }
+            }
+            return count
+        }
+        var doubleColon: Int?
+        var index = 0
+        while index + 1 < bytes.count {
+            if bytes[index] == colon, bytes[index + 1] == colon {
+                guard doubleColon == nil else { return false }
+                doubleColon = index
+                index += 2
+            } else {
+                index += 1
+            }
+        }
+        if let at = doubleColon {
+            guard let head = groups(bytes[..<at], last: false), let tail = groups(bytes[(at + 2)...], last: true)
+            else { return false }
+            return head + tail <= 7
+        }
+        return groups(bytes[...], last: true) == 8
     }
 
     /// C0/C1 controls, DEL, whitespace, and the zero-width and bidi formatting characters that

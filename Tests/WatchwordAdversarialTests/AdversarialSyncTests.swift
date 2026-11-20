@@ -320,8 +320,9 @@ struct AdversarialSyncTests {
     }
 
     /// Threat: an insider (from milestone 4, a member of a shared vault) writes a record whose ID is that of a record in
-    /// another vault on the reader's device, to overwrite or merge into an item it is not entitled to.
-    @Test("a record whose ID belongs to another vault on this device is rejected")
+    /// another vault on the reader's device, to overwrite or merge into an item it is not entitled to. The other
+    /// vault's row is never touched; the entry is kept aside, and costs its object nothing else (Z22).
+    @Test("a record whose ID belongs to another vault on this device is held aside, and the other vault's row stays")
     func crossVaultRecordID() async throws {
         let f = try await Self.fixture()
         let item = try await f.writer.save(Self.login("Shared vault item", password: "x"))
@@ -332,8 +333,10 @@ struct AdversarialSyncTests {
         await reader.store.tamper(foreign)
         try await f.writer.sync()
         let report = try await reader.sync()
-        #expect(report.rejected.first?.reason == .recordInAnotherVault(item.id))
+        #expect(report.collided == [foreign.key])
+        #expect(report.rejected.isEmpty && report.applied == 0)
         #expect(await reader.store.record(foreign.key) == foreign)
+        #expect(await reader.syncState.quarantined(vaultID: Self.vault).map(\.recordID) == [item.id])
     }
 
     /// Threat: an insider writes a record version near `UInt64.max`, so no later version fits and the item freezes

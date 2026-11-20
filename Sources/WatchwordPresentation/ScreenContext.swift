@@ -45,6 +45,10 @@ public final class LockSignal {
 
     private var entries: [Entry] = []
     private var watch: Task<Void, Never>?
+    /// How many times the signal has fired: work that stores what must go with the keys notes it before its awaits and
+    /// stores nothing if it changed (review of round 10, Z183). It moves only when the watch runs on the main actor;
+    /// `mark(_:)` adds the session's own count, which moves in `lock()` itself.
+    public private(set) var generation = 0
 
     public init() {}
 
@@ -74,6 +78,7 @@ public final class LockSignal {
 
     /// Drops what every registered model holds. The app also calls it on its own lock paths; twice is harmless.
     public func fire() {
+        generation &+= 1
         entries.removeAll { $0.model == nil }
         for entry in entries { entry.model?.dropOnLock() }
     }
@@ -82,6 +87,28 @@ public final class LockSignal {
     public func stop() {
         watch?.cancel()
         watch = nil
+    }
+
+    /// Every lock so far: the signal's fires, and the session's own count (`VaultSession.lockCount`), which `lock()`
+    /// moves before any listener hears of it (review of round 11, Z188: a continuation the main actor ran ahead of the
+    /// signal's watch found the generation unchanged).
+    public struct Mark: Hashable, Sendable {
+        let fires: Int
+        let sessionLocks: UInt64
+    }
+
+    /// The locks so far, to compare with `unchanged(since:in:)` once the work is done.
+    public func mark(_ session: VaultSession) async -> Mark {
+        let sessionLocks = await session.lockCount
+        return Mark(fires: generation, sessionLocks: sessionLocks)
+    }
+
+    /// Whether neither the signal nor the session has seen a lock since `mark`. Store what must go with the keys only
+    /// straight after it answers `true`, with no suspension between: the session's count is read first and the fires
+    /// last, so a lock after the read is one whose firing, still to run on the main actor, drops what was stored.
+    public func unchanged(since mark: Mark, in session: VaultSession) async -> Bool {
+        let sessionLocks = await session.lockCount
+        return sessionLocks == mark.sessionLocks && generation == mark.fires
     }
 }
 

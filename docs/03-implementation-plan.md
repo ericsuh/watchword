@@ -77,7 +77,9 @@ Status: delivered as specified, with these scoping notes.
   presented as a newer one.
 - `VaultKeyGrant` has no persisted encoding yet; it arrives with the membership records it travels
   in (milestone 4).
-- Secure Enclave wrapping of the Secret Key is part of the Keychain adapter (milestone 2).
+- Secure Enclave wrapping of the Secret Key was planned for the Keychain adapter (milestone 2) and was **not built**:
+  the adapter stores the Secret Key as a Keychain item of class `WhenPasscodeSetThisDeviceOnly` and nothing more
+  (`02-architecture.md` §4; review finding Z107). Open, with the Enclave device key of milestone 3.
 - Crypto tests need CryptoKit and run on the macOS CI matrix; since ADR 0006 they also run on Linux against
   swift-crypto, which is evidence about the logic and not about the implementation that ships.
 
@@ -117,7 +119,10 @@ Status: delivered, with these scoping notes.
 - Also deferred: the encrypted per-item index record (§5) to milestone 5, the `changelog` and
   `sync_state` tables and tombstones to milestone 3, device-to-device enrolment to milestone 3
   (Emergency Kit entry works now: `unlock(password:secretKey:)`), and the F11.7 add-a-mismatched-host
-  confirmation UI to milestone 5, where the mismatch is first observable.
+  confirmation UI to milestone 5, where the mismatch is first observable. That confirmation is now built below
+  the view (review finding Z61): `VaultSession.save(_:confirmingHosts:)` refuses a look-alike host the caller
+  has not named, and `ItemEditorModel` asks; the editor's dialog is written but not yet compiled on a Mac. The
+  assessment banner on revealing a secret (`05-anti-phishing.md` L6) is not built and stays open.
 - Real Keychain round trips need an entitled, signed process; `swift test` and CI skip them
   (`errSecMissingEntitlement`) and check the query attributes instead. On a Mac,
   `mise run app:test-keychain --team <ID>` runs the round trip signed, in the app-hosted
@@ -272,7 +277,61 @@ half delivered** on a Mac; the transports are open.
   against an item's 1 MiB payload.
 - **Still open (design):** an account re-key — new keyset and Secret Key, vault keys rotated — which is what ends a
   revoked device's reading if it held the keyset (architecture §7.8, §16); it belongs with vault-key rotation in
-  milestone 4. Collecting a deleted vault's objects from the transport.
+  milestone 4. It is also the only cure for what a revoked device that kept the account key can still do to the
+  other members of a shared vault: keep that member's devices in question (review finding Z6, architecture §8.10).
+  Collecting a deleted vault's objects from the transport.
+- **Still open, from the audit of 2026-11-17 (`06-adversarial-review.md` §Z, Z20 to Z29):** a Mac run of
+  `SQLiteSyncStateStore` at schema version 3 (the indexed quarantine and its migration, Z27) and of the signed state
+  row over real files (Z20); keying the record store by (vault, record, kind), with its migration, so that a record
+  ID in one vault cannot collide with another's (Z22; the engine now confines a collision to the one entry); a skip
+  the author signs and readers honour, for an unsigned object squatting at a device's next sequence number (Z24);
+  refusing at download a segment that an ended account's cut cannot admit (Z27); an intent row in the record store's
+  own transaction, for a crash between a deletion and its tombstone (Z28). From the review of those fixes (Z30 to
+  Z39): a Mac run of `SQLiteSyncStateStore`'s paged migration, clamped sizes and capped digest rows, and of
+  `SQLiteConnection.Failure` as a `StorageFailure` (Z39); signing the quarantine's rows and taking out a kept version
+  once a version that supersedes it is merged (Z37), which want a column and an index in that schema; charging a
+  snapshot's entries to the snapshot's author rather than to the device each names (Z38), which wants a column too;
+  and, for a device that has never published in a vault, an unfetchable name in its stream still holds its publishing
+  there (Z31). From the review of the second round (Z135 to Z143): a keyed or cryptographic digest for the
+  quarantine's index, a schema version 4 migration (Z141); a rule for a restored device whose collected floor is older
+  than its stream, which would let the anchor survive a store that withholds a device's head and re-lists an older
+  object of its own (Z135; the floor itself is in the signed state since Z149); coverage recorded per signer, so that
+  a claim an honest device carried on can be traced to an insider (Z139); and a Mac run of the comment changed in
+  `SQLiteSyncStateStore`. From the review of the third round (Z144 to Z149): handing on, in a shared vault, what only a
+  revoked device's own versions carried, which a device joining after the revocation never receives (there is no
+  snapshot to carry it, Z144); keeping the report of another account's segment in a device's own stream beyond the
+  sync that met it (Z146); and the owner's choice for a crowded digest, between withholding snapshots until the person
+  discards entries (built) and counting the drop without remembering it (Z147). From the review of the fourth round
+  (Z150 to Z156): a replay when a registry changes which accounts list a device, without a revocation (Z153); Z150's
+  planted listing and Z152's promotion window and rotation are gone with Z157. From the review of the fifth round (Z157
+  to Z161): reading a revoked device's segments for the index alone, up to its account's cut, so that a device that
+  built its index after the revocation of a device of an account that may no longer write judges as the others do
+  (Z158); and an author-signed skip that readers honour, so that an object at a device's next number (junk, or since
+  Z157 another member's signed object) stops nothing (Z24, Z157's owner decision). From the review of the sixth round
+  (Z162 to Z166): re-enrolling a device of an account from before IDs committed as a new device from inside the app
+  (today: erase and enrol again), and finding, at `shareVault`, values stamped by such a device, which members hold
+  aside (Z162); the signed skip of Z24 (Z164); a bound on what a removed member's own streams add to the index
+  (Z166). From the review of the seventh round (Z167 to Z169): the in-app re-enrolment must park the old ID's pending
+  deletions while a shared vault holds an edit of the old ID that nobody received, as a restore onto other hardware
+  does (`vaultsHoldingEditsNobodyReceived`, `releaseParkedDeletions`, Z167, Z170), and a Mac run of all three. From
+  the review of the eighth round (Z170 to Z172): the Devices screen and Settings show the copies that hold deletions
+  back (`SyncNotice.copiesReachedNobody`) as text only; a button that moves each out of its vault, and a way out for a
+  copy this device may not move or delete (read-only, no key here), are open (an owner decision, Z170).
+- **Still open (views, after the audit of 2026-11-17):** choosing between pending password changes on the Devices
+  screen (`DevicesModel.passwordChanges`, `describe` and `follow`, over `pendingPasswordChanges`,
+  `describePasswordChange` and `followPasswordChange`, which takes the current password as well as the change's,
+  Z13 and Z14; the lock screen reports `tooManyPasswordChangesPending` and `passwordChangeRevokesThisDevice` in
+  words, Z1 and Z8); the member list's warning that a member's devices disagree (Z6). The models are written and
+  tested; no SwiftUI view uses them.
+- **Still open (settling a member's contested devices, Z11):** the twelve-digit member devices code is gone
+  (`memberDevicesCode`, `verifyMemberDevices`, `DevicesModel.devicesCode`, `SharedVaultModel.verifyDevices`): about
+  40 bits of a value the member's key holder can grind. Re-verifying a member's devices after a fork is to be part
+  of the vault sharing code session of ADR 0010; until it is, a contested member registry stays contested and is
+  reported, and comparing safety numbers again does not settle it.
+- **Still open (keys, tracked by the review of the audit's fixes):** the pins of other members' registries are
+  local state that A8 can delete or roll back (Z15; a digest or counter in the Keychain next to the registry anchor,
+  and a rule for a mismatch); account header names carry no digest, so a name created first keeps a genuine header
+  off the store, and planted headers under invented device IDs still use up enrolment's three derivations (Z16).
 
 ## Milestone 4 — Sharing (protocol core and session integration done; transports and UI open)
 
@@ -337,7 +396,22 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
 **Still open:**
 
 - A macOS run of all of it against CryptoKit, and of `SQLiteSharingStore` at all.
-- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself.
+- Sharing state on a member's other devices (review finding S35): today each device accepts the invitation itself,
+  and until it has, holds the vault closed and says so (Z41: the account's signed marker and the granted key's wrap
+  tell it the vault is shared). Syncing the ledger and pins between an account's devices, signed by the account, is
+  not built; nor is a screen flow of its own for "set up this shared vault here" (the vault's screen shows the
+  invitation to paste into the accept screen).
+- A vault whose owner the account's devices disagree about (one of them was led into another chain, Z59) is held
+  closed on all of them, and nothing ends that: no marker is retired. A retirement the person chooses, signed by the
+  account and a device registered now, with the joined chain forgotten on the device that joined it, is the design;
+  it is the owner's to decide.
+- Sharing a vault whose log was compacted is refused (`historyCompacted`, Z42): values that survive only in a
+  snapshot have no attribution in a shared vault. A rule for them (the owner account vouching for its own devices'
+  pre-sharing values) is open, and is the owner's decision.
+- An addition that loses a fork alone and is never replayed leaves its grant of the current key standing, unreported
+  (Z43 covers the addition its branch went on to undo). A member who writes into a device's stream before that
+  device's first segment in a vault takes the stream there (Z46, an insider's denial of service). A leaver's device
+  cannot take itself off the transport's share (`ShareAccessControl` has no leave operation, Z45).
 - An erasure summary claims what a late writer had seen when the deleting device had merged its version (S45), and a
   late version's claims about current members' future edits are carried on (S46).
 - A member invited after a demotion with no rotation since holds aside what only vouching could attribute (S42):
@@ -402,7 +476,8 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   - an owner decision the review left open: with no host named, text insertion gives only fields that are not
     secrets, which narrows F6.4 (recovery codes, security answers and PINs insert only where the system names
     the host). `ManualChoice.isInsertable` is the one place to change it;
-  - the UI tests in `04-test-plan.md` §6.7 ("no override affordance", the F11.7 confirmation in the app).
+  - the UI tests in `04-test-plan.md` §6.7 ("no override affordance", the F11.7 confirmation in the app; the
+    confirmation's logic is tested on Linux, `AdversarialItemEditorTests`, review finding Z61).
 
 ## Milestone 6 — Hygiene (portable core done)
 
@@ -540,8 +615,13 @@ edits a current member has not published (S46) and a tombstone whose erasure sum
   shown) and URL with its own switch, all off (`MergeAdditions`, `MergeChoices`); export with the standing warning on
   screen for as long as it is open, the password asked for every time, and the `ExportReport` shown before the file
   is saved; the CSV exactly as stored; the restore screen showing `ImportPreview.archiveCreatedAt` first. The file
-  is handed to the system's exporter with `completeUnlessOpen` set on iOS (not yet checked on a device).
-  `ImportExportTests` covers both. Open: restoring an archive's vaults as vaults (today every archived item goes
+  is written by the app into its swept staging folder with `completeUnlessOpen` on iOS and handed to the file mover
+  (not yet checked on a device; review §Z, Z80), and the Emergency Kit PDF takes the same route behind the account
+  password (Z84, Z86). `ImportExportTests` covers both. Done after review §Z, on Linux: the import-wide stored-size
+  budget (Z81), the archive's own limits and the export's restore check (Z82), the export's bytes in `SecureBytes`
+  (Z83), dates bounded by the clock and no AutoFill state from an archive (Z85), sync's trash exported live (Z87).
+  Open from it: the Security framework's `CFData` copy of a Keychain secret read (Z98), and the device checks that
+  `docs/04-test-plan.md` lists under F5.1 and F5.7 and for Password AutoFill (Z95 to Z97). Open: restoring an archive's vaults as vaults (today every archived item goes
   into the one vault the person chooses, naming the vault it came from); the OS Credential Exchange calls and the
   extension's Info.plist keys; the instruction screens; a CXF file export (the format names the exporting app's
   relying-party ID, its associated domain, which the app does not have yet). Before shipping: a check of the CXF and

@@ -100,16 +100,16 @@ actor SealedPwnedRangeCache: PwnedRangeCache {
         self.session = session
     }
 
-    func cachedRange(for prefix: PwnedRangePrefix) async -> CachedPwnedRange? {
-        await session?.hygieneCachedRange(prefix)
+    func cachedRange(for prefix: PwnedRangePrefix, in partition: UUID) async -> CachedPwnedRange? {
+        await session?.hygieneCachedRange(prefix, in: partition)
     }
 
-    func store(_ entry: CachedPwnedRange) async {
-        await session?.hygieneCacheStore(entry)
+    func store(_ entry: CachedPwnedRange, in partition: UUID) async {
+        await session?.hygieneCacheStore(entry, in: partition)
     }
 
-    func remove(_ prefix: PwnedRangePrefix) async {
-        await session?.hygieneCacheRemove([prefix.value])
+    func remove(_ prefix: PwnedRangePrefix, in partition: UUID) async {
+        await session?.hygieneCacheRemove([RangeCacheIndex.Key(vault: partition, prefix: prefix.value)])
     }
 
     func removeAll() async {
@@ -119,23 +119,39 @@ actor SealedPwnedRangeCache: PwnedRangeCache {
     func lock() async {}
 }
 
-/// The sealed index of the prefix cache: for each prefix, when it was fetched and how large its record is, so
-/// eviction needs no record opened. `"WWRI"`, a version byte, a count, then 3 + 8 + 4 bytes an entry, big-endian.
+/// The sealed index of the prefix cache: for each vault and prefix, when it was fetched and how large its record is,
+/// so eviction needs no record opened. `"WWRI"`, a version byte (2), a count, then 16 + 3 + 8 + 4 bytes an entry
+/// (vault ID, prefix, fetch time, record size), big-endian, in key order. Version 1 named prefixes only, from before
+/// the cache was partitioned by vault (Z88); it reads as no index (no production build configures hygiene yet).
 struct RangeCacheIndex: Hashable {
     struct Entry: Hashable {
         var fetchedAt: Int64
         var size: UInt32
     }
 
+    /// A record's place: the vault whose check fetched it, and the prefix.
+    struct Key: Hashable, Comparable {
+        var vault: UUID
+        var prefix: UInt32
+
+        static func < (lhs: Key, rhs: Key) -> Bool {
+            if lhs.prefix != rhs.prefix { return lhs.prefix < rhs.prefix }
+            return lhs.vault.uuidString < rhs.vault.uuidString
+        }
+    }
+
     static let magic = Array("WWRI".utf8)
+    static let version: UInt8 = 2
     static let maximumEntries = 4096
-    var entries: [UInt32: Entry] = [:]
+    static let entryLength = 16 + 3 + 8 + 4
+    var entries: [Key: Entry] = [:]
 
     func encoded() -> [UInt8] {
-        var out = Self.magic + [1]
+        var out = Self.magic + [Self.version]
         out += Self.bigEndian(UInt64(entries.count), bytes: 4)
-        for (prefix, entry) in entries.sorted(by: { $0.key < $1.key }) {
-            out += Self.bigEndian(UInt64(prefix), bytes: 3)
+        for (key, entry) in entries.sorted(by: { $0.key < $1.key }) {
+            out += VaultSession.bytes(key.vault)
+            out += Self.bigEndian(UInt64(key.prefix), bytes: 3)
             out += Self.bigEndian(UInt64(bitPattern: entry.fetchedAt), bytes: 8)
             out += Self.bigEndian(UInt64(entry.size), bytes: 4)
         }
@@ -144,18 +160,20 @@ struct RangeCacheIndex: Hashable {
 
     init() {}
 
-    /// Exact: every length and count checked, a prefix listed once, within the twenty bits a prefix has.
+    /// Exact: every length and count checked, a key listed once, a prefix within the twenty bits a prefix has.
     init?(decoding bytes: [UInt8]) {
-        guard bytes.count >= 9, Array(bytes[0..<4]) == Self.magic, bytes[4] == 1 else { return nil }
+        guard bytes.count >= 9, Array(bytes[0..<4]) == Self.magic, bytes[4] == Self.version else { return nil }
         let count = Int(Self.read(bytes, 5, 4))
-        guard count <= Self.maximumEntries, bytes.count == 9 + count * 15 else { return nil }
+        guard count <= Self.maximumEntries, bytes.count == 9 + count * Self.entryLength else { return nil }
         for index in 0..<count {
-            let offset = 9 + index * 15
-            let prefix = UInt32(Self.read(bytes, offset, 3))
-            guard prefix < 1 << 20, entries[prefix] == nil else { return nil }
-            entries[prefix] = Entry(
-                fetchedAt: Int64(bitPattern: Self.read(bytes, offset + 3, 8)),
-                size: UInt32(Self.read(bytes, offset + 11, 4)))
+            let offset = 9 + index * Self.entryLength
+            let vault = UUID(uuid: VaultSession.uuidTuple(Array(bytes[offset..<(offset + 16)])))
+            let prefix = UInt32(Self.read(bytes, offset + 16, 3))
+            let key = Key(vault: vault, prefix: prefix)
+            guard prefix < 1 << 20, entries[key] == nil else { return nil }
+            entries[key] = Entry(
+                fetchedAt: Int64(bitPattern: Self.read(bytes, offset + 19, 8)),
+                size: UInt32(Self.read(bytes, offset + 27, 4)))
         }
     }
 
@@ -182,7 +200,8 @@ struct RangeCacheIndex: Hashable {
 extension VaultSession {
     static let hygieneLedgerLimit = 48 << 20
     static let hygieneRangeLimit = 2 << 20
-    static let hygieneIndexLimit = 64 << 10
+    /// The sealed index at its 4,096 entries of 31 bytes (`RangeCacheIndex`), with room for the envelope.
+    static let hygieneIndexLimit = 128 << 10
 
     // MARK: - Unlock and lock
 
@@ -582,6 +601,13 @@ extension VaultSession {
         [UInt8(value >> 16 & 0xFF), UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)]
     }
 
+    static func uuidTuple(_ bytes: [UInt8]) -> uuid_t {
+        (
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+            bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        )
+    }
+
     private func loadCacheIndex(since epoch: UInt64) async -> RangeCacheIndex {
         guard let name = localName("range-index", since: epoch),
             let plaintext = await openLocal(name: name, maximumLength: Self.hygieneIndexLimit, since: epoch)
@@ -598,25 +624,31 @@ extension VaultSession {
         try await sealLocal(plaintext, name: name, since: epoch)
     }
 
-    func hygieneCachedRange(_ prefix: PwnedRangePrefix) async -> CachedPwnedRange? {
+    /// The record name of the range for `key`: derived from the vault and the prefix, so a vault's checks find only
+    /// what was fetched for that vault (Z88).
+    func rangeRecordName(_ key: RangeCacheIndex.Key, since epoch: UInt64) -> UUID? {
+        localName("range", Self.bytes(key.vault) + Self.prefixBytes(key.prefix), since: epoch)
+    }
+
+    func hygieneCachedRange(_ prefix: PwnedRangePrefix, in vault: UUID) async -> CachedPwnedRange? {
         let epoch = lockEpoch
-        guard let name = localName("range", Self.prefixBytes(prefix.value), since: epoch),
+        guard let name = rangeRecordName(RangeCacheIndex.Key(vault: vault, prefix: prefix.value), since: epoch),
             let plaintext = await openLocal(name: name, maximumLength: Self.hygieneRangeLimit, since: epoch)
         else { return nil }
         defer { plaintext.zeroise() }
         // The record opened under this name, which is derived from the prefix; the decoded prefix must agree.
-        guard let entry = try? CachedPwnedRange(decoding: plaintext.unprotectedCopy()), entry.range.prefix == prefix
+        guard let entry = try? CachedPwnedRange(decodingPadded: plaintext.unprotectedCopy()),
+            entry.range.prefix == prefix
         else { return nil }
         return entry
     }
 
-    func hygieneCacheStore(_ entry: CachedPwnedRange) async {
+    func hygieneCacheStore(_ entry: CachedPwnedRange, in vault: UUID) async {
         let epoch = lockEpoch
-        let prefix = entry.range.prefix.value
-        guard let settings = hygieneRuntime?.settings,
-            let name = localName("range", Self.prefixBytes(prefix), since: epoch)
-        else { return }
-        var bytes = entry.encoded()
+        let key = RangeCacheIndex.Key(vault: vault, prefix: entry.range.prefix.value)
+        guard let settings = hygieneRuntime?.settings, let name = rangeRecordName(key, since: epoch) else { return }
+        // Padded, so the sealed record's length says nothing of how many suffixes the range holds (Z89).
+        var bytes = entry.encodedPadded()
         let size = bytes.count
         guard size <= Self.hygieneRangeLimit else { return }
         let plaintext = SecureBytes(wiping: &bytes)
@@ -625,7 +657,7 @@ extension VaultSession {
             try await sealLocal(plaintext, name: name, since: epoch)
             var index = await loadCacheIndex(since: epoch)
             let fetchedAt = Int64(entry.fetchedAt.timeIntervalSince1970.rounded(.down))
-            index.entries[prefix] = RangeCacheIndex.Entry(fetchedAt: fetchedAt, size: UInt32(size))
+            index.entries[key] = RangeCacheIndex.Entry(fetchedAt: fetchedAt, size: UInt32(size))
             // Expired entries answer nothing (`PwnedPasswordsClient.cacheLifetime`); then the oldest beyond the
             // bounds, the prefix breaking ties so eviction is deterministic.
             var evicted = index.entries.filter {
@@ -637,15 +669,15 @@ extension VaultSession {
             }
             var total = ordered.reduce(0) { $0 + Int($1.value.size) }
             var count = ordered.count
-            for (key, value) in ordered where count > settings.cacheCapacity || total > settings.cacheMaximumBytes {
-                guard key != prefix || count > 1 else { break }
-                index.entries[key] = nil
-                evicted.append(key)
+            for (other, value) in ordered where count > settings.cacheCapacity || total > settings.cacheMaximumBytes {
+                guard other != key || count > 1 else { break }
+                index.entries[other] = nil
+                evicted.append(other)
                 count -= 1
                 total -= Int(value.size)
             }
             if !evicted.isEmpty {
-                let names = evicted.compactMap { localName("range", Self.prefixBytes($0), since: epoch) }
+                let names = evicted.compactMap { rangeRecordName($0, since: epoch) }
                 try await settings.localStore.delete(names)
             }
             try await storeCacheIndex(index, since: epoch)
@@ -655,16 +687,16 @@ extension VaultSession {
         }
     }
 
-    /// Removes the named prefixes, or every cached range for `nil`.
-    func hygieneCacheRemove(_ prefixes: [UInt32]?) async {
+    /// Removes the named ranges, or every cached range for `nil`.
+    func hygieneCacheRemove(_ keys: [RangeCacheIndex.Key]?) async {
         let epoch = lockEpoch
         guard let settings = hygieneRuntime?.settings else { return }
         var index = await loadCacheIndex(since: epoch)
-        let targets = prefixes ?? Array(index.entries.keys)
-        let names = targets.compactMap { localName("range", Self.prefixBytes($0), since: epoch) }
+        let targets = keys ?? Array(index.entries.keys)
+        let names = targets.compactMap { rangeRecordName($0, since: epoch) }
         guard names.count == targets.count else { return }
         try? await settings.localStore.delete(names)
-        for prefix in targets { index.entries[prefix] = nil }
+        for key in targets { index.entries[key] = nil }
         try? await storeCacheIndex(index, since: epoch)
     }
 

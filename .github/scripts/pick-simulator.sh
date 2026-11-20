@@ -6,10 +6,16 @@
 # cannot load, and a runner image once put such an iPhone (iOS 27.0) first, so xcodebuild found no device with that
 # ID. Of the scheme's compatible destinations (printed before the ineligible ones), it takes the newest iOS, and on
 # that iOS the first device xcodebuild lists, so repeated runs pick the same model. Exits non-zero if none match.
+#
+# Listing a scheme's destinations resolves its packages, so this call is given the app tasks' source-packages
+# directory like every other (mise-tasks/app/packages.sh): one set of checkouts, in the place that is read.
 set -euo pipefail
+# shellcheck source=../../mise-tasks/app/packages.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../mise-tasks/app/packages.sh"
 
 prefix="${1:?usage: pick-simulator.sh <device name prefix>}"
-xcodebuild -showdestinations -project Apps/Watchword.xcodeproj -scheme Watchword-iOS 2>/dev/null |
+xcodebuild -showdestinations -project Apps/Watchword.xcodeproj -scheme Watchword-iOS "${package_arguments[@]}" \
+  2>/dev/null |
   python3 -I -c 'import re, sys
 prefix = sys.argv[1]
 text = sys.stdin.read().split("Ineligible destinations")[0].split("incompatible with")[0]

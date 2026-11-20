@@ -1,5 +1,6 @@
 import Foundation
 import WatchwordInterchange
+import WatchwordKit
 
 /// How the import and export screens word what the interchange core reports (PRD F8.1–F8.5). Every line names the
 /// entry or item it is about: a report is read before anything is deleted from the app being left.
@@ -53,6 +54,10 @@ public enum InterchangeWording {
         case .unresolvedValuesOmitted(let count): return "\(count) unresolved value(s) were left out."
         case .restoredFromSyncTrash:
             return "it was in the trash only because of sync, not by choice, and was imported as a live item."
+        case .autoFillStateNotRestored:
+            return "what AutoFill had recorded about sites' reports on it was not restored."
+        case .futureDateBounded:
+            return "a date in it was later than this device's clock and was set to now."
         }
     }
 
@@ -78,6 +83,9 @@ public enum InterchangeWording {
         case .fieldsMovedToNotes(let id, let count):
             return item(id) + ": \(count) field(s) were written into the notes."
         case .trashedItemOmitted(let id): return item(id) + " is in the Trash and was left out."
+        case .syncTrashExported(let id):
+            return item(id) + " was in the Trash only because of sync, not because you put it there, and was "
+                + "written as a live item."
         case .oneTimePasswordUnusable(let id):
             return item(id) + ": its one-time password was written as a concealed field."
         case .unresolvedValuesAdded(let id, let count):
@@ -94,5 +102,75 @@ public enum InterchangeWording {
         case .tagsOmitted(let id): return item(id) + ": its tags were left out."
         case .fieldDetailOmitted(let id, let label): return item(id) + ": part of \(label) was left out."
         }
+    }
+
+    /// What a restore of a new archive would not bring back (`ArchiveRestoreCheck`, Z82), one line each, for the
+    /// export screen to show before the person relies on the file. Empty when everything restores.
+    public static func lines(for check: ArchiveRestoreCheck, titles: [UUID: String]) -> [String] {
+        func item(_ id: UUID) -> String { titles[id].map { "“\($0)”" } ?? "An item" }
+        if let kind = check.limitReached {
+            return [
+                "This backup holds more than this version of Watchword can restore (\(kind.rawValue)). Everything "
+                    + "is in the file, but do not delete the vault in reliance on it."
+            ]
+        }
+        if check.failed {
+            return [
+                "Whether this backup can be restored could not be checked. Do not delete the vault in reliance on it."
+            ]
+        }
+        var lines = check.skipped.map {
+            item($0.itemID) + " is in the backup but would not be restored from it: " + text(for: $0.reason)
+        }
+        if let kind = check.limitReachedInAnotherAccount {
+            lines.append(
+                "This backup restores into this account, but is too large to restore into a new one with the "
+                    + "Emergency Kit's Secret Key (\(kind.rawValue)). Keep this account's devices, or back up "
+                    + "fewer vaults at a time.")
+        }
+        return lines
+    }
+
+    /// What an entry the review raised a concern about would do, a sentence per effect (review finding Z62). The
+    /// words say what AutoFill would do afterwards, since that is what the person is deciding.
+    static func explanation(
+        of concern: ImportConcern, hidden: [AffectedAccountRow], beside: [AffectedAccountRow]
+    ) -> [String] {
+        var lines: [String] = []
+        if !hidden.isEmpty {
+            lines.append(
+                "It would take the place of " + hidden.map(\.text).joined(separator: "; ")
+                    + ". AutoFill would stop offering what you saved there, and a password you save there next would "
+                    + "be offered to this item instead.")
+        }
+        if !beside.isEmpty {
+            lines.append(
+                "It would be offered beside " + beside.map(\.text).joined(separator: "; ")
+                    + ". You would choose between them each time.")
+        }
+        if concern.overlapIsTruncated {
+            lines.append("It covers more of your saved sites than are listed here.")
+        }
+        for host in concern.lookAlikeHosts {
+            let ascii = HostText.ascii(host.host)
+            lines.append(
+                host.resembles.isEmpty
+                    ? "\(ascii) cannot be told apart by eye from other addresses."
+                    : "\(ascii) looks like \(host.resembles.joined(separator: ", ")) but is a different address.")
+        }
+        if !concern.uncheckedHosts.isEmpty {
+            lines.append(
+                "Its addresses were not compared with your saved sites, because the file is too large to check at "
+                    + "once. Import it in smaller parts to have them checked.")
+        }
+        if concern.isTrashed {
+            lines.append("The file has it in its trash: it goes into the trash here, and would do this once restored.")
+        } else if concern.isArchived {
+            lines.append("The file marks it archived: it would do this without ever appearing in AutoFill itself.")
+        } else if concern.isExcludedFromSuggestions {
+            lines.append(
+                "The file marks it as never suggested: it would do this without ever appearing in AutoFill itself.")
+        }
+        return lines
     }
 }

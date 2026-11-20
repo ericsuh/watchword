@@ -12,9 +12,13 @@
 # The app-tests CI job. UI tests launch the app with `--uitest`, which (Debug only) swaps in in-memory ports, so no
 # App Group or Keychain access is needed. Signing settings are in signing.sh, shared with `app:build`.
 # macOS UI tests also need automation mode enabled on the machine, which needs an administrator; CI runners have it.
+# The package sources Xcode checks out are read before anything is built and again after the tests (packages.sh): the
+# task fails unless they are the pinned commits, whatever the tests said.
 set -euo pipefail
 # shellcheck source=signing.sh
 source "$(dirname "${BASH_SOURCE[0]}")/signing.sh"
+# shellcheck source=packages.sh
+source "$(dirname "${BASH_SOURCE[0]}")/packages.sh"
 
 platform="$usage_platform"
 if { [ -n "${usage_only_testing:-}" ] || [ -n "${usage_skip_testing:-}" ]; } && [ "$platform" = all ]; then
@@ -47,11 +51,13 @@ run_tests() { # run_tests <action> <scheme> <destination> <result bundle name> <
   args+=(-maximum-test-execution-time-allowance 2400)
   if [ -n "${usage_results:-}" ]; then
     # The whole output beside the bundle too, for app:diagnose: the tests' STEP lines are in it.
-    xcodebuild "$action" "${args[@]}" "$@" 2>&1 | tee "$usage_results/$name.log"
+    xcodebuild "$action" "${args[@]}" "${package_arguments[@]}" "$@" 2>&1 | tee "$usage_results/$name.log"
   else
-    xcodebuild "$action" "${args[@]}" "$@"
+    xcodebuild "$action" "${args[@]}" "${package_arguments[@]}" "$@"
   fi
 }
+
+resolve_packages
 
 # Each platform runs even if the other failed (a Mac without automation mode fails the macOS UI tests), and the task
 # fails if either did.
@@ -74,13 +80,15 @@ if [ "$platform" = ios ] || [ "$platform" = all ]; then
   # the runner dies before any test runs ("Timed out waiting for AX loaded notification"). A booted simulator
   # returns at once.
   if xcodebuild build-for-testing -project Apps/Watchword.xcodeproj -scheme Watchword-iOS \
-    -destination "$destination" "${ios_signing[@]}"; then
+    -destination "$destination" "${package_arguments[@]}" "${ios_signing[@]}"; then
     xcrun simctl bootstatus "$udid" -b
     run_tests test-without-building Watchword-iOS "$destination" iOS "${ios_signing[@]}" || failed="$failed iOS"
   else
     failed="$failed iOS(build)"
   fi
 fi
+
+check_resolved_packages "After testing" || failed="$failed packages(not the pinned commits)"
 
 if [ -n "$failed" ]; then
   echo "::error::App tests failed:$failed"

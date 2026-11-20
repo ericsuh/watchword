@@ -87,6 +87,8 @@ public struct PwnedPasswordsClient: Sendable {
     /// Whether the password behind `digest` is in the breach corpus.
     ///
     /// - Parameters:
+    ///   - partition: the vault the password is in. Only a range fetched for that vault answers from the cache, and
+    ///     the range fetched is stored for it alone (`PwnedRangeCache`, review §Z, Z88).
     ///   - now: the time, from the caller's clock; cache expiry is measured against it.
     ///   - freshAfter: if given, a cached range fetched before this is not used. The weekly re-scan passes the time
     ///     its pass began, so the pass really asks again while still asking once per prefix.
@@ -96,11 +98,12 @@ public struct PwnedPasswordsClient: Sendable {
     ///     it, and the check throws `.interrupted`.
     /// - Throws: `PwnedPasswordsError`, and nothing else.
     public func check(
-        _ digest: PasswordDigest, now: Date, freshAfter: Date? = nil,
+        _ digest: PasswordDigest, in partition: UUID, now: Date, freshAfter: Date? = nil,
         stillAuthorised: @Sendable () async -> Bool = { true }
     ) async throws -> PwnedCheck {
         let prefix = digest.prefix
-        if let cached = await cache.cachedRange(for: prefix), Self.isUsable(cached, now: now, freshAfter: freshAfter),
+        if let cached = await cache.cachedRange(for: prefix, in: partition),
+            Self.isUsable(cached, now: now, freshAfter: freshAfter),
             let result = cached.range.result(for: digest)
         {
             return PwnedCheck(result: result, source: .cache, rangeFetchedAt: cached.fetchedAt)
@@ -108,12 +111,12 @@ public struct PwnedPasswordsClient: Sendable {
         let range = try await fetchRange(prefix)
         guard await stillAuthorised() else { throw PwnedPasswordsError.interrupted }
         guard let result = range.result(for: digest) else { throw PwnedPasswordsError.malformedResponse }
-        await cache.store(CachedPwnedRange(range: range, fetchedAt: now))
+        await cache.store(CachedPwnedRange(range: range, fetchedAt: now), in: partition)
         // Asked again, because the store suspended: a lock that landed between the question above and the entry
         // reaching the cache has already emptied the cache, and this entry would have outlived it. Whenever the
         // lock came, either it runs after this store (and removes the entry) or this check runs after it.
         guard await stillAuthorised() else {
-            await cache.remove(prefix)
+            await cache.remove(prefix, in: partition)
             throw PwnedPasswordsError.interrupted
         }
         return PwnedCheck(result: result, source: .network, rangeFetchedAt: now)

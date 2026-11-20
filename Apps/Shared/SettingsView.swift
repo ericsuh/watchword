@@ -7,7 +7,7 @@ import WatchwordPresentation
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var kit: EmergencyKit?
+    @State private var showingKit = false
     @State private var askingPassword = false
     @State private var password = ""
     @State private var screen: AccountScreen?
@@ -51,7 +51,7 @@ struct SettingsView: View {
                                 .accessibilityIdentifier("settings.syncStatus")
                         }
                         ForEach(model.lastSync?.notices ?? []) { notice in
-                            SyncNoticeText(notice: notice)
+                            SyncNoticeText(notice: notice) { await model.perform($0) }
                                 .accessibilityIdentifier(AccessibilityID.Settings.syncNotice)
                         }
                     } else {
@@ -78,8 +78,14 @@ struct SettingsView: View {
                         screenButton("Restore from a Backup", .restore, AccessibilityID.Settings.restore)
                     }
                 }
-                Section("Emergency Kit") {
-                    Button("Show Emergency Kit…") { Task { kit = await model.emergencyKit() } }
+                Section {
+                    // The kit's own screen asks for the account password before it shows anything (Z86).
+                    Button("Show Emergency Kit…") { showingKit = true }
+                        .accessibilityIdentifier("settings.emergencyKit")
+                } header: {
+                    Text("Emergency Kit")
+                } footer: {
+                    Text("Your account password is asked for first.")
                 }
                 ErrorText(message: model.errorMessage)
             }
@@ -101,8 +107,10 @@ struct SettingsView: View {
             } message: {
                 Text("Quick unlock starts a new 14-day period before your password is asked for again.")
             }
-            .sheet(item: $kit) { kit in
-                EmergencyKitView(kit: kit, isOnboarding: false)
+            .sheet(isPresented: $showingKit) {
+                if let context = model.screenContext {
+                    EmergencyKitView(context: context, privacy: model.privacy, kit: nil)
+                }
             }
             .sheet(item: $screen) { screen in
                 if let context = model.screenContext {
@@ -144,9 +152,12 @@ struct SettingsView: View {
     }
 }
 
-/// One thing about the last sync to act on; "update the app" stands out.
+/// One thing about the last sync to act on; "update the app" stands out. A notice with actions
+/// (`SyncNotice.actions`, one per vault it applies to) offers each where `perform` is given, and asks first, saying
+/// what it means.
 struct SyncNoticeText: View {
     let notice: SyncNotice
+    var perform: ((SyncNoticeAction) async -> Void)?
 
     var body: some View {
         if notice == .updateRequired {
@@ -156,6 +167,30 @@ struct SyncNoticeText: View {
         } else {
             Text(notice.text).font(.footnote).foregroundStyle(.secondary)
         }
+        if let perform {
+            ForEach(notice.actions, id: \.self) { action in
+                SyncNoticeActionButton(action: action, perform: perform)
+            }
+        }
+    }
+}
+
+/// One action of a sync notice, behind a confirmation that says what it means (`SyncNoticeAction.confirmation`).
+struct SyncNoticeActionButton: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirming = false
+    let action: SyncNoticeAction
+    let perform: (SyncNoticeAction) async -> Void
+
+    var body: some View {
+        Button(action.title, role: .destructive) { confirming = true }
+            .disabled(model.isWorking)
+            .accessibilityIdentifier(AccessibilityID.Settings.syncNoticeAction(action.vaultID))
+            .confirmationDialog(action.title, isPresented: $confirming, titleVisibility: .visible) {
+                Button(action.title, role: .destructive) { Task { await perform(action) } }
+            } message: {
+                Text(action.confirmation)
+            }
     }
 }
 
@@ -196,7 +231,3 @@ struct SyncNoticeText: View {
         }
     }
 #endif
-
-extension EmergencyKit: @retroactive Identifiable {
-    public var id: UUID { accountID }
-}

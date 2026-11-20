@@ -92,6 +92,7 @@ struct VaultDetailView: View {
     @State private var renaming = false
     @State private var confirmingShare = false
     @State private var confirmingLeave = false
+    @State private var confirmingRemoveCopies = false
     @State private var removing: MemberRow?
     private let context: ScreenContext
 
@@ -114,12 +115,12 @@ struct VaultDetailView: View {
                 if row?.isPersonal == true {
                     Text("Your Personal vault is never shared.").foregroundStyle(.secondary)
                 }
-                if model.sharing?.readOnlyReason == nil {
+                if (row?.readOnlyReason ?? model.sharing?.readOnlyReason) == nil {
                     Button("Rename…") { renaming = true }
                         .accessibilityIdentifier(AccessibilityID.Vault.rename)
                 }
             }
-            if let reason = model.sharing?.readOnlyReason {
+            if let reason = row?.readOnlyReason ?? model.sharing?.readOnlyReason {
                 Section {
                     Banner(
                         text: reason,
@@ -167,7 +168,16 @@ struct VaultDetailView: View {
                 .accessibilityIdentifier(AccessibilityID.Vault.leaveConfirm)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Its items go from your devices once an administrator's device has replaced the vault's key.")
+            Text(SharedVaultModel.leaveExplanation)
+        }
+        .confirmationDialog(
+            "Remove this vault's items from this device?", isPresented: $confirmingRemoveCopies,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { Task { await model.removeFromThisDevice() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(model.removeCopiesMessage)
         }
         .confirmationDialog(
             "Remove \(removing?.name ?? "this member")?", isPresented: removingBinding, titleVisibility: .visible
@@ -177,9 +187,7 @@ struct VaultDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(
-                "They lose access to new changes. The vault's key is replaced and every item sealed again, but what "
-                    + "they already copied cannot be taken back.")
+            Text(SharedVaultModel.removalExplanation)
         }
     }
 
@@ -191,6 +199,14 @@ struct VaultDetailView: View {
         if !model.sharingAvailable {
             Section("Sharing") {
                 Text("Sharing vaults is not available in this version yet.").foregroundStyle(.secondary)
+            }
+        } else if model.needsSetUp {
+            Section("Sharing") {
+                Text(SharedVaultModel.setUpNotice).foregroundStyle(.secondary)
+                if let code = model.setUpCode {
+                    Text("Invitation to accept on this device:").font(.caption).foregroundStyle(.secondary)
+                    Text(code).font(.caption.monospaced()).textSelection(.enabled)
+                }
             }
         } else if !model.isShared {
             Section("Sharing") {
@@ -233,6 +249,16 @@ struct VaultDetailView: View {
                 if model.mayLeave {
                     Button("Leave This Vault…", role: .destructive) { confirmingLeave = true }
                         .accessibilityIdentifier(AccessibilityID.Vault.leave)
+                }
+            }
+            if model.membershipEnded {
+                Section {
+                    Button("Remove This Vault's Items From This Device…", role: .destructive) {
+                        confirmingRemoveCopies = true
+                    }
+                    .disabled(model.isWorking)
+                } footer: {
+                    Text(VaultSharing.endedDetail + " " + model.removeCopiesMessage)
                 }
             }
         }

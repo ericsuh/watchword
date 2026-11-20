@@ -1,8 +1,10 @@
-"""What the script tests share: the repository's paths, made-up pictures and exports, and stand-ins for the tools the
-scripts call (`gh`, `sips`, `mise`, `xcrun`), so everything runs on any machine with python3, bash and jq."""
+"""What the script tests share: the repository's paths, made-up pictures and exports, stand-ins for the tools the
+scripts call (`gh`, `sips`, `mise`, `xcrun`, `xcodebuild`), and git repositories that stand in for the packages an app
+build fetches, so everything runs on any machine with python3, bash, git and jq."""
 
 import json
 import os
+import re
 import shutil
 import stat
 import struct
@@ -162,9 +164,10 @@ sys.stdout.write(redirects[address])
 '''
 
 
-def workflow_script(step_name):
-    """The `run: |` block of the step so named in screenshots.yml, as the runner would hand it to bash."""
-    with open(WORKFLOW, encoding="utf-8") as handle:
+def workflow_script(step_name, workflow=WORKFLOW):
+    """The `run: |` block of the step so named in a workflow (screenshots.yml unless another is given), as the runner
+    would hand it to bash."""
+    with open(workflow, encoding="utf-8") as handle:
         lines = handle.read().split("\n")
     start = next(index for index, line in enumerate(lines) if line.strip() == f"- name: {step_name}")
     run = next(index for index in range(start, len(lines)) if lines[index].strip() == "run: |")
@@ -253,3 +256,139 @@ class ScriptTestCase(unittest.TestCase):
 def index_attachment(*screens):
     """The tour's `screens-index` attachment for screens [(name, caption)]."""
     return ("screens-index", ".txt", "".join(f"{name}\t{caption}\n" for name, caption in screens).encode())
+
+
+# xcodebuild, as the app tasks call it. Appends its arguments to $STUB_LOG. Where Xcode would check packages out, it
+# does, with real git: under the directory given by `-clonedSourcePackagesDirPath`, or under its own DerivedData in
+# $HOME when it is given none. `-resolvePackageDependencies` lays out $STUB_CHECKOUTS, and any other call lays out
+# $STUB_REBUILT (if set), as a build that resolved again would. Each is JSON, {package: how}: {"repository", "commit"}
+# is a clone checked out at that commit, with "edit" (a tracked file changed) or "add" (a file added) if given;
+# {"plain": true} is a directory that is no working copy; {"link": path} is a symbolic link. It records what it did in
+# workspace-state.json, as Xcode does. A call with `-derivedDataPath` also lays down the products $STUB_PRODUCTS
+# describes ({"ios" | "macos": {path under Build/Products: contents}}). Exits as $STUB_RESOLVE_EXIT or $STUB_EXIT say.
+FAKE_XCODEBUILD = r'''#!/usr/bin/env python3
+import json, os, shutil, subprocess, sys
+arguments = sys.argv[1:]
+with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(arguments) + "\n")
+resolving = "-resolvePackageDependencies" in arguments
+if "-clonedSourcePackagesDirPath" in arguments:
+    packages = arguments[arguments.index("-clonedSourcePackagesDirPath") + 1]
+else:
+    derived = os.path.join(os.environ["HOME"], "Library", "Developer", "Xcode", "DerivedData")
+    packages = os.path.join(derived, "Watchword-stand-in", "SourcePackages")
+plan = os.environ.get("STUB_CHECKOUTS" if resolving else "STUB_REBUILT", "")
+if plan:
+    checkouts = os.path.join(packages, "checkouts")
+    if os.path.isdir(checkouts):
+        for name in os.listdir(checkouts):
+            path = os.path.join(checkouts, name)
+            if os.path.islink(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+    os.makedirs(checkouts, exist_ok=True)
+    recorded = []
+    for name, how in sorted(json.loads(plan).items()):
+        target = os.path.join(checkouts, name)
+        if how.get("plain"):
+            os.makedirs(target)
+            with open(os.path.join(target, "Sources.swift"), "w", encoding="utf-8") as handle:
+                handle.write("// from nowhere in particular\n")
+        elif how.get("link"):
+            os.symlink(how["link"], target)
+        else:
+            subprocess.run(["git", "clone", "-q", how["repository"], target], check=True)
+            subprocess.run(["git", "-C", target, "checkout", "-q", "--detach", how["commit"]], check=True)
+            if how.get("edit"):
+                with open(os.path.join(target, "Sources.swift"), "a", encoding="utf-8") as handle:
+                    handle.write(how["edit"])
+            if how.get("add"):
+                with open(os.path.join(target, how["add"]), "w", encoding="utf-8") as handle:
+                    handle.write("// added after the checkout\n")
+        state = {"name": "sourceControlCheckout", "checkoutState": {"revision": how.get("commit")}}
+        reference = {"identity": name, "kind": "remoteSourceControl", "location": how.get("repository")}
+        recorded.append({"packageRef": reference, "state": state, "subpath": name})
+    with open(os.path.join(packages, "workspace-state.json"), "w", encoding="utf-8") as handle:
+        json.dump({"object": {"artifacts": [], "dependencies": recorded}, "version": 7}, handle)
+if resolving:
+    sys.exit(int(os.environ.get("STUB_RESOLVE_EXIT", "0")))
+if "-derivedDataPath" in arguments and os.environ.get("STUB_PRODUCTS"):
+    root = os.path.join(arguments[arguments.index("-derivedDataPath") + 1], "Build", "Products")
+    platform = "ios" if "Watchword-iOS" in arguments else "macos"
+    for relative, contents in json.loads(os.environ["STUB_PRODUCTS"])[platform].items():
+        target = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as handle:
+            handle.write(contents.encode("latin-1"))
+sys.exit(int(os.environ.get("STUB_EXIT", "0")))
+'''
+
+
+def git(directory, *arguments):
+    """Runs git in directory as nobody in particular, with no configuration but its own, and returns what it printed."""
+    environment = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Script Tests",
+        "GIT_AUTHOR_EMAIL": "tests@example.invalid",
+        "GIT_COMMITTER_NAME": "Script Tests",
+        "GIT_COMMITTER_EMAIL": "tests@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    done = subprocess.run(
+        ["git", "-C", directory, *arguments], env=environment, capture_output=True, text=True, check=True
+    )
+    return done.stdout.strip()
+
+
+class PackageSources:
+    """Git repositories that stand in for the packages an app build fetches: swift-crypto and swift-asn1, each with
+    the commit that is pinned and a later one (a moved tag, a newer release), and a package nobody allowed."""
+
+    def __init__(self, directory):
+        self.repositories, self.commits = {}, {}
+        for name, versions in (("swift-crypto", 2), ("swift-asn1", 2), ("swift-extra", 1)):
+            path = os.path.join(directory, name)
+            os.makedirs(path)
+            git(path, "init", "-q")
+            self.repositories[name], self.commits[name] = path, []
+            for version in range(versions):
+                with open(os.path.join(path, "Sources.swift"), "w", encoding="utf-8") as handle:
+                    handle.write(f"// {name}, version {version}\n")
+                git(path, "add", "Sources.swift")
+                git(path, "commit", "-q", "-m", f"{name} {version}")
+                self.commits[name].append(git(path, "rev-parse", "HEAD"))
+
+    def pins(self):
+        """ALLOWED_PINS for these repositories: the first commit of each of the two allowed packages."""
+        return " ".join(f"{name}={self.commits[name][0]}" for name in ("swift-crypto", "swift-asn1"))
+
+    def at(self, name, version=0, **more):
+        return {"repository": self.repositories[name], "commit": self.commits[name][version], **more}
+
+    def plan(self, **changes):
+        """What xcodebuild checks out, as JSON for the stand-in: the pinned commits, with changes laid over them
+        (keyed swift_crypto, swift_asn1, swift_extra; None leaves a package out)."""
+        packages = {"swift-crypto": self.at("swift-crypto"), "swift-asn1": self.at("swift-asn1")}
+        for key, how in changes.items():
+            name = key.replace("_", "-")
+            if how is None:
+                del packages[name]
+            else:
+                packages[name] = how
+        return json.dumps(packages)
+
+
+def pinned_tripwire(case, sources):
+    """A copy of assert-no-dependencies.sh under the test's scratch directory, the same in every line but the one
+    that names the allowed commits, which names the stand-in repositories' instead (a real commit ID cannot be given
+    to a made-up repository). Returns its path."""
+    with open(os.path.join(ROOT, ".github", "scripts", "assert-no-dependencies.sh"), encoding="utf-8") as handle:
+        text = handle.read()
+    pattern = re.compile(r'^export ALLOWED_PINS="swift-crypto=[0-9a-f]{40} swift-asn1=[0-9a-f]{40}"$', re.MULTILINE)
+    case.assertEqual(len(pattern.findall(text)), 1, "the script names its allowed commits on one line, in one form")
+    target = case.write(os.path.join(".github", "scripts", "assert-no-dependencies.sh"), pattern.sub(
+        f'export ALLOWED_PINS="{sources.pins()}"', text))
+    os.chmod(target, 0o755)
+    return target

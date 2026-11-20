@@ -71,15 +71,15 @@ Why each host is there, and which ones the default list already covers:
 
 | Host | Used for | On the default list? |
 | --- | --- | --- |
-| `download.swift.org` | The swiftly installer and every Swift toolchain tarball and signature | **No** — must be added |
+| `download.swift.org` | Every Swift toolchain tarball and signature (and the swiftly installer, only on the opt-in of §3) | **No** — must be added |
 | `*.swift.org` (`www.swift.org`) | The Swift signing-key bundle | `swift.org` and `www.swift.org` are; the wildcard keeps future subdomains working |
 | `mise.jdx.dev` | The pinned mise binary (first source tried) | **No** — must be added |
 | `mise-versions.jdx.dev` | mise's version index; with exact pins it is rarely consulted, but without it mise falls back to the GitHub API, which the GitHub proxy can refuse (below) | **No** — must be added |
 | `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` | The mise fallback download and the release assets of the tools pinned in `mise.toml` | Yes |
-| `archive.ubuntu.com`, `security.ubuntu.com`, `*.ubuntu.com` | apt dependencies, and the keyserver GPG may consult | Yes |
+| `archive.ubuntu.com`, `security.ubuntu.com`, `*.ubuntu.com` | apt dependencies | Yes |
 
 The default **Trusted** allowlist contains `swift.org` and `www.swift.org` but *not*
-`download.swift.org`, and that host is where both the installer and every toolchain tarball live.
+`download.swift.org`, and that host is where every toolchain tarball lives.
 On Trusted alone, setup fails with network errors that look like a broken script.
 
 GitHub traffic is different: it goes through a separate GitHub proxy whatever the allowlist says, and
@@ -106,6 +106,9 @@ checkout**, and it gets reviewed like `select-xcode.sh` rather than living only 
 | `WATCHWORD_TEST_SEED` | *(optional)* | Pin the SplitMix64 `SeededGenerator` when reproducing a nightly failure. |
 | `MISE_DISABLE_TOOLS` | `xcodegen` | XcodeGen publishes macOS builds only, so a `mise install` run inside a session would otherwise fail on it. The setup script sets this for its own run; this makes sessions match. |
 
+These variables are for the session. A setup script is not given them, so the one switch the setup script has,
+`WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY` (§3), cannot be set in this table: it is a line above the pasted script.
+
 Do not put secrets here: anyone who can use the environment can read the variables and the setup
 script. Nothing in this repository needs a secret in a session — there are no dependencies to
 authenticate to, and the GitHub proxy handles git.
@@ -116,16 +119,38 @@ authenticate to, and the GitHub proxy handles git.
 
 1. Locates the checkout by looking for a `Package.swift` naming `Watchword`, and reads the version
    pin from [`.swift-version`](../.swift-version) (`6.4.1`).
-2. Installs the apt dependencies swift.org publishes for Ubuntu 24.04 **and** downloads the
-   [swiftly](https://www.swift.org/install/linux/) installer concurrently — the five-minute budget
-   below is the reason for the `&`/`wait`.
-3. Installs the toolchain, trying two methods in order and judging both by whether a `swift` binary
-   actually appears:
+2. Installs the apt dependencies swift.org publishes for Ubuntu 24.04, concurrently with the mise
+   install of step 5 — the five-minute budget below is the reason for the `&`/`wait`.
+3. Installs the toolchain, judging the result by whether a `swift` binary actually appears:
    - **The release tarball**, verified with GPG against the pinned Swift signing key
      `52BB7E3D…B47A981F` before anything is extracted. A toolchain is compile-time code execution on
-     every later build, so it is verified rather than trusted (`07-supply-chain.md`, T3).
-   - **swiftly**, as the second opinion if the URL layout has moved. Both subcommands pass
-     `--assume-yes`: a setup script has no TTY, and `swiftly install` prompts.
+     every later build, so it is verified rather than trusted (`07-supply-chain.md`, T3). The
+     signature says who made the archive, not which release it is, and that key has signed every
+     release; so once extracted the toolchain must also report the version that was asked for
+     (`swift --version`), or it is removed and treated as one that did not verify.
+   - **A tarball that does not verify ends the attempt.** A signature by any other key, a signature
+     or key bundle that cannot be fetched: the download is discarded, nothing else is tried, and the
+     session starts without a toolchain and is told that the download did not verify. The script
+     used to answer this by running the second method below, which meant the one check it makes
+     could be failed on purpose to reach the path that makes none (review finding Z106).
+   - **[swiftly](https://www.swift.org/install/linux/), only when asked for.** It resolves release
+     URLs itself, so it is the second opinion if the URL layout has moved. But the script downloads
+     it from an unversioned URL and has no checksum or signer pinned for it, and then runs it as
+     root; no published checksum was available to pin when this was written. So it is fetched and
+     run only when the tarball could not be downloaded at all **and** the script finds
+     `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1` in its own environment. A setup script is not given the
+     variables saved on the cloud environment (§2), so the way to say so is a line of its own above
+     the pasted script, in the same field:
+
+     ```sh
+     export WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1
+     ```
+
+     or, to use it once without changing the environment,
+     `WATCHWORD_ALLOW_UNVERIFIED_SWIFTLY=1 .github/scripts/cloud-setup.sh` inside a session. Without
+     that, a missing tarball also means a session without a toolchain, and a note that says what
+     would change it. Both subcommands pass `--assume-yes`: a setup script has no TTY, and
+     `swiftly install` prompts.
 4. Symlinks `swift`, `swiftc`, `swift-format` and `sourcekit-lsp` into `/usr/local/bin` and writes
    `/etc/profile.d/swift.sh`. The Bash tool does not run a login shell, so the symlinks are what
    actually make the toolchain reachable; only the drivers are linked, because symlinking the whole
@@ -141,7 +166,14 @@ authenticate to, and the GitHub proxy handles git.
    `/var/log/watchword-cloud-setup.log`, and if no toolchain is present at the end the script appends
    a note to root's `CLAUDE.md`, which the session loads as user instructions. A setup script cannot
    fail a session start, so the alternative is an agent discovering `swift: command not found` much
-   later with no idea why — which is precisely what the first version of this script produced.
+   later with no idea why — which is precisely what the first version of this script produced. The
+   note says which of the three it was: a download that did not verify (possible tampering, and no
+   other source to be tried unasked), a tarball that could not be had with the swiftly fallback not
+   opted into, or anything else.
+
+`mise run test:scripts` runs the script itself against stand-ins for `curl`, `gpg`, `apt-get` and
+`mise`, with every path it writes moved under a scratch directory (`WATCHWORD_SETUP_TEST_ROOT`, which
+nothing else sets): each of the cases above is a test in `Tests/ScriptTests/test_cloud_setup.py`.
 
 Two hosting constraints it is written around, and which any edit must preserve:
 
@@ -171,7 +203,7 @@ Ask Claude to run:
 
 That script is the honest subset of `ci.yml`: the four jobs that need no Xcode. Each gate is the same
 `mise run <task>` the matching `ci.yml` step calls — `build`, `test`, `test:adversarial`, then (without
-`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions`, `test:scripts` and `lint` — so it
+`--quick`) `build:strict`, `audit:unsafe`, `audit:dependencies`, `audit:actions`, `audit:mise-pins`, `test:scripts` and `lint` — so it
 cannot drift from CI, and it inherits the tasks' own checks that both test frameworks and every
 adversarial suite actually ran. It prints a pass/FAIL line per gate and a summary naming which runner
 it used and the Xcode-only gates it did not run, so a green result is never mistaken for a green CI.
@@ -213,9 +245,10 @@ checksum did not match), or `mise trust/install FAILED` followed by the tail of
 `/tmp/watchword-cloud-setup/mise.log`. The usual cause is `mise.jdx.dev` or `mise-versions.jdx.dev`
 missing from the allowlist (§2).
 
-GPG needs `keyserver.ubuntu.com` to fetch the signing key; it is covered by the `*.ubuntu.com` entry
-in the Trusted defaults, which is one more reason to keep **"Also include default list of common
-package managers"** ticked in step 2.
+GPG contacts no keyserver: the script fetches Swift's key bundle over HTTPS from `www.swift.org` and pins
+the signer by fingerprint, because a keyserver lookup is not something the session's egress proxy
+carries. A verification failure is therefore never a keyserver problem; §3 says what the script does
+about one.
 
 Mind the compiler-version gap: a cloud session builds with Swift 6.4, while `ci.yml` also runs the
 Xcode 16.4 leg on macOS 15. Something can compile cleanly in a cloud session and still fail that
@@ -230,16 +263,17 @@ gates a merge; `ci.yml` does.
 
 | Input | Values | Meaning |
 | --- | --- | --- |
-| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `app:screenshots`, `check` | The steps of the matching `ci.yml` job (below); `app:screenshots` is `screenshots.yml`'s capture |
+| `gate` | `test`, `test:adversarial`, `build`, `build:strict`, `lint`, `app:test`, `app:release`, `app:screenshots`, `check` | The steps of the matching `ci.yml` job (below); `app:screenshots` is `screenshots.yml`'s capture |
 | `filter` | empty, or one line not starting with `-` | `test`: a `swift test --filter` regex. `app:test` with `ios` or `macos`: an `-only-testing` identifier such as `WatchwordMacUITests/OnboardingAndUnlockTests`. Must match at least one test |
-| `platform` | `macos`, `ios`, `all` | `app:test` and `app:screenshots` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
+| `platform` | `macos`, `ios`, `all` | `app:test`, `app:release` and `app:screenshots` only; `all` runs both schemes in one job (120-minute limit) and takes no filter |
 | `appearance` | `light`, `dark` | `app:screenshots` only: `dark` captures the dark set |
 | `device` | `iphone`, `ipad` | `app:screenshots` with `ios` or `all` only: `ipad` captures on an iPad simulator |
 | `xcode` | `27.0`, `16.4` | `xcode-27` (macOS 27), every gate; or `macos-15`, `ci.yml`'s oldest leg, `build` and `test` only |
 
 Each gate runs what its `ci.yml` job runs: `test` is the package-tests job (`audit:dependencies`, `build -v`,
 `test --coverage`), `build:strict` is the strict-memory-safety job (`build:strict --require`, then `audit:unsafe`),
-`lint` is the lint job (`lint`, then `test:scripts`), and `build`, `test:adversarial` and `app:test` are their own
+`lint` is the lint job (`lint`, then `test:scripts`, `audit:actions` and `audit:mise-pins`), `app:release` is the
+release-build job (the Release configuration built and read for Debug-only facilities), and `build`, `test:adversarial` and `app:test` are their own
 job's step. The exceptions: a filtered `test`
 runs only the matching tests, without coverage or the audit and build steps; `app:test` omits the iOS leg's
 best-effort AutoFill step; and `check` has no `ci.yml` job, being `mise.toml`'s local aggregate. A request that
@@ -324,6 +358,10 @@ What it is not:
   the repository default, `08-repository-hardening.md` §1). What the workflow and `ci:gate` add is narrower: inputs
   reach the shell only through `env:`, and `ci:gate`'s refusals stop a mistyped or prompt-influenced request from
   running something other than what was meant, or from passing without testing anything (`07-supply-chain.md` §3.2).
+  The same write access reaches further than this workflow: a session that can push a branch can open a pull request
+  whose workflow files name the `staging` environment, where the repository's one secret lives. What refuses that is
+  the environment's required reviewer (`08-repository-hardening.md` §1.2), not anything in the tree, so a pending
+  deployment to `staging` that a session caused is approved only after reading what it will run.
 
 ## 6. Related
 

@@ -10,6 +10,8 @@ import Foundation
 /// - `account/<accountID>/vault/<vaultID>/key/<keyID>/<deviceID>` — a vault key wrapped under the keyset's symmetric
 ///   key, vouched for by the device named last.
 /// - `account/<accountID>/vault/<vaultID>/deleted/<deviceID>` — the vault was deleted, as stated by that device.
+/// - `account/<accountID>/vault/<vaultID>/shared/<deviceID>` — the vault is governed by a membership chain (shared),
+///   as stated by that device, with the chain's owner (docs/02-architecture.md §8.10).
 ///
 /// As with sync objects, names come from a store that may be hostile (A1) and parsing is exact: numbers are 20
 /// zero-padded digits, UUIDs are in canonical upper case, and anything that does not re-encode to the same string is
@@ -20,6 +22,7 @@ public enum AccountObjectLocation: Hashable, Sendable {
     case registryEntry(accountID: UUID, id: String)
     case vaultKey(accountID: UUID, vaultID: UUID, keyID: UUID, author: UUID)
     case vaultDeletion(accountID: UUID, vaultID: UUID, author: UUID)
+    case vaultShared(accountID: UUID, vaultID: UUID, author: UUID)
 
     public static func accountPrefix(_ accountID: UUID) -> String {
         "account/\(accountID.uuidString)/"
@@ -40,7 +43,7 @@ public enum AccountObjectLocation: Hashable, Sendable {
     public var accountID: UUID {
         switch self {
         case .header(let id, _, _), .registryEntry(let id, _), .vaultKey(let id, _, _, _),
-            .vaultDeletion(let id, _, _):
+            .vaultDeletion(let id, _, _), .vaultShared(let id, _, _):
             return id
         }
     }
@@ -55,6 +58,8 @@ public enum AccountObjectLocation: Hashable, Sendable {
             return Self.vaultsPrefix(accountID) + "\(vaultID.uuidString)/key/\(keyID.uuidString)/\(author.uuidString)"
         case .vaultDeletion(let accountID, let vaultID, let author):
             return Self.vaultsPrefix(accountID) + "\(vaultID.uuidString)/deleted/\(author.uuidString)"
+        case .vaultShared(let accountID, let vaultID, let author):
+            return Self.vaultsPrefix(accountID) + "\(vaultID.uuidString)/shared/\(author.uuidString)"
         }
     }
 
@@ -85,6 +90,9 @@ public enum AccountObjectLocation: Hashable, Sendable {
             case "deleted":
                 guard parts.count == 6, let author = SyncObjectLocation.uuid(parts[5]) else { return nil }
                 self = .vaultDeletion(accountID: accountID, vaultID: vaultID, author: author)
+            case "shared":
+                guard parts.count == 6, let author = SyncObjectLocation.uuid(parts[5]) else { return nil }
+                self = .vaultShared(accountID: accountID, vaultID: vaultID, author: author)
             default:
                 return nil
             }

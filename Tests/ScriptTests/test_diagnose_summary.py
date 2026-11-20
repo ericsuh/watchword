@@ -83,9 +83,9 @@ class DiagnoseSummaryTests(support.ScriptTestCase):
         self.assertNotIn("launch", "\n".join(shown), "another test's step was shown")
 
     def test_a_line_in_both_logs_is_shown_once_in_time_order(self):
-        test = "-[ImportExportTests testExportReportALockAndARestore]"
+        test = "-[ImportExportTests testBackUpAndRestore]"
         late, early = step("05:00", test, "restore"), step("01:00", test, "export")
-        identifier = "ImportExportTests/testExportReportALockAndARestore()"
+        identifier = "ImportExportTests/testBackUpAndRestore()"
         self.bundle(
             "iOS",
             summary(passed=1, failed=1, failures=[(identifier, "first"), (identifier, "second\nline two")]),
@@ -193,6 +193,28 @@ class DiagnoseTaskTests(support.ScriptTestCase):
         tail = lines[lines.index(f"--- iOS: {identifier} failed") :]
         self.assertEqual([line.split("] ")[-1] for line in tail if line.startswith("  STEP ")],
                          ["launch", "tourVaultsAndSharing"])  # fmt: skip
+
+    def test_the_session_log_before_a_query_timeout_is_shown(self):
+        """A stalled query is reported minutes after it began, and the session log runs on for thousands of lines
+        after: what XCUITest saw while it waited must be printed from where it is, not from the file's end."""
+        self.install("xcrun", FAKE_XCRUN)
+        os.makedirs(self.path("TestResults", "iOS.xcresult"))
+        self.write("summary.json", json.dumps(summary(failed=1, failures=[("ATests/testA()", "timed out")])))
+        lines = [f"line {number}" for number in range(1, 1001)]
+        lines[399] = "10:54:36 Failed to get matching snapshots: Timed out while evaluating UI query."
+        self.write(os.path.join("diagnostics", "Runner", "Session-WatchwordUITests-1.log"), "\n".join(lines) + "\n")
+        result = self.run_process(
+            ["bash", DIAGNOSE], usage_results="TestResults", STUB_SUMMARY=self.path("summary.json"),
+            STUB_DIAGNOSTICS=self.path("diagnostics"),
+        )  # fmt: skip
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shown = result.stdout.splitlines()
+        heading = "::group::iOS: Runner/Session-WatchwordUITests-1.log, lines 250 to 400, before a UI query timed out"
+        start = shown.index(heading)
+        self.assertEqual(shown[start + 1], "line 250")
+        self.assertEqual(shown[start + 151], lines[399])
+        self.assertEqual(shown[start + 152], "::endgroup::")
+        self.assertTrue(shown[-1].startswith("UI-test summary: 0 passed, 1 failed"))
 
     def test_no_bundles_still_ends_in_the_summary(self):
         os.makedirs(self.path("TestResults"))

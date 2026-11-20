@@ -34,17 +34,17 @@ final class ScreenshotTourTests: XCTestCase {
 
         // Onboarding. The field has the focus already; the tap lets the keyboard finish arriving on iOS.
         let newPassword = app.secureTextFields["onboarding.password"]
-        XCTAssertTrue(newPassword.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(newPassword.appears(within: 10), app.debugDescription)
         newPassword.click()
         Screens.capture("onboarding", in: app, showing: "Creating the account: choosing the account password")
-        newPassword.typeText(password)
+        newPassword.enterText(password)
         let confirmation = app.secureTextFields["onboarding.confirm"]
         confirmation.click()
-        confirmation.typeText(password + "\n")
+        confirmation.enterText(password + "\n")
 
         // The Emergency Kit. The tap on the key does nothing; it waits for the keyboard to have gone.
         let secretKey = app.staticTexts["kit.secretKey"]
-        XCTAssertTrue(secretKey.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(secretKey.appears(within: 15), app.debugDescription)
         secretKey.click()
         Screens.capture(
             "emergency-kit", in: app, showing: "The Emergency Kit: the test account's Secret Key, before confirming")
@@ -53,78 +53,78 @@ final class ScreenshotTourTests: XCTestCase {
 
         // The vault, empty.
         let add = app.buttons["items.add"]
-        XCTAssertTrue(add.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(secretKey.waitForNonExistence(timeout: 10), "the Emergency Kit is still shown")
+        XCTAssertTrue(add.appears(within: 10), app.debugDescription)
+        XCTAssertTrue(secretKey.disappears(within: 10), "the Emergency Kit is still shown")
         Screens.capture("item-list-empty", in: app, showing: "The vault with no items yet")
 
         // A new item, with a generated password.
         add.click()
         let title = app.textFields["edit.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(title.appears(within: 10), app.debugDescription)
         title.click()
-        title.typeText("Library")
+        title.enterText("Library")
         app.textFields["edit.host"].click()
-        app.textFields["edit.host"].typeText("citylibrary.org")
+        app.textFields["edit.host"].enterText("citylibrary.org")
         app.textFields["edit.username"].click()
-        app.textFields["edit.username"].typeText("pat")
+        app.textFields["edit.username"].enterText("pat")
         app.buttons["edit.generate"].click()
         Screens.capture("item-edit", in: app, showing: "A new item, its password filled in by the generator")
         app.buttons["edit.save"].click()
-        XCTAssertTrue(app.itemRow("Library").waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(title.waitForNonExistence(timeout: 10), "the editor is still open")
+        XCTAssertTrue(app.itemRow("Library").appears(within: 10), app.debugDescription)
+        XCTAssertTrue(title.disappears(within: 10), "the editor is still open")
 
         // A second item, so the list has more than one row and there is one to move to the trash.
         add.click()
-        XCTAssertTrue(title.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(title.appears(within: 10), app.debugDescription)
         title.click()
-        title.typeText("Garden club")
+        title.enterText("Garden club")
         app.textFields["edit.host"].click()
-        app.textFields["edit.host"].typeText("gardenclub.org")
+        app.textFields["edit.host"].enterText("gardenclub.org")
         app.buttons["edit.save"].click()
-        XCTAssertTrue(app.itemRow("Garden club").waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(title.waitForNonExistence(timeout: 10), "the editor is still open")
+        XCTAssertTrue(app.itemRow("Garden club").appears(within: 10), app.debugDescription)
+        XCTAssertTrue(title.disappears(within: 10), "the editor is still open")
         Screens.capture("item-list", in: app, showing: "The vault with two items")
 
         // An item, with its password hidden and then shown.
         app.itemRow("Library").firstMatch.click()
-        XCTAssertTrue(app.staticTexts["detail.title"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["detail.title"].appears(within: 10), app.debugDescription)
         let show = app.buttons["Show"].firstMatch
-        XCTAssertTrue(show.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(show.appears(within: 10), app.debugDescription)
         Screens.capture("item-detail", in: app, showing: "An item, its password hidden")
         show.click()
-        XCTAssertTrue(app.buttons["Hide"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["Hide"].firstMatch.appears(within: 10), app.debugDescription)
         Screens.capture("item-detail-revealed", in: app, showing: "The same item with its generated password shown")
 
         // Moving the other item to the trash asks first (PRD F1.5, F7.7).
         app.backToList()
         app.itemRow("Garden club").firstMatch.click()
         let trash = app.buttons["detail.trash"].firstMatch
-        XCTAssertTrue(trash.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(trash.appears(within: 10), app.debugDescription)
         trash.click()
         let confirmTrash = app.buttons.matching(
             NSPredicate(format: "label == %@ AND identifier != %@", "Move to Trash", "detail.trash")
         ).firstMatch
-        XCTAssertTrue(confirmTrash.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(confirmTrash.appears(within: 10), app.debugDescription)
         Screens.capture("trash-confirmation", in: app, showing: "The confirmation before an item moves to the Trash")
         confirmTrash.click()
-        XCTAssertTrue(app.descendants(matching: .any)["detail.empty"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.itemRow("Garden club").waitForNonExistence(timeout: 10), "the trashed item is still listed")
+        XCTAssertTrue(app.descendants(matching: .any)["detail.empty"].appears(within: 10))
+        XCTAssertTrue(app.itemRow("Garden club").disappears(within: 10), "the trashed item is still listed")
 
         // Locked, and a wrong password.
         app.backToList()
         let lock = app.buttons["items.lock"].firstMatch
-        XCTAssertTrue(lock.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(lock.appears(within: 10), app.debugDescription)
         lock.click()
         let unlock = app.secureTextFields["unlock.password"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(unlock.appears(within: 10), app.debugDescription)
         unlock.click()
         Screens.capture("locked", in: app, showing: "The locked app")
-        unlock.typeText("not the password\n")
-        XCTAssertTrue(app.staticTexts["error"].waitForExistence(timeout: 15), app.debugDescription)
+        unlock.enterText("not the password\n")
+        XCTAssertTrue(app.staticTexts["error"].appears(within: 15), app.debugDescription)
         Screens.capture("unlock-failed", in: app, showing: "The locked app after a wrong password")
         unlock.click()
-        unlock.typeText(password + "\n")
-        XCTAssertTrue(app.itemRow("Library").waitForExistence(timeout: 15), app.debugDescription)
+        unlock.enterText(password + "\n")
+        XCTAssertTrue(app.itemRow("Library").appears(within: 15), app.debugDescription)
 
         step("settings and the conflict")
         // Settings. A --uitest launch adds the section that drives the other device; a release build has none.
@@ -134,17 +134,17 @@ final class ScreenshotTourTests: XCTestCase {
         // The item is published, renamed on the other device, and renamed here before this device has seen that.
         app.syncNow()
         app.buttons["debug.peerRename"].click()
-        XCTAssertTrue(app.staticTexts["debug.peerStatus"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["debug.peerStatus"].appears(within: 15), app.debugDescription)
         app.closeSettings()
         app.itemRow("Library").firstMatch.click()
         let edit = app.buttons["detail.edit"].firstMatch
-        XCTAssertTrue(edit.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(edit.appears(within: 10), app.debugDescription)
         edit.click()
-        XCTAssertTrue(title.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(title.appears(within: 10), app.debugDescription)
         title.click()
         title.clearAndType("Library here")
         app.buttons["edit.save"].click()
-        XCTAssertTrue(title.waitForNonExistence(timeout: 10), "the editor is still open")
+        XCTAssertTrue(title.disappears(within: 10), "the editor is still open")
 
         // Syncing brings the two names together: the list marks the item, and the item offers both (PRD F7.6).
         app.backToList()
@@ -154,17 +154,17 @@ final class ScreenshotTourTests: XCTestCase {
         let conflicted = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "items.row.Library")
         ).firstMatch
-        XCTAssertTrue(conflicted.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(conflicted.appears(within: 10), app.debugDescription)
         Screens.capture("item-list-conflict", in: app, showing: "The list marking an item changed on two devices")
         conflicted.click()
         XCTAssertTrue(
-            app.descendants(matching: .any)["detail.conflicts"].firstMatch.waitForExistence(timeout: 10),
+            app.descendants(matching: .any)["detail.conflicts"].firstMatch.appears(within: 10),
             app.debugDescription)
-        XCTAssertTrue(app.buttons["conflict.Title.1"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["conflict.Title.1"].firstMatch.appears(within: 10), app.debugDescription)
         Screens.capture("conflict-resolution", in: app, showing: "The item offering both names, one to keep")
         app.buttons["conflict.Title.1"].firstMatch.click()
         XCTAssertTrue(
-            app.descendants(matching: .any)["detail.conflicts"].firstMatch.waitForNonExistence(timeout: 10),
+            app.descendants(matching: .any)["detail.conflicts"].firstMatch.disappears(within: 10),
             "the conflict is still shown")
 
         // The quarantine before sharing, as in QuarantineTests: the other device then writes into the Personal vault
@@ -188,21 +188,21 @@ final class ScreenshotTourTests: XCTestCase {
     private func tourVaultsAndSharing(_ app: XCUIApplication) {
         app.backToList()
         app.openScreen(AccessibilityID.Settings.vaults)
-        XCTAssertTrue(app.element(AccessibilityID.Vaults.row("Personal")).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.element(AccessibilityID.Vaults.row("Personal")).appears(within: 10))
         Screens.capture("vault-list", in: app, showing: "The vaults: Personal only, before any is created")
         app.tap(AccessibilityID.Vaults.add)
         app.enter("Household", into: AccessibilityID.Vaults.newName)
         Screens.capture("vault-new", in: app, showing: "Naming a new vault")
         app.tap(AccessibilityID.Vaults.create)
         app.tap(AccessibilityID.Vaults.row("Household"))
-        XCTAssertTrue(app.element(AccessibilityID.Vault.share).waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Vault.share).appears(within: 10), app.debugDescription)
         Screens.capture("vault-detail", in: app, showing: "A vault of one's own, not shared yet")
         app.tap(AccessibilityID.Vault.share)
         app.confirm("Share")
         app.tap(AccessibilityID.Vault.invite)
         app.tap(AccessibilityID.Invite.uiTestFill)
         app.tapWhenEnabled(AccessibilityID.Invite.lookUp)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).waitForExistence(timeout: 15))
+        XCTAssertTrue(app.element(AccessibilityID.Invite.safetyNumber).appears(within: 15))
         app.element(AccessibilityID.Invite.safetyNumber).click()
         Screens.capture(
             "invite-fingerprint", in: app, showing: "Inviting: the other person's safety number, to compare first")
@@ -210,7 +210,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.switches[AccessibilityID.Invite.comparedByEye].firstMatch.toggleOn()
         app.tap(AccessibilityID.Invite.confirm)
         app.tap(AccessibilityID.Invite.send)
-        XCTAssertTrue(app.element(AccessibilityID.Invite.code).waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Invite.code).appears(within: 15), app.debugDescription)
         app.element(AccessibilityID.Invite.code).click()
         Screens.capture("invite-code", in: app, showing: "The invitation to send, once the numbers were compared")
         // Done closes the whole screen from here; the invitation screen's own Done only goes back a step.
@@ -224,21 +224,21 @@ final class ScreenshotTourTests: XCTestCase {
             NSPredicate(
                 format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "vault.member.Member ", ".role")
         ).firstMatch
-        XCTAssertTrue(member.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(member.appears(within: 15), app.debugDescription)
         Screens.capture(
             "vault-members", in: app, showing: "The shared vault's members: the owner and the person invited")
         app.closeScreen()
 
         app.openScreen(AccessibilityID.Settings.vaults)
         app.tap(AccessibilityID.Vault.ownSafetyNumber)
-        XCTAssertTrue(app.element(AccessibilityID.Vault.fingerprint).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.element(AccessibilityID.Vault.fingerprint).appears(within: 10))
         app.element(AccessibilityID.Vault.fingerprint).click()
         Screens.capture("own-safety-number", in: app, showing: "This account's own safety number and QR code")
         app.closeScreen()
 
         app.openScreen(AccessibilityID.Settings.vaults)
         app.tap(AccessibilityID.Vaults.accept)
-        XCTAssertTrue(app.element(AccessibilityID.Accept.code).waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Accept.code).appears(within: 10), app.debugDescription)
         app.element(AccessibilityID.Accept.code).click()
         Screens.capture("accept-invitation", in: app, showing: "Accepting an invitation: pasting it comes first")
         app.closeScreen()
@@ -251,11 +251,11 @@ final class ScreenshotTourTests: XCTestCase {
         app.syncNow(expecting: "held for review")
         app.openScreen(AccessibilityID.Settings.quarantine)
         XCTAssertTrue(
-            app.element(AccessibilityID.Quarantine.row(0)).waitForExistence(timeout: 15), app.debugDescription)
+            app.element(AccessibilityID.Quarantine.row(0)).appears(within: 15), app.debugDescription)
         Screens.capture("quarantine", in: app, showing: "A change held aside, with its item, vault and device")
         app.tap(AccessibilityID.Quarantine.discard(0))
         app.confirm("Discard")
-        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.element(AccessibilityID.Quarantine.empty).appears(within: 15), app.debugDescription)
         app.closeScreen()
     }
 
@@ -269,7 +269,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.openScreen(AccessibilityID.Settings.hygiene)
         app.tap(AccessibilityID.Hygiene.checkNow)
         app.waitForText("checked", in: AccessibilityID.Hygiene.status, timeout: 20)
-        XCTAssertTrue(app.element(AccessibilityID.Hygiene.section("breached")).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.element(AccessibilityID.Hygiene.section("breached")).appears(within: 10))
         Screens.capture(
             "security-report", in: app, showing: "The security report: a breached password, reused by two items")
         app.closeScreen()
@@ -279,16 +279,16 @@ final class ScreenshotTourTests: XCTestCase {
     @MainActor
     private func tourImportExportAndRestore(_ app: XCUIApplication) {
         app.openScreen(AccessibilityID.Settings.importItems)
-        XCTAssertTrue(app.element(AccessibilityID.Import.vault).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.element(AccessibilityID.Import.vault).appears(within: 10))
         Screens.capture("import", in: app, showing: "Importing: the vault and the other app's format")
         app.tap(AccessibilityID.Import.uiTestSample)
-        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).waitForExistence(timeout: 15))
+        XCTAssertTrue(app.element(AccessibilityID.Import.duplicate("Library")).appears(within: 15))
         app.element(AccessibilityID.Import.duplicate("Library")).click()
         Screens.capture("import-review", in: app, showing: "The import's review: a duplicate waiting for a choice")
         app.tap(AccessibilityID.Import.choice("Library") + ".merge")
         app.reveal(AccessibilityID.Import.host("www.citylibrary.org"))
         let host = app.switches[AccessibilityID.Import.host("www.citylibrary.org")].firstMatch
-        XCTAssertTrue(host.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(host.appears(within: 15), app.debugDescription)
         Screens.capture(
             "import-merge", in: app,
             showing: "A merge naming the website and sign-in details it would add, none accepted, the password hidden")
@@ -299,7 +299,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.tap(AccessibilityID.Import.done)
 
         app.openScreen(AccessibilityID.Settings.export)
-        XCTAssertTrue(app.element(AccessibilityID.Export.warning).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.element(AccessibilityID.Export.warning).appears(within: 10))
         Screens.capture("export", in: app, showing: "Export and backup, with the standing plaintext warning")
         app.tap(AccessibilityID.Export.kind + ".applePasswordsCSV")
         app.enter(OnboardingAndUnlockTests.password, into: AccessibilityID.Export.password)
@@ -320,7 +320,7 @@ final class ScreenshotTourTests: XCTestCase {
         app.enter("garden shed padlock", into: AccessibilityID.Import.passphrase)
         app.tap(AccessibilityID.Import.uiTestArchive)
         XCTAssertTrue(
-            app.element(AccessibilityID.Import.archiveDate).waitForExistence(timeout: 20), app.debugDescription)
+            app.element(AccessibilityID.Import.archiveDate).appears(within: 20), app.debugDescription)
         app.element(AccessibilityID.Import.archiveDate).click()
         Screens.capture("restore-review", in: app, showing: "Restoring a backup: the date it was made, first")
         app.closeScreen()
@@ -339,22 +339,22 @@ final class ScreenshotTourTests: XCTestCase {
         app.backToList()
         app.buttons["items.lock"].firstMatch.click()
         let unlock = app.secureTextFields["unlock.password"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(unlock.appears(within: 10), app.debugDescription)
         unlock.click()
-        unlock.typeText(password + "\n")
-        XCTAssertTrue(app.element(AccessibilityID.Unlock.passwordChanged).waitForExistence(timeout: 15))
+        unlock.enterText(password + "\n")
+        XCTAssertTrue(app.element(AccessibilityID.Unlock.passwordChanged).appears(within: 15))
         unlock.click()
         Screens.capture(
             "unlock-password-changed", in: app, showing: "The old password refused, and the way out if that was not you"
         )
-        unlock.typeText(password)
+        unlock.enterText(password)
         app.tapWhenEnabled(AccessibilityID.Unlock.ignoreChange)
-        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.buttons["items.add"].appears(within: 15), app.debugDescription)
 
         app.openScreen(AccessibilityID.Settings.devices)
         let other = UITestNames.otherDevice
         XCTAssertTrue(
-            app.element(AccessibilityID.Devices.row(other)).waitForExistence(timeout: 15), app.debugDescription)
+            app.element(AccessibilityID.Devices.row(other)).appears(within: 15), app.debugDescription)
         Screens.capture("devices", in: app, showing: "The account's devices, with the other one's password change")
         app.tap(AccessibilityID.Devices.revoke(other))
         app.enter(password, into: AccessibilityID.Devices.current)
@@ -385,7 +385,7 @@ extension XCUIApplication {
             return
         }
         done.click()
-        if !done.waitForNonExistence(timeout: 10) {
+        if !done.disappears(within: 10) {
             attachTree("close Settings", target: "settings.done")
             XCTFail("Settings is still open", file: file, line: line)
         }

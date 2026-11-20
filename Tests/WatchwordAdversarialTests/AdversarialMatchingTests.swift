@@ -109,6 +109,90 @@ struct AdversarialMatchingTests {
                 Self.aws, for: try Self.host("signin.aws.amazon.com.evil.example"), among: Self.items))
     }
 
+    /// Threat: A4, a member of a shared vault who may write, plants an item scoped one label below the victim's own
+    /// login (review finding Z60). Ranked as one pool it was the single most specific match: the gate filled it, and
+    /// refused the victim's own login even when chosen. A vault is a trust domain: the planted item shadows nothing
+    /// outside its vault, so the gate's answer is a choice between the two and each stays selectable. The person's
+    /// own more specific item still wins over a shared vault's, which is their statement to make.
+    @Test("an item of a shared vault never becomes the silent winner over the person's own")
+    func sharedVaultIsATrustDomain() throws {
+        let shared = UUID()
+        let planted = Item(
+            vaultID: shared, title: "Amazon",
+            scopes: [ServiceScope(host: "www.amazon.com", includeSubdomains: false)],
+            fields: [Field(kind: .password, label: "password", value: "planted")])
+        let items = [Self.amazon, planted]
+        let page = ServiceIdentifier("https://www.amazon.com/ap/signin", kind: .url)
+
+        guard case .chooseAmong(let matches) = AutoFillGate.decide(for: page, among: items, sharedVaults: [shared])
+        else {
+            Issue.record("a member's item was filled, or the person's own was refused")
+            return
+        }
+        #expect(Set(matches.map(\.item.id)) == [Self.amazon.id, planted.id])
+        for item in items {
+            #expect(throws: Never.self) {
+                try AutoFillGate.authorize(item, for: page, among: items, sharedVaults: [shared]).get()
+                try AutoFillGate.authorizeOneTimeCode(item, for: page, among: items, sharedVaults: [shared]).get()
+            }
+        }
+        // The other way round the person's own exact item is the one fill, and the shared vault's is refused.
+        let sharedWide = Item(
+            vaultID: shared, title: "Household Amazon", scopes: [ServiceScope(host: "amazon.com")],
+            fields: [Field(kind: .password, label: "password", value: "household")])
+        let console = ServiceIdentifier("https://signin.aws.amazon.com/", kind: .url)
+        let decision = AutoFillGate.decide(for: console, among: [sharedWide, Self.aws], sharedVaults: [shared])
+        #expect(
+            decision
+                == .fill(
+                    RankedMatch(
+                        item: Self.aws,
+                        match: try #require(
+                            ScopeMatcher.match(Self.aws.scopes[0], host: try Self.host("signin.aws.amazon.com"))),
+                        isShadowed: false)))
+        #expect(throws: FillRefusal.self) {
+            try AutoFillGate.authorize(sharedWide, for: console, among: [sharedWide, Self.aws], sharedVaults: [shared])
+                .get()
+        }
+    }
+
+    /// Threat: A4 with A6. A scope for `amaz0n.com` in a shared vault made that host a match, so the gate filled the
+    /// shared item there and reported the host as recognised, although the victim's own vault holds `amazon.com`.
+    /// A member's scope does not vouch for a look-alike of another vault's site: the gate refuses the host as
+    /// `resemblesSavedSite`, for a decision and for an explicit choice, and names what it resembles.
+    @Test(
+        "the gate refuses a host only a shared vault is scoped to when it resembles the person's own site",
+        arguments: ["amaz0n.com", "arnazon.com", "\u{0430}mazon.com", "amazon.com.evil.example"])
+    func memberScopedLookAlike(_ lookAlike: String) throws {
+        let shared = UUID()
+        let planted = Item(
+            vaultID: shared, title: "Amazon", scopes: [ServiceScope(host: lookAlike)],
+            fields: [Field(kind: .password, label: "password", value: "planted")])
+        let items = [Self.amazon, planted]
+        let page = ServiceIdentifier(lookAlike, kind: .domain)
+
+        guard
+            case .refuse(.resemblesSavedSite(let assessment)) = AutoFillGate.decide(
+                for: page, among: items, sharedVaults: [shared])
+        else {
+            Issue.record("offered on \(lookAlike)")
+            return
+        }
+        #expect(assessment.isSuspicious)
+        #expect(
+            AutoFillGate.authorize(planted, for: page, among: items, sharedVaults: [shared])
+                == .failure(.resemblesSavedSite(assessment)))
+        // The person's own item scoped to the host is their word for it.
+        let vouched = Item(vaultID: Self.vault, title: "Mine", scopes: [ServiceScope(host: lookAlike)], fields: [])
+        #expect(
+            AutoFillGate.decide(for: page, among: items + [vouched], sharedVaults: [shared])
+                != .refuse(
+                    .resemblesSavedSite(assessment)))
+        #expect(
+            (try? AutoFillGate.authorize(planted, for: page, among: items + [vouched], sharedVaults: [shared]).get())
+                != nil)
+    }
+
     @Test("an empty or dotted scope never matches everything")
     func degenerateScopes() throws {
         let scopes = [ServiceScope(host: ""), ServiceScope(host: ".")]
@@ -123,5 +207,43 @@ struct AdversarialMatchingTests {
         let (ranking, error) = ItemRanker.rank(items: Self.items, identifier: ServiceIdentifier(value, kind: .domain))
         #expect(ranking.isEmpty)
         #expect(error != nil)
+    }
+
+    // MARK: - IPv6 literals (review finding Z64)
+
+    /// Threat: A6, should any client hand the extension a domain identifier that is not a real IPv6 literal. The
+    /// normaliser's IPv6 branch accepted anything made of hex digits, colons and dots and skipped every other check,
+    /// so `a::b.cafe.de` normalised and was a subdomain of a saved `cafe.de` scope: normalisation invented a match.
+    /// Fullwidth hex digits passed too, unmapped, and so did a megabyte of `a:`, past the length bound of C5.
+    @Test(
+        "a colon-bearing identifier that is not an IPv6 literal is refused, and matches nothing",
+        arguments: [
+            "a::b.cafe.de", "::cafe.de", "1::2:3.4.5.6.7", "1:2:3:4:5:6:7:8:9", "1::2::3", "12345::1",
+            "::\u{FF41}", "\u{FF11}::1", "::1.2.3.256", "::1.2.3", "a:b", ":::", "1:2:3:4:5:6:7:1.2.3.4",
+        ])
+    func notAnIPv6Literal(_ value: String) {
+        #expect(throws: HostNormalizationError.self) { _ = try Self.host(value) }
+    }
+
+    @Test("an over-long colon-bearing identifier is refused before it is compared with anything")
+    func overLongIPv6() {
+        let huge = String(repeating: "a:", count: 500_000)
+        #expect(throws: HostNormalizationError.self) { _ = try Self.host(huge) }
+    }
+
+    @Test(
+        "real IPv6 literals still normalise",
+        arguments: ["::1", "[::1]", "2001:db8::1", "fe80::1:2:3:4", "::ffff:192.0.2.1", "1:2:3:4:5:6:7:8", "::"])
+    func realIPv6(_ value: String) throws {
+        let host = try Self.host(value)
+        #expect(host.value.contains(":"))
+    }
+
+    /// A literal has no subdomains: the matcher never treats one as below a domain scope, whatever it ends with.
+    @Test("an IPv6 host is never a subdomain match")
+    func ipv6NeverSubdomain() {
+        let host = NormalizedHost(vouchedFor: "::ffff:1.2.3.4")
+        #expect(ScopeMatcher.match(ServiceScope(host: "2.3.4"), host: host) == nil)
+        #expect(ScopeMatcher.match(ServiceScope(host: "::ffff:1.2.3.4"), host: host)?.isExact == true)
     }
 }

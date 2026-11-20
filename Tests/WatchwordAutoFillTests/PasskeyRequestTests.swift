@@ -342,7 +342,12 @@ struct PasskeyRequestTests {
         #expect(try await assert(.write(blob)).largeBlob == .write(didWrite: true))
         #expect(await harness.vault.saves.count == 1)
 
+        // Another write the same day is not made (Z66): reported as not written, the assertion still good.
+        #expect(try await assert(.write(Data("same day".utf8))).largeBlob == .write(didWrite: false))
+        #expect(await harness.vault.saves.count == 1)
+
         // A write that loses to a concurrent change is reported as not written; the assertion still stands.
+        await harness.clock.advance(by: CredentialProviderModel.largeBlobInterval)
         await harness.vault.failNextSave(with: .versionConflict(Fixtures.google.id))
         let lost = try await assert(.write(Data("other".utf8)))
         #expect(lost.largeBlob == .write(didWrite: false))
@@ -422,9 +427,24 @@ struct PasskeyRequestTests {
 
     // MARK: Registration
 
+    @Test("a relying party that resembles a saved site carries the look-alike warning in its new-item proposal")
+    func registerOnLookAlikeRelyingParty() async throws {
+        let harness = AutoFillHarness(items: Fixtures.all)
+        let options = try await harness.model.passkeyRegistrationOptions(for: Self.registrationRequest("amaz0n.com"))
+            .value
+        #expect(options.existingItems.isEmpty)
+        #expect(options.newItem.warning?.impersonating == ["amazon.com"])
+        // A relying party of a saved site carries none.
+        let genuine = try await harness.model.passkeyRegistrationOptions(for: Self.registrationRequest("amazon.com"))
+            .value
+        #expect(genuine.newItem.warning == nil)
+    }
+
     @Test("registering for a new site creates an item titled and scoped by the relying party")
     func registerNewItem() async throws {
-        let harness = AutoFillHarness(items: Fixtures.all)
+        // Without the library card: its host `library.example.org` has "example" as its name, which the reserved
+        // suffix of `shop.example` would be taken to imitate.
+        let harness = AutoFillHarness(items: Fixtures.all.filter { $0.id != Fixtures.library.id })
         let request = Self.registrationRequest(
             extensions: PasskeyRegistrationExtensions(prf: .checkForSupport, largeBlobRequested: true))
         let options = try await harness.model.passkeyRegistrationOptions(for: request).value
@@ -435,7 +455,8 @@ struct PasskeyRequestTests {
         #expect(
             options.newItem
                 == NewItemProposal(
-                    title: "shop.example", scopeHost: "shop.example", includesSubdomains: true,
+                    vault: Fixtures.personalVault, title: "shop.example", scopeHost: "shop.example",
+                    includesSubdomains: true,
                     userName: "pat@example.com", warning: nil, hiddenAccounts: 0, besideExisting: nil))
 
         let result = try await harness.model.registerPasskey(request, destination: .newItem, presence: .verified).value
@@ -813,6 +834,26 @@ struct PasskeyRequestTests {
             #expect(await harness.model.registerPasskeyWithoutInteraction(again) == .refused(.noItemToUpgrade))
         }
         #expect(await harness.vault.saves.count == 1)
+    }
+
+    /// Review finding Z71: a conditional upgrade is the relying party's write, so it has the budget every such
+    /// write has. An item whose history already holds about the budget is not upgraded without the person.
+    @Test("a conditional request does not upgrade an item it would take past the remote-write budget")
+    func conditionalUpgradeHasTheBudget() async throws {
+        var item = Fixtures.amazonRetail
+        let note = Field(kind: .text, label: "Note", value: String(repeating: "n", count: 16 * 1024))
+        item.history = (0..<32).map {
+            ItemHistoryEntry(replacedAt: Fixtures.now, version: UInt64($0 + 1), fields: item.fields + [note])
+        }
+        let harness = AutoFillHarness(items: [item])
+        let request = Self.registrationRequest("amazon.com", userName: Fixtures.email)
+        #expect(await harness.model.registerPasskeyWithoutInteraction(request) == .refused(.noItemToUpgrade))
+        #expect(await harness.vault.saves.isEmpty)
+        // With the person, on the registration sheet, it is theirs to do.
+        let chosen = try await harness.model.registerPasskey(
+            request, destination: .existingItem(item.id), presence: .verified
+        ).value
+        #expect(chosen.itemID == item.id)
     }
 
     @Test("a conditional request never creates an item or guesses between accounts")

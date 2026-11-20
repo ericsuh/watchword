@@ -1,4 +1,5 @@
 import Foundation
+import WatchwordKit
 import WatchwordMatching
 import WatchwordModel
 
@@ -25,6 +26,13 @@ public enum HostText {
             return labels.suffix(suffixLength + 1).joined(separator: ".")
         }
         return labels.suffix(2).joined(separator: ".")
+    }
+
+    /// How far a scope reaches, in words: "and its subdomains", "this address only", and the exclusions in ASCII.
+    public static func reach(of scope: ServiceScope) -> String {
+        guard scope.includeSubdomains else { return "this address only" }
+        guard !scope.excludedHosts.isEmpty else { return "and its subdomains" }
+        return "and its subdomains, except " + scope.excludedHosts.map(ascii).sorted().joined(separator: ", ")
     }
 
     /// RFC 3492 §6.3, for one label. Scopes are bounded (`HostNormalizer` limits labels to 63 bytes), so no overflow
@@ -88,9 +96,13 @@ public enum HostText {
     }
 }
 
-/// A host a merge would add to an existing item, as the duplicate screen shows it before the person accepts it:
-/// ASCII, the registrable domain picked out, how far the scope reaches, and a warning when it resembles a site already
-/// saved without being it (`PhishingDetector`), which then needs a second confirmation.
+/// A host about to become a scope of an item, as a screen shows it before the person accepts it: ASCII, the
+/// registrable domain picked out, how far the scope reaches, and a warning when it resembles a site already saved
+/// without being it, which then needs a second confirmation. Used wherever a host enters an item by the person's
+/// hand or from a file: the import's merge and its new entries, and the item editor (PRD F11.7).
+///
+/// The resemblance is judged against `SavedSites`, the gate's own view of what is saved (review finding Z65): not
+/// the trash, not a scope the policy refuses, and a scope in a shared vault recognises a host for that vault only.
 public struct MergeHost: Hashable, Sendable, Identifiable {
     /// The host as the scope stores it: the key `MergeChoices.hosts` takes.
     public let host: String
@@ -102,53 +114,127 @@ public struct MergeHost: Hashable, Sendable, Identifiable {
     public let excludedHosts: [String]
     /// Why this host may not be what it looks like; `nil` when nothing saved resembles it.
     public let warning: String?
+    /// The saved hosts it resembles, sorted; empty when the warning is about the address itself.
+    public let resembles: [String]
     public var id: String { host }
 
     public var needsConfirmation: Bool { warning != nil }
 
     /// "and its subdomains", "this address only", and the exclusions.
     public var reach: String {
-        guard includesSubdomains else { return "this address only" }
-        guard !excludedHosts.isEmpty else { return "and its subdomains" }
-        return "and its subdomains, except " + excludedHosts.joined(separator: ", ")
+        HostText.reach(
+            of: ServiceScope(host: host, includeSubdomains: includesSubdomains, excludedHosts: Set(excludedHosts)))
     }
 
+    /// - Parameters:
+    ///   - sites: What is saved, as the session gives it (`VaultSession.savedSites()`), prepared.
+    ///   - otherScopes: The scopes the item would hold beside this one.
+    ///   - inSharedVault: Whether the item is in a vault other accounts write.
+    ///   - vault: The item's vault: another shared vault's scope does not vouch for the host (Z76).
+    public init(
+        _ scope: ServiceScope, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope] = [],
+        inSharedVault: Bool = false, inVault vault: UUID? = nil
+    ) {
+        let (warning, resembles) = Self.warning(
+            for: scope.host, ascii: HostText.ascii(scope.host), among: sites, beside: otherScopes,
+            inSharedVault: inSharedVault, vault: vault)
+        self.init(scope, warning: warning, resembles: resembles)
+    }
+
+    /// Against items that are all the person's own, as stored: for tests and previews.
     public init(_ scope: ServiceScope, against saved: [Item]) {
+        self.init(
+            scope, among: SavedSites(stored: saved, ownVaults: Set(saved.map(\.vaultID))).prepared())
+    }
+
+    /// A host the session has already judged (an import preview's `ImportConcern.lookAlikeHosts`): shown in ASCII,
+    /// with the warning when the session reported one and none otherwise.
+    public init(_ scope: ServiceScope, judged confirmation: HostConfirmation?) {
+        self.init(
+            scope, warning: confirmation.map { Self.wording(resembling: $0.resembles.sorted()) },
+            resembles: confirmation?.resembles.sorted() ?? [])
+    }
+
+    /// A host a merge would add, with what it would do to the accounts AutoFill offers (`SavedSites.Prepared.overlap`,
+    /// the existing item itself left out): a look-alike warning first, and otherwise, where it would hide or stand
+    /// beside an account, a warning naming them, which needs the second confirmation too (review finding Z75).
+    init(
+        _ scope: ServiceScope, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope],
+        inSharedVault: Bool,
+        mergingInto existing: (id: UUID, vaultID: UUID)
+    ) {
+        let lookAlike = MergeHost(
+            scope, among: sites, beside: otherScopes, inSharedVault: inSharedVault, inVault: existing.vaultID)
+        guard lookAlike.warning == nil else {
+            self = lookAlike
+            return
+        }
+        let overlap = sites.overlap(ofAdding: [scope], inVault: existing.vaultID, isOwnVault: !inSharedVault)
+        let hidden = overlap.hidden.filter { $0.itemID != existing.id }
+        let beside = overlap.beside.filter { $0.itemID != existing.id }
+        func titles(_ accounts: [AffectedAccount]) -> String {
+            Array(Set(accounts.map { $0.title.isEmpty ? "Untitled" : "“\($0.title)”" })).sorted()
+                .joined(separator: ", ")
+        }
+        var parts: [String] = []
+        if !hidden.isEmpty {
+            parts.append("Accepting it would stop AutoFill offering \(titles(hidden)) there.")
+        }
+        if !beside.isEmpty {
+            parts.append("Accepting it would offer this item beside \(titles(beside)) there.")
+        }
+        if overlap.isTruncated { parts.append("It covers more of your saved sites than were checked.") }
+        self.init(scope, warning: parts.isEmpty ? nil : parts.joined(separator: " "), resembles: [])
+    }
+
+    /// A host the session reported as needing confirmation (`VaultError.hostsNeedConfirmation`), for the editor's
+    /// dialog: shown in ASCII with the same words.
+    public init(_ scope: ServiceScope, resembling names: [String]) {
+        self.init(scope, warning: Self.wording(resembling: names.sorted()), resembles: names.sorted())
+    }
+
+    private init(_ scope: ServiceScope, warning: String?, resembles: [String]) {
         host = scope.host
         ascii = HostText.ascii(scope.host)
         registrable = HostText.registrableDomain(of: ascii)
         prefix = ascii.count > registrable.count ? String(ascii.dropLast(registrable.count)) : ""
         includesSubdomains = scope.includeSubdomains
         excludedHosts = scope.excludedHosts.map(HostText.ascii).sorted()
-        warning = Self.warning(for: scope.host, ascii: ascii, against: saved)
+        self.resembles = resembles
+        self.warning = warning
     }
 
-    static func warning(for host: String, ascii: String, against saved: [Item]) -> String? {
-        guard let normalized = try? HostNormalizer.normalize(ServiceIdentifier(host, kind: .domain)) else {
-            return "This address could not be checked. Do not accept it unless you are sure whose site it is."
-        }
-        let assessments =
-            [PhishingDetector.assess(host: normalized, againstItemsIn: saved)]
-            + (ascii != host
-                ? [
-                    (try? HostNormalizer.normalize(ServiceIdentifier(ascii, kind: .domain))).map {
-                        PhishingDetector.assess(host: $0, againstItemsIn: saved)
-                    } ?? .unrecognized
-                ] : [])
-        var names: Set<String> = []
-        var suspicious = false
-        for case .suspicious(_, let impersonating) in assessments {
-            suspicious = true
-            names.formUnion(impersonating)
-        }
-        if !host.allSatisfy(\.isASCII) || ascii.split(separator: ".").contains(where: { $0.hasPrefix("xn--") }) {
-            suspicious = true
-        }
-        guard suspicious else { return nil }
+    static let unreadable = "This address could not be checked. Do not accept it unless you are sure whose site it is."
+
+    static func wording(resembling names: [String]) -> String {
         if !names.isEmpty {
-            return "This looks like " + names.sorted().joined(separator: ", ")
+            return "This looks like " + names.joined(separator: ", ")
                 + " but is a different address. Accepting it would offer this item's password there."
         }
         return "This address uses characters from other alphabets, so what you see may not be where it goes."
+    }
+
+    static func warning(
+        for host: String, ascii: String, among sites: SavedSites.Prepared, beside otherScopes: [ServiceScope],
+        inSharedVault: Bool, vault: UUID?
+    ) -> (String?, [String]) {
+        guard (try? HostNormalizer.normalize(ServiceIdentifier(host, kind: .domain))) != nil else {
+            return (unreadable, [])
+        }
+        // Both spellings: Foundation may or may not have decoded a punycode label, and either can be the one a
+        // saved scope resembles.
+        var names: Set<String> = []
+        var suspicious = false
+        for spelling in ascii == host ? [host] : [host, ascii] {
+            if case .needsConfirmation(let resembles) = sites.standing(
+                ofNewHost: spelling, beside: otherScopes, inSharedVault: inSharedVault, inVault: vault)
+            {
+                suspicious = true
+                names.formUnion(resembles)
+            }
+        }
+        guard suspicious else { return (nil, []) }
+        let sorted = names.sorted()
+        return (wording(resembling: sorted), sorted)
     }
 }

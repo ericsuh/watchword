@@ -347,7 +347,7 @@ it was read (Y32). The adversarial suite merges both kinds of record under a tim
 | --- | --- | --- |
 | The specification of §3.2–3.3, at every step | `MergeModel` (`Tests/WatchwordSyncTests`) | A pure model of devices editing and exchanging one item. Beside each copy it tracks, independently of the item's metadata, which writes were delivered to it and what each writer had seen, computes the values a multi-value register must hold, and compares. |
 | The laws, convergence, nothing lost | `LongRunningItemMergeLawTests` | Random histories of every kind of edit, resolution and deletion on 2–4 devices; the laws on random triples of stored versions, compared as whole items; the same versions delivered in random orders with repeats; every update checked inflationary; after full exchange all devices equal and every field value and note line typed still present unless a person discarded it. Widened nightly. |
-| Every small history | `LongRunningItemMergeExhaustiveTests` | From six starting points, every sequence of up to three steps (four nightly, for two of them) over an alphabet that includes conflict, resolution, trash, restore, deletion and respelling a value in another normalisation form. Each step is one device performing one operation with each choice it offers — which field or line, which spelling, and for a resolution which value is kept, the shown one or another (Y35: taking the first choice each time never resolved in favour of a value that was not shown) — or receiving another device's version. The same checks at every node, the laws on every triple of versions a history stores. The numbers of histories, versions, pairs and triples are asserted. Standard run: 34,933 histories; nightly: 297,775 (about half an hour on the loaded cloud VM). Since S43 the counts of versions, pairs and triples are a little higher in two starting points: two branches that record the same history entry from different devices now store two versions (the entry names its writer), and with the writers stripped each extra version is one stored before. |
+| Every small history | `LongRunningItemMergeExhaustiveTests` | From six starting points, every sequence of up to three steps (four nightly, for two of them) over an alphabet that includes conflict, resolution, trash, restore, deletion and respelling a value in another normalisation form. Each step is one device performing one operation with each choice it offers — which field or line, which spelling, and for a resolution which value is kept, the shown one or another (Y35: taking the first choice each time never resolved in favour of a value that was not shown) — or receiving another device's version. The same checks at every node, the laws on every triple of versions a history stores. The numbers of histories, versions, pairs and triples are asserted. Standard run: 34,933 histories; nightly: 297,775 (about fifty minutes on the loaded cloud VM since the carry is checked with the new ID below and above every device, Z204; half an hour before). Since S43 the counts of versions, pairs and triples are a little higher in two starting points: two branches that record the same history entry from different devices now store two versions (the entry names its writer), and with the writers stripped each extra version is one stored before. |
 | Each finding | `ItemMergeAuditTests`, `AdversarialItemMergeTests` | The smallest history that showed it. |
 | Writers of removals, discards and history (§9) | `ItemMergeWriterTests` | Each part names the write that made it, concurrent ones all kept; unnamed parts read as the row's own, clamped; the first form of `discards` decodes; the attributed parts of a merge are exactly the union of its inputs'. |
 | The write cut over merged state (§9) | `LongRunningLateWriteSimulationTests` | Four devices, one of whose account loses its permission part-way, its later writes made both through `stamped` and as a modified client that names no writer. One device holds late versions aside as they arrive, two merge everything and rebuild at the end from what counts; all three hold the same item, nothing in it is late (against ground truth kept apart from the metadata), and no version of a device that had merged nothing late is held aside. Widened nightly. |
@@ -380,15 +380,25 @@ failed each time.
   it. `ItemRecordMerger` then throws `ItemMergeError.resultNotSealable`, and the engine treats it like a U5
   quarantine: the local version stays, the remote entry is kept for the person (PRD F7.7), and the stream carries on,
   so unrelated items keep arriving (`mergeOverThePayloadLimit`). On that device the item no longer converges with
-  the others until a person resolves it: the price of a bound on record size.
+  the others until a person resolves it: the price of a bound on record size. A device holding such a version in
+  its quarantine (or one refused as an implausible jump, or one whose record ID another vault holds) counts the
+  segment that carried it as merged without having merged it, so, like a device holding entries it cannot read
+  (below), it writes no ordinary snapshot while the quarantine holds a version a trusted device wrote
+  (`06-adversarial-review.md` Z26): the collection rule below would otherwise let that segment go while no snapshot
+  carried the version. The same holds for a version it was to keep there and could not, the quarantine being full:
+  which devices' versions found no room is part of its signed state, and it writes no ordinary snapshot while that
+  names a trusted device (Z38). And a version it refused only as a jump for now is tried again in the same pass; a
+  pass cut short before that leaves a retry owed in the state, and the next sync replays the log (Z33), so the order
+  in which a log was read never leaves an honest version out for good.
 - **Kinds a device does not know** (ADR 0009, N7). The argument above is about items, on devices that read every kind
   in the log. A device of an earlier version keeps the entries of an ignorable kind it cannot read aside, unmerged,
   and merges everything else, so its items converge with everyone's; its state of that kind is simply behind, and
   catches up when it is updated and processes what it kept (or replays the log, if it had to drop some, or its stash
   was not saved after a crash). What makes that safe for the *other* devices is that it writes no ordinary snapshot
-  while it holds entries a trusted device carried: every ordinary snapshot is then the state of a device that merged
-  everything it covers, which is all §7.5's collection rule relies on. The one snapshot it still writes, for a revoked
-  device's work, covers only revoked streams, which nobody collects, so it changes nothing that rule relies on; and
+  while it holds entries a trusted device carried, or a version of one in its quarantine: every ordinary snapshot is
+  then the state of a device that merged everything it covers, which is all §7.5's collection rule relies on. The
+  one snapshot it still writes, for a revoked device's work, covers only revoked streams, which nobody collects, so
+  it changes nothing that rule relies on; and
   what a revoked device carried is forgotten (except its own versions, which nothing else carries), so a device
   revoked after planting an unreadable entry cannot hold snapshots back for good. A critical
   kind it cannot read stops that stream at the object, as a gap does; nothing past it is applied, so nothing is merged
@@ -414,12 +424,52 @@ discard by its resolution's revision, each history entry once per write that rec
 stamp included, against the segment that carried them (S36); and (3) every edit its clock says it contains, of any
 device but its own writer's, was published in a segment of that device's stream that counts: one carried a version of
 the record at or above the clock's count (S44 for a device whose account's work does not all count, S46 for a current
-member's). Call it `J(v)`. It is a function of the version's bytes, the accepted membership head and the stream index,
-which every device holding the same segments computes alike; it does not depend on when or where the version was
-merged. Where (3) cannot be decided yet (the claimed device's stream is not here that far) the version waits, held
-aside until that stream grows; a claim about the judging device's own edits beyond what it published is false at once.
-A current member's device whose stream this device cannot read from its first segment (collected before the vault was
-shared, or sealed under keys this account was never given, S42) is not checked, and its edits are believed as before.
+member's). Call it `J(v)`. It depends on exactly these (review finding Z157):
+
+- the version's bytes;
+- the accepted membership chain: its head (who may write now, and each ended account's cut), the roles and keys along
+  it (which keys this account was entitled to, for vouching, and the latest record that ended a permission);
+- the stream index: for each device's stream, the segments recorded, each with its digest, its signer (always the
+  account the device's ID commits to), whether it opened and what it carried (versions and attributed values); the
+  coverage of the owner's snapshots merged (`collected`); and the devices judgements waited for or asked about
+  (`awaiting`, `relied`), which bind the judged basis;
+- the registries the chain anchors, each counted only for the devices whose IDs commit to its account
+  (`committedDevicesOnly`), less every ID two of them list (`countedRegistries`, Z165): which account a device is (one
+  at most), and which devices are revoked (the union, since each registry revokes only its own account's devices). A
+  stream recorded while only one of two such registries was here is forgotten when the second arrives, and the log
+  replayed, so the index too ends as it would had both come first.
+
+It no longer depends on which account signed a stream's lowest segment, on which accounts the current head passes
+over, on who could write when a segment's key was current, or on the order segments arrived in: a stream holds one
+account's segments, the one its device ID commits to, and an index records nothing an account that cannot count
+signed (Z146, Z152, Z155 are superseded). Every device holding the same segments, snapshots and registries computes it
+alike; it does not depend on when or where the version was merged. Nothing in the index is a function of the head
+any more (`passedOver` and its refiling are gone): a change of head changes `J` through the chain alone, and takes out
+and replays.
+
+Each input that can change without a change of head asks for the judgement again, so that a device that learnt it late
+ends where one that knew it first began: a lower segment that lowers a stream's first number (Z151), a new segment of
+a device a version waited for (`awaiting`), a snapshot whose coverage grows for one (Z151), and a counted revocation of a device a
+judgement waited for or asked about starting or stopping to count (Z153): the replay settles the *judged basis*, the
+head together with those revocations, and a change of it takes out and replays as a change of head does. Registries
+otherwise change `J` without a replay (which accounts list a device): only a later change of basis brings two such
+devices together, which is recorded in Z153. Where (3) cannot be decided yet (the
+claimed device's stream is not here that far) the version waits, held aside until that stream grows; a claim about the
+judging device's own edits beyond what it published is false at once, asked before anything else (Z136). A current
+member's device whose first segment this device holds and cannot open (sealed under keys this account was never given,
+S42) is not checked, and its edits are believed as before; one with no segment here has not published yet (a shared
+vault keeps its whole log, Z42), and a claim about it waits (Z136). A stream that will never grow here is never waited
+for (Z144): a revoked device's, which no device reads after it learns of the revocation, and a device of the owner's
+account whose first segments were collected before the vault was shared, which only an owner's snapshot merged here that
+covers them shows (Z151; otherwise they have not arrived), and only for versions of the same record no higher than that
+stream carried of it (Z160). Claims about them and values naming them are
+believed for an account that may write, so a device that recorded none of such a stream (enrolled, joined or rebuilt
+since) judges as one that recorded it all does: waiting, it held aside for good what every other device kept, which is
+divergence, not only loss. For an account that may no longer write the same still holds (tracked, Z158): a device
+that built its index after the revocation lacks the stream, and holds aside what devices that recorded it admit,
+until a revoked device's segments are read for the index up to its account's cut. Until a device learns of a revocation it reads the stream and waits for it like any other,
+so the two judgements meet once the registry has reached every device: learning it changes the judged basis, which
+replays (Z153).
 
 **Completeness: every effect of a write leaves a trace that names it.** Take a write `w` and any version `v` made, by
 any sequence of merges and updates, from a state that contains `w`'s result.
@@ -473,6 +523,110 @@ without them still decode, `discards` in its first form (one vector per group) i
 Empty lists are not encoded, so lines that are shown and entries from old records cost no bytes. A device's stream
 index of an earlier format filed none of these values, so it is refused on load and rebuilt by a replay
 (`SharedStreamIndex` format 3).
+
+**A restore's carried work (review of round 12, Z191, Z192; review of round 13, Z197, Z198).** A store restored onto
+other hardware writes under a new device ID `n`, and what its old ID `o` wrote and never published must be published by
+`n` (the engine publishes only its own device's rows). Carried with `o`'s stamps, those values were carried by no
+segment of `o`'s stream, so (2) failed for them, and `o`'s clock count above what it published failed (3): every judge
+held the carried version aside, and with it, through the gate, the source half of a move. So the carry writes the item
+again under `ItemMerge.reattributed(o, above: p, to: n)`: every revision `(k, o)` with `k > p'`, wherever the item names
+one (group values, conflicts and retained values, the field order, note line IDs, anchors and removals, discards,
+history writers), becomes `(k, n)`, and the vectors of `o`'s and `n`'s own parts, and the clock, keep `o`'s count up to
+`p'` and give the rest to `n`. Nothing of a third device is touched.
+
+The bound `p'` is the most of three, each a lower bound on what `o` published: `p`, the last version of the record `o`'s
+own signed state recorded; the highest version of the record `o`'s stream carried, as the stream index shows it and
+`o`'s own segments downloaded since the restore carry it (`publishedBound`, `SyncEngine.stagedEntries(of:authoredBy:)`;
+the carry waits for the vault's log to be downloaded, so the bound is the transport's and not the backup's); and what
+the item itself, the row, shows a third device `x` (neither `o` nor `n`) saw of `o`: `o`'s count in each of `x`'s
+stamps and discards, each `o` line one of `x`'s lines is anchored after, each `o` line `x` removed (`seenByOthers`).
+Whatever an honest `x` saw, `o` published, and the row's versions are ones the judge admitted (a claim of `x` about
+`o` counts there only once `o`'s stream has carried it, S46). A downloaded version of `x` that nothing has judged yet
+is no evidence: a member who may write can claim any `seen` vector, and before Z208 such a claim made the carry find
+nothing above `p'` to carry, drop the entry, and leave `o`'s work for every judge to hold aside. A shared vault's log is
+whole from the day it was shared, so what an honest `x` saw of `o` since then is in `o`'s own segments, merged (the
+index) or downloaded. Not what `o` published while the vault was private, if `o` is an owner's device: those segments
+may have been collected under a snapshot before sharing (Z144), and only `p` bounds that work; with `o`'s state lost or
+edited (A8), `p` reads as 0 and the carry renames it, so that members hold it twice, as conflicts, and lose neither
+(Z218, accepted). Before Z197 only `p` was used and every vector was renamed:
+with `p` read too low (a state lost or rolled back, A8, or a backup older than `o`'s last publish) `x`'s value
+`(k, x)` with `seen {o: a, x: k}`, `a > p`, became `{o: p, n: a, x: k}`, bytes `x`'s stream never carried, and every
+member's judge failed (2) for it.
+
+- *It is a renaming, so the merge is unchanged.* Within the item, no part of a third device names a revision of `o`
+  above `p'`, by the choice of `p'`, so no third part changes. `n` never wrote those versions of the record, so the
+  renamed revisions are new; they are distinct from each other because their versions are; and `contains` is
+  preserved, since a vector that held `o: c > p'` now holds `n: c`, which contains exactly the renamed `(k, n)` with
+  `k ≤ c`, and a vector that held `o: c ≤ p'` contains no renamed revision before or after. Supersession, coverage by a
+  discard and by an erasure, and line order among the renamed lines are as before. Let `b` be any version another
+  device holds that holds nothing of `o` above `p'`: `R` is idempotent, and for every pair of parts of `a` and `b`,
+  one supersedes or covers the other exactly when their images do. The carry renames the backup's version `a` before
+  anything downloaded is merged into it, so the restored device holds `R(a) ⊔ b`, which is what every other device
+  holds once it merges the carry with `b`: they converge by the join's laws alone. Renaming after the merge, as the
+  carry did before the review of round 14 (L1, Z204), gives the same item, `R(a ⊔ b) = R(a) ⊔ b`, but for a
+  tie-break: two concurrent field orders at the same version are ordered by device ID, and `n` may rank otherwise
+  against a third device than `o` did. The field order is a register whose later write wins, so the merge had
+  already dropped the loser, and renamed afterwards the restored device kept an arrangement no other device held, or
+  (where its order lost under `o` and wins under `n`) every device lost the person's reorder. A carry that cannot run
+  or finish therefore merges nothing into the vault in that sync, in any pass (Z209). The laws of the model
+  (`checkCarryOrder`) show that renaming after the merge differs from the reference `b ⊔ R(a)` in such a tie, and the
+  exhaustive exploration must meet one; no model law sees which order the session uses, and the session test
+  `carryBeforeTheMergeKeepsTheFieldOrder` fails if the session merges first (Z210).
+- *`J` holds for it.* Every value still attributed to `o` has a revision at or below `p'`, and its bytes are unchanged
+  (its stamp's `seen` held no count of `o` above its own revision), so it is in a version of `o`'s stream; every third
+  device's value is unchanged, byte for byte, and was carried by its own writer's stream as before; every renamed
+  value is `n`'s and is carried by the segment that carries the carried version (2); and the clock names `o` at most at
+  `p'`, which `o`'s stream carried (where `p'` came from a third device's part and the index here does not show it,
+  the version waits for `o`'s stream, as any honest claim does), and `n`, the version's own author (3). A carried
+  deletion's erased row is renamed the same way, so its summary claims of `o` only what `o` published.
+- *Where it can be wrong: two installations of `o`'s history.* The renaming is sound exactly while nobody but this
+  installation holds `o`'s work above `p'`. That fails in two ways. Old hardware still running under `o` that publishes
+  that work after the carry (or before it, in a segment this device's index does not show and no third part of the
+  item names: not yet listed, or sealed under a key not held here) holds `(k, o)` where members now also hold `(k, n)`
+  for the same value. Members then hold both, as concurrent values: what `o` later wrote supersedes `(k, o)` and not
+  `(k, n)`, so a value `o` replaced comes back beside its replacement, a field `o` removed comes back as a conflict, an
+  item `o` then deleted permanently comes back kept after the deletion (in the trash, never purged), and note lines
+  appear twice. Nothing is lost (F7.6), but the person's later discards are undone there (F7.7) and must be made again.
+  Before Z198 a lost or edited state, or a lagging backup, reached this case for everything `o` had published since;
+  with the stream index it does only for what `o` publishes after the pull, which a restore that proceeds while the
+  old hardware still runs cannot avoid without coordinating with it. The laws are checked under random histories, the
+  new ID drawn at random (`LongRunningItemMergeLawTests`: for `b` with nothing of `o` above `p'`, the carry before the
+  merge is what a device holding `b` holds and renaming after it differs only in a field order's tie, idempotence,
+  supersession and coverage; with a bound drawn below `p'`, every third part unchanged; and with old hardware going
+  on to publish `a2 ⊒ a`, `R(a)`, `a2` and any other version merged in every order give one item holding every value
+  `a2 ⊔ b` holds), and against every small history (`LongRunningItemMergeExhaustiveTests`, the new ID below and
+  above every device; the fresh start must meet a tie). It is done only where `o` commits: a non-committing ID's published
+  work counts nowhere anyway, and Z167's parking and hold stay in charge of it.
+
+A row is carried only by a sync, after it has downloaded the vault's log and before it merges it, and the vault
+publishes nothing while something is still to carry, so that no merge of a row still holding `o`'s work goes out first
+(the sync names such a vault, Z207); until then
+`SyncState.restoredUnpublished` records it, with `p`, a take-out leaves it alone, and it holds every deletion back
+(`holdsRestoredWork`), so a source half never goes out ahead of a copy that is still only `o`'s. The hold fails closed
+on a state it cannot read or trust, and, where the state is lost or does not verify, finds such a row again from the row
+itself while a record that verifies names `o` (Z200): the move under way, a verified state, or the vault's chain row,
+which the move signs and which is filled in from the verified states whenever sharing and the keys are both here (Z216,
+Z222). A move made again, or a second restore, adds to that row and finds the rows it names again where no state
+verifies (Z225, Z226); the rows are read through sharing, so such a move waits until sharing is configured (Z229),
+writing nothing meanwhile (Z234), and a row that cannot be read fails it rather than reading as none (Z236), as does a
+failed read of the vault directory or of a state while the chain is read (Z245). A row is read only where it can decide
+something (Z239): by the move where no state verifies and to add what a vault's entries name, and by the hold and Stop
+Waiting only for a vault that may be shared whose state is lost or does not verify (Z248), so a row that cannot be read
+holds back only what depends on it, and the sync says so (Z240, worded for a device never restored too, Z250). A move
+turned away is made again from the record the store holds, keeping an attempt's first failure until one makes it
+(Z247, Z259). A sync begun locked writes nothing across the unlock that registers a restored device and makes its move
+(Z249): it may write only as an ID this installation holds a key for, decided after its last await, with no registration
+under way, and it signs a state only for the ID and the keys it began with (Z253, `SyncStateWrites`). A state that
+cannot be read, or a re-record that fails, makes a vault wait for its carry rather than merge first (Z254), and the
+take-out leaves `o`'s rows alone then too (Z253, Z258). A take-out that does not finish keeps the judged basis from
+being settled by the replay after it (Z262): settled, the head that made a late write stop counting was never acted on
+here, and the write, current on this device alone, went into its later merges as its own work, where every other
+device holds it aside by `J`. Meanwhile the vault publishes nothing, in its first pass (Z270) or its replay (Z276): a
+version built on the write, sent then, would be held aside by `J` on every other device; and deletions wait, named
+(Z268, worded after what went out, Z273), until a take-out finishes. Rows a take-out has taken out are rebuilt only by
+a replay, so the take-out writes the judged head down as unsettled before its first row goes, and before it withdraws
+a pending deletion, which only the replay makes good too (Z274, Z279): a relaunch then replays, whatever the basis has
+done since.
 
 **What remains.** S45 and S46 were found by reading, after S44, and are closed by the tombstone judgement and the
 wider clause (3) above; each was reproduced through the session first (`deletionOnTopOfALateWrite`,

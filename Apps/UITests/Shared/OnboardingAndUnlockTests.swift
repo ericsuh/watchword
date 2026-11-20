@@ -21,13 +21,13 @@ final class OnboardingAndUnlockTests: XCTestCase {
 
         // Onboarding: a too-short password is refused, then the account is created.
         let password = app.secureTextFields["onboarding.password"]
-        XCTAssertTrue(password.waitForExistence(timeout: 10))
+        XCTAssertTrue(password.appears(within: 10))
         password.click()
-        password.typeText("short")
+        password.enterText("short")
         let confirm = app.secureTextFields["onboarding.confirm"]
         confirm.click()
-        confirm.typeText("short\n")
-        XCTAssertTrue(app.staticTexts["error"].waitForExistence(timeout: 10))
+        confirm.enterText("short\n")
+        XCTAssertTrue(app.staticTexts["error"].appears(within: 10))
 
         password.click()
         password.clearAndType(Self.password)
@@ -36,7 +36,7 @@ final class OnboardingAndUnlockTests: XCTestCase {
 
         // Emergency Kit: the Secret Key is shown and Continue needs the confirmation.
         let secretKey = app.staticTexts["kit.secretKey"]
-        XCTAssertTrue(secretKey.waitForExistence(timeout: 30))
+        XCTAssertTrue(secretKey.appears(within: 30))
         let shown = secretKey.displayedText
         XCTAssertTrue(shown.hasPrefix("WW-"), "unexpected Secret Key format: \(shown)")
         XCTAssertFalse(app.buttons["kit.continue"].isEnabled)
@@ -44,50 +44,50 @@ final class OnboardingAndUnlockTests: XCTestCase {
         app.buttons["kit.continue"].click()
 
         // Create an item.
-        XCTAssertTrue(app.buttons["items.add"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["items.add"].appears(within: 10), app.debugDescription)
         app.buttons["items.add"].click()
         let title = app.textFields["edit.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertTrue(title.appears(within: 10))
         title.click()
-        title.typeText("Library")
+        title.enterText("Library")
         app.textFields["edit.host"].click()
-        app.textFields["edit.host"].typeText("citylibrary.org")
+        app.textFields["edit.host"].enterText("citylibrary.org")
         app.textFields["edit.username"].click()
-        app.textFields["edit.username"].typeText("pat")
+        app.textFields["edit.username"].enterText("pat")
         app.buttons["edit.generate"].click()
         app.buttons["edit.save"].click()
-        XCTAssertTrue(app.descendants(matching: .any)["items.row.Library"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["items.row.Library"].appears(within: 10))
 
         // Lock, fail once, unlock.
-        XCTAssertTrue(app.buttons["items.lock"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["items.lock"].appears(within: 10), app.debugDescription)
         app.buttons["items.lock"].click()
         let unlock = app.secureTextFields["unlock.password"]
-        XCTAssertTrue(unlock.waitForExistence(timeout: 10))
-        XCTAssertFalse(app.descendants(matching: .any)["items.row.Library"].exists, "locked vault still shows items")
+        XCTAssertTrue(unlock.appears(within: 10))
+        XCTAssertFalse(app.descendants(matching: .any)["items.row.Library"].isPresent, "locked vault still shows items")
         unlock.click()
-        unlock.typeText("not the password\n")
-        XCTAssertTrue(app.staticTexts["error"].waitForExistence(timeout: 30))
+        unlock.enterText("not the password\n")
+        XCTAssertTrue(app.staticTexts["error"].appears(within: 30))
         unlock.click()
-        unlock.typeText(Self.password + "\n")
+        unlock.enterText(Self.password + "\n")
         let row = app.descendants(matching: .any)["items.row.Library"]
-        XCTAssertTrue(row.waitForExistence(timeout: 30))
+        XCTAssertTrue(row.appears(within: 30))
 
         // Move to Trash asks first: the toolbar button only opens the confirmation, and the item stays until the
         // person confirms. The purge 30 days later does not ask again, so this is the explicit action F7.7 needs.
         // On macOS the row's identifier lands on each of its texts (title and host), so click the first of them.
         row.firstMatch.click()
         let trash = app.buttons["detail.trash"].firstMatch
-        XCTAssertTrue(trash.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(trash.appears(within: 10), app.debugDescription)
         trash.click()
         // The dialog's button may or may not carry its identifier; it is the other button with the same label.
         let confirmTrash = app.buttons.matching(
             NSPredicate(format: "label == %@ AND identifier != %@", "Move to Trash", "detail.trash")
         ).firstMatch
-        XCTAssertTrue(confirmTrash.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertFalse(app.descendants(matching: .any)["detail.empty"].exists, "trashed before the confirmation")
+        XCTAssertTrue(confirmTrash.appears(within: 10), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["detail.empty"].isPresent, "trashed before the confirmation")
         confirmTrash.click()
-        XCTAssertTrue(app.descendants(matching: .any)["detail.empty"].waitForExistence(timeout: 10))
-        XCTAssertTrue(row.waitForNonExistence(timeout: 10), "the trashed item is still listed")
+        XCTAssertTrue(app.descendants(matching: .any)["detail.empty"].appears(within: 10))
+        XCTAssertTrue(row.disappears(within: 10), "the trashed item is still listed")
     }
 }
 
@@ -104,10 +104,10 @@ extension XCUIElement {
                 typeKey("a", modifierFlags: .command)
                 typeKey(.delete, modifierFlags: [])
             #else
-                typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: max(value.count, 20)))
+                enterText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: max(value.count, 20)))
             #endif
         }
-        typeText(text)
+        enterText(text)
     }
 
     /// Turns a SwiftUI `Toggle` on. In an iOS `Form` the switch element spans the whole row and a tap on its centre
@@ -135,8 +135,10 @@ extension XCUIElement {
     }
 
     #if os(iOS)
+        /// A tap, under the name macOS gives a click, through `UIQuery.tolerating`: the element is looked up before
+        /// the touch is sent, so a lookup that stalled can be made again without tapping twice.
         func click() {
-            tap()
+            UIQuery.tolerating("tap") { tap() }
         }
     #endif
 }

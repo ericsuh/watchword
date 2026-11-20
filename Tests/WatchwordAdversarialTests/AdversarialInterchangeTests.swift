@@ -778,6 +778,35 @@ struct AdversarialInterchangeTests {
         }
     }
 
+    /// A7 hands over a CSV (or the same shape in 1PUX, compressed a hundredfold) whose rows are a title and some 2,700
+    /// line feeds of notes (Z81). Each row is under 3 KB and passes every per-entry limit, the 768 KiB stored-size
+    /// bound included, but the vault stores each line again with its sync metadata, so a few megabytes of file
+    /// committed hundreds of megabytes of sealed rows, published to every device of the account: no budget counted
+    /// what the drafts would store. Now the sum of the estimates is a budget of the whole import, and passing it
+    /// fails the file before anything is committed.
+    @Test("A file whose small rows store as large items fails on the import-wide stored-size budget")
+    func storedSizeBudget() throws {
+        let row = "Note,,\"" + String(repeating: "\n", count: 2_700) + "\"\r\n"
+        // Under the budget: the amplification is the code's own figure, about 270 times per row.
+        let few = Array(("Title,Password,Notes\r\n" + String(repeating: row, count: 20)).utf8)
+        let drafts = try importCSV(few).entries.map(\.item)
+        let stored = drafts.reduce(0) { $0 + StoredItemSize.estimate($1) }
+        #expect(drafts.count == 20 && stored > 200 * few.count, "\(stored) stored for \(few.count) bytes read")
+        // Under three megabytes of such rows would store some 700 MiB.
+        let many = Array(("Title,Password,Notes\r\n" + String(repeating: row, count: 1_000)).utf8)
+        #expect(many.count < 2_800_000)
+        #expect(throws: InterchangeError.limitExceeded(.totalStoredBytes, limit: 512 << 20)) {
+            _ = try importCSV(many)
+        }
+        // And a tightened budget is honoured to the row: what was kept fits it.
+        let limits = InterchangeLimits(maximumTotalStoredBytes: stored)
+        #expect(try importCSV(few, limits: limits).entries.count == 20)
+        #expect(throws: InterchangeError.limitExceeded(.totalStoredBytes, limit: stored - 1)) {
+            _ = try importCSV(few, limits: InterchangeLimits(maximumTotalStoredBytes: stored - 1))
+        }
+        #expect(InterchangeLimits(maximumTotalStoredBytes: Int.max).maximumTotalStoredBytes == 512 << 20)
+    }
+
     /// The same bound as a property: whatever text an entry holds, the estimate an import relies on is never below
     /// what `ItemMerge.stamped` and `ItemCodec` produce, so a change to the stored form that outgrows it fails here.
     @Test("The stored-size estimate is never below what the vault encodes")

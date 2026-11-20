@@ -30,6 +30,33 @@ public struct DeviceIdentity: Sendable, Hashable {
     }
 }
 
+/// A password change made on another device that this one does not follow (`VaultSession.pendingPasswordChanges`).
+public struct PendingPasswordChange: Sendable, Hashable, Identifiable {
+    public var id: UUID { device }
+    /// The device that made the change.
+    public var device: UUID
+    /// The name that device registered with; empty while locked or if it cannot be read.
+    public var deviceName: String
+    public var generation: UInt64
+    /// Whether the change branches off before the credentials this device follows (made at the same time as a
+    /// change this device has already followed, or with a password since retired) rather than after them.
+    public var isFork: Bool
+    /// Whether the registry replays along the change at all. One that does not can never be followed.
+    public var canBeFollowed: Bool
+    /// The devices this device knows that are revoked in the registry as the change leaves it.
+    public var revokedDevices: [UUID]
+    /// This device is among them: the change is refused here (`passwordChangeRevokesThisDevice`).
+    public var revokesThisDevice: Bool
+    /// Whether the device that made it was registered before the password change this device follows, as that
+    /// change sealed it, rather than after it (review finding Z13). A device registered after it may have been
+    /// registered with the password it retired, by whoever else knew that password; the list puts these second.
+    public var registeredBeforeFollowed: Bool
+    /// Whether `canBeFollowed`, `revokedDevices` and `revokesThisDevice` were worked out: each costs a replay of the
+    /// registry, so the list does that for its first `maximumChangesDescribed` rows only, and
+    /// `describePasswordChange(by:)` does it for the one the person selects. Until then they say nothing.
+    public var isDescribed: Bool
+}
+
 /// What becomes of the account password when a device is revoked (docs/02-architecture.md §7.8). Both choices take
 /// the current password: removing a device is not something an unattended, unlocked session should be able to do.
 public enum RevocationPasswordChoice: Sendable, Hashable {
@@ -43,9 +70,28 @@ public enum RevocationPasswordChoice: Sendable, Hashable {
 }
 
 /// What this device trusts of the registry, kept in the Keychain (`KeychainItem.deviceRegistryAnchor`).
+///
+/// `"WWRA3" ‖ genesis 32 ‖ credential 32 ‖ generation u64 ‖ headCount u16 ‖ heads ‖ pendingCount u8 ‖ pending ‖
+/// intentFlag u8 ‖ (intent credential 32 ‖ intent header 32)?`, little-endian. An anchor written before `intent`
+/// existed (`"WWRA2"`, nothing after `pending`) is read as one with no step under way, and one written before
+/// `pending` existed (`"WWRA1"`, nothing after the heads) as one that has also seen no change.
 struct RegistryAnchor: Equatable, Sendable {
-    static let magic = Array("WWRA1".utf8)
+    static let magic = Array("WWRA3".utf8)
+    static let secondMagic = Array("WWRA2".utf8)
+    static let firstMagic = Array("WWRA1".utf8)
     static let maximumHeads = 256
+    static let maximumPending = 16
+
+    /// A step of this device's own that moves it to another credential entry (adopting a password change, or making
+    /// one), written here **before** the store commits it (review finding Z9). The local file is A8's, so a header
+    /// row ahead of the anchor is this device's own step only if the Keychain says so: `credential` is the entry the
+    /// step follows and `header` the SHA-256 of the exact header row it commits. A crash between the commit and the
+    /// pin leaves an intent that the next read completes (the row is that header) or discards (the row is still the
+    /// one the anchor follows); a row that is neither is not this device's step, and a password change is pending.
+    struct Intent: Equatable, Sendable {
+        var credential: ObjectDigest
+        var header: ObjectDigest
+    }
 
     var genesis: ObjectDigest
     var credential: ObjectDigest
@@ -54,6 +100,14 @@ struct RegistryAnchor: Equatable, Sendable {
     var generation: UInt64
     /// The newest entries applied. The local store must still hold them, and so everything they descend from.
     var heads: [ObjectDigest]
+    /// Password changes that follow `credential` and that this device has seen and not been given (the credential
+    /// entries' IDs, at most `maximumPending` of them). While there is one, the password this device follows and
+    /// quick unlock are refused, whatever the local file holds by then: a pending change is no entry on the followed
+    /// chain, so `heads` does not notice its rows being deleted (review finding Z3). It is emptied only by this
+    /// device coming to follow another credential entry.
+    var pending: [ObjectDigest]
+    /// This device's own step under way, if any (`Intent`).
+    var intent: Intent?
 
     func encoded() -> [UInt8] {
         let kept = heads.sorted().prefix(Self.maximumHeads)
@@ -61,21 +115,36 @@ struct RegistryAnchor: Equatable, Sendable {
         out += (0..<8).map { UInt8(truncatingIfNeeded: generation >> (8 * $0)) }
         out += [UInt8(truncatingIfNeeded: kept.count), UInt8(truncatingIfNeeded: kept.count >> 8)]
         for head in kept { out += head.bytes }
+        out.append(UInt8(truncatingIfNeeded: pending.count))
+        for change in pending { out += change.bytes }
+        if let intent {
+            out += [1] + intent.credential.bytes + intent.header.bytes
+        } else {
+            out.append(0)
+        }
         return out
     }
 
-    init(genesis: ObjectDigest, credential: ObjectDigest, generation: UInt64, heads: [ObjectDigest]) {
+    init(
+        genesis: ObjectDigest, credential: ObjectDigest, generation: UInt64, heads: [ObjectDigest],
+        pending: [ObjectDigest] = [], intent: Intent? = nil
+    ) {
         self.genesis = genesis
         self.credential = credential
         self.generation = generation
         self.heads = heads.sorted()
+        self.pending = Array(Set(pending).sorted().prefix(Self.maximumPending))
+        self.intent = intent
     }
 
     init?(bytes: [UInt8]) {
         let fixed = Self.magic.count + 2 * ObjectDigest.byteCount + 8 + 2
-        guard bytes.count >= fixed, Array(bytes[..<Self.magic.count]) == Self.magic else { return nil }
+        guard bytes.count >= fixed else { return nil }
+        let magic = Array(bytes[..<Self.magic.count])
+        guard magic == Self.magic || magic == Self.secondMagic || magic == Self.firstMagic else { return nil }
         var offset = Self.magic.count
         func digest(_ offset: inout Int) -> ObjectDigest? {
+            guard bytes.count >= offset + ObjectDigest.byteCount else { return nil }
             defer { offset += ObjectDigest.byteCount }
             return ObjectDigest(bytes: Array(bytes[offset..<(offset + ObjectDigest.byteCount)]))
         }
@@ -84,13 +153,44 @@ struct RegistryAnchor: Equatable, Sendable {
         offset += 8
         let count = Int(bytes[offset]) | Int(bytes[offset + 1]) << 8
         offset += 2
-        guard count <= Self.maximumHeads, bytes.count == fixed + count * ObjectDigest.byteCount else { return nil }
+        guard count <= Self.maximumHeads, bytes.count >= offset + count * ObjectDigest.byteCount else { return nil }
         var heads: [ObjectDigest] = []
         for _ in 0..<count {
             guard let head = digest(&offset) else { return nil }
             heads.append(head)
         }
-        self.init(genesis: genesis, credential: credential, generation: generation, heads: heads)
+        var pending: [ObjectDigest] = []
+        if magic != Self.firstMagic {
+            guard offset < bytes.count else { return nil }
+            let pendingCount = Int(bytes[offset])
+            offset += 1
+            guard pendingCount <= Self.maximumPending,
+                bytes.count >= offset + pendingCount * ObjectDigest.byteCount
+            else { return nil }
+            for _ in 0..<pendingCount {
+                guard let change = digest(&offset) else { return nil }
+                pending.append(change)
+            }
+        }
+        var intent: Intent?
+        if magic == Self.magic {
+            guard offset < bytes.count else { return nil }
+            let flag = bytes[offset]
+            offset += 1
+            switch flag {
+            case 0:
+                break
+            case 1:
+                guard let credential = digest(&offset), let header = digest(&offset) else { return nil }
+                intent = Intent(credential: credential, header: header)
+            default:
+                return nil
+            }
+        }
+        guard offset == bytes.count else { return nil }
+        self.init(
+            genesis: genesis, credential: credential, generation: generation, heads: heads, pending: pending,
+            intent: intent)
     }
 }
 
@@ -142,8 +242,16 @@ extension VaultSession {
     static let directoryObjectMaximumLength = 4096
     static let deletionMarker = Array("WWVD1-deleted".utf8)
     /// Key derivations spent on candidate account headers in one unlock or enrolment: each costs as much as the
-    /// header's KDF parameters ask, up to the ceiling (SEC9).
+    /// header's KDF parameters ask, up to the ceiling (SEC9). One per authoring device, on its newest header, so a
+    /// device that publishes a chain of changes spends one of them and no more (review finding Z1).
     static let maximumHeaderAttempts = 3
+    /// Authoring devices whose candidate header a sync fetches and keeps (one each, its newest). A change by a
+    /// device beyond that is still listed and can still be followed by naming the device, which fetches its header
+    /// then (`followPasswordChange`).
+    static let maximumCandidateAuthors = 64
+    /// The password changes `pendingPasswordChanges` describes in full: each costs a replay of the registry. Every
+    /// change is listed whatever this is (Z13); the rest are described one at a time (`describePasswordChange`).
+    static let maximumChangesDescribed = 16
     /// Header names looked at during enrolment before giving up; the store may hold any number of planted ones.
     static let maximumHeadersConsidered = 64
 
@@ -172,6 +280,49 @@ extension VaultSession {
         try await keychain.store(SecureBytes(wiping: &bytes), for: .deviceRegistryAnchor(accountID: accountID))
     }
 
+    /// The anchor as this device follows it, with any step of its own that was under way settled first (review
+    /// finding Z9, `RegistryAnchor.Intent`). Every decision about what the device trusts reads this, never the raw
+    /// Keychain value, so a row ahead of the anchor counts as this device's own only where the Keychain named it.
+    ///
+    /// - The local header row is the one the intent named, byte for byte, and the account row matches it: the step
+    ///   was committed. The anchor moves to it (pinned along its credential entry, the intent cleared), and is
+    ///   returned so even if the Keychain cannot be written now. If the registry cannot be evaluated along it, the
+    ///   intent stays and the device is in the middle of a step: a change is pending and no candidate is tried.
+    /// - The account row is still at the anchor's generation: the step was never committed, and the intent is
+    ///   dropped.
+    /// - Anything else is left as it is, intent and all, and judged as a password change pending.
+    func trustedAnchor(_ account: AccountRecord) async -> RegistryAnchor? {
+        guard var anchor = await readAnchor(account.accountID) else { return nil }
+        guard let intent = anchor.intent else { return anchor }
+        let stored = try? await storedHeader(account)
+        if let stored, ObjectDigest(hashing: stored.row.envelope) == intent.header,
+            stored.header.credentialID == intent.credential, stored.header.genesisID == anchor.genesis,
+            stored.header.unlockKeyID == account.unlockKeyID, stored.header.generation == account.credentialGeneration,
+            stored.header.keysetVersion == account.keysetVersion
+        {
+            guard let accountKey = await trustedAccountSigningKey(account),
+                let rows = try? await store.records(in: account.accountID, kind: .deviceRegistry),
+                let view = try? Self.evaluateRegistry(
+                    rows.map(\.envelope), accountID: account.accountID, accountKey: accountKey,
+                    genesis: anchor.genesis, credential: intent.credential)
+            else { return anchor }
+            let completed = RegistryAnchor(
+                genesis: view.state.genesis, credential: view.state.credential.id,
+                generation: view.state.credential.generation, heads: view.state.heads,
+                pending: view.state.pendingCredentials.map(\.id))
+            try? await writeAnchor(completed, accountID: account.accountID)
+            registryView = nil
+            return completed
+        }
+        if account.keysetVersion == anchor.generation, account.credentialGeneration == anchor.generation,
+            stored?.header.credentialID == anchor.credential
+        {
+            anchor.intent = nil
+            try? await writeAnchor(anchor, accountID: account.accountID)
+        }
+        return anchor
+    }
+
     /// The registry as this device sees it: the entries in the local store, replayed from the genesis entry and
     /// along the credentials the Keychain anchor names. Needs public keys only, so it works while locked. Throws
     /// `deviceRegistryUnavailable` when there is no anchor or account key to trust, or when the store no longer
@@ -179,7 +330,7 @@ extension VaultSession {
     func registry(_ account: AccountRecord) async throws -> RegistryView {
         if let registryView { return registryView }
         guard let accountKey = await trustedAccountSigningKey(account),
-            let anchor = await readAnchor(account.accountID)
+            let anchor = await trustedAnchor(account)
         else { throw VaultError.deviceRegistryUnavailable }
         let rows = try await store.records(in: account.accountID, kind: .deviceRegistry)
         let view = try Self.evaluateRegistry(
@@ -209,14 +360,47 @@ extension VaultSession {
     }
 
     /// Records what was just evaluated as what this device has seen, so the local store cannot be rolled back
-    /// behind it.
+    /// behind it: the newest entries applied, and the password changes it has not been given. Those are remembered
+    /// for as long as this device follows the same credential entry, whatever the store shows later; a view along
+    /// another credential entry starts the list again (the device adopted a change, or made one).
+    ///
+    /// A step of this device's own still under way (`RegistryAnchor.Intent`) is kept unless `view` is along the
+    /// credential entry it names, which is what completes it.
     func pinRegistry(_ view: RegistryView, accountID: UUID) async throws {
+        let previous = await readAnchor(accountID)
+        var pending = view.state.pendingCredentials.map(\.id)
+        if let previous, previous.credential == view.state.credential.id { pending += previous.pending }
+        let intent = previous?.intent.flatMap { $0.credential == view.state.credential.id ? nil : $0 }
         let anchor = RegistryAnchor(
             genesis: view.state.genesis, credential: view.state.credential.id,
-            generation: view.state.credential.generation, heads: view.state.heads)
-        if await readAnchor(accountID) != anchor {
+            generation: view.state.credential.generation, heads: view.state.heads, pending: pending, intent: intent)
+        if previous != anchor {
             try await writeAnchor(anchor, accountID: accountID)
         }
+    }
+
+    /// Whether the account password was changed on another device and this one has not been given it (§7.8). Asked
+    /// before the password this device follows is accepted, before quick unlock, and by sync before it merges or
+    /// publishes.
+    ///
+    /// Answered from the Keychain's anchor first, and only then from the registry in the local file (review finding
+    /// Z3): the file is A8's, and a pending change is the one part of the registry whose rows can be deleted without
+    /// the anchor's heads noticing. A registry that cannot be evaluated hides nothing the anchor has recorded. It is
+    /// keyed on the registry's credential entries, never on whether the change's *header* has arrived: the transport
+    /// can withhold that (A1) while the entry is here.
+    ///
+    /// `account.keysetVersion` is the generation the local header belongs to (bound into the keyset's wrap, so an
+    /// edited value opens nothing). A header ahead of the anchor is this device's own step only where the Keychain
+    /// named it before the step was committed (`trustedAnchor`, which then moves the anchor to it); otherwise it is
+    /// no step of this device's, whoever wrote it into the file and whatever its own branch says, and a change is
+    /// pending (review finding Z9). So is one this device's own step left half done.
+    func passwordChangePending(_ account: AccountRecord) async -> Bool {
+        guard let anchor = await trustedAnchor(account) else { return false }
+        if !anchor.pending.isEmpty || anchor.intent != nil || account.keysetVersion > anchor.generation {
+            return true
+        }
+        guard let view = try? await registry(account) else { return false }
+        return !view.state.pendingCredentials.isEmpty
     }
 
     static func registryRow(_ entry: RegistryEntry, account: AccountRecord) -> StoredRecord {
@@ -367,6 +551,15 @@ extension VaultSession {
 
     /// The header as the local row that mirrors the account record (`recordID` the account's own) or, under any
     /// other record ID, as a candidate waiting for the person's new password.
+    /// The version a row that replaces `existing` is written at: one above it, or 1 where there is none. A row at the
+    /// last version there is can only come from an edited file (A8), since nothing writes one: refused with a typed
+    /// error, never trapped on (review finding Z23).
+    static func version(replacing existing: StoredRecord?) throws -> UInt64 {
+        guard let existing else { return 1 }
+        guard existing.version < UInt64.max else { throw VaultError.versionOverflow }
+        return existing.version + 1
+    }
+
     static func headerRow(_ header: AccountHeaderObject, recordID: UUID, version: UInt64) -> StoredRecord {
         StoredRecord(
             recordID: recordID, kind: .accountHeader, vaultID: header.accountID, keyID: header.unlockKeyID,
@@ -382,31 +575,43 @@ extension VaultSession {
     }
 
     /// Account headers for credentials this device does not follow yet, each checked against the registry: its
-    /// credential entry must be one the registry holds as pending or forked, written by the same device, and the
+    /// credential entry must be one the registry lists as pending or forked, written by the same device, and the
     /// header must carry the account key's signature and that device's. `pending` are password changes made after
-    /// the one this device follows; `forked` branch off earlier.
+    /// the one this device follows; `forked` branch off earlier. **One per authoring device**, its newest, newest
+    /// generation first: whoever publishes many changes under one device's name is tried once (Z1). Devices whose
+    /// registration the checkpoint this device follows sealed come before the rest (Z13).
+    ///
+    /// Judged along the chain `passwordChangePending` reads (`trustedAnchor`), and none at all while a step of this
+    /// device's own is under way: a change that was pending before it is a fork after it (review finding Z9).
     func candidateHeaders(_ account: AccountRecord) async -> (
         pending: [AccountHeaderObject], forked: [AccountHeaderObject]
     ) {
-        guard let view = try? await registry(account),
+        guard let anchor = await trustedAnchor(account), anchor.intent == nil,
+            let view = try? await registry(account),
             let rows = try? await store.records(in: account.accountID, kind: .accountHeader)
         else { return ([], []) }
-        var pending: [AccountHeaderObject] = []
-        var forked: [AccountHeaderObject] = []
+        var pending: [UUID: AccountHeaderObject] = [:]
+        var forked: [UUID: AccountHeaderObject] = [:]
+        let newestFirst: (AccountHeaderObject, AccountHeaderObject) -> Bool = {
+            ($0.generation, $0.credentialID) > ($1.generation, $1.credentialID)
+        }
+        // Authors the followed checkpoint sealed are tried first (Z13), then the rest, newest first.
+        let sealed = Self.sealedAuthors(view)
+        let order: (AccountHeaderObject, AccountHeaderObject) -> Bool = {
+            let (first, second) = (sealed.contains($0.author), sealed.contains($1.author))
+            return first != second ? first : newestFirst($0, $1)
+        }
         for row in rows where row.recordID != account.accountID {
             guard let header = try? AccountHeaderObject.parse(row.envelope),
                 Self.isCandidate(header, account: account, view: view)
             else { continue }
             if view.state.pendingCredentials.contains(where: { $0.id == header.credentialID }) {
-                pending.append(header)
+                if pending[header.author].map({ newestFirst(header, $0) }) ?? true { pending[header.author] = header }
             } else {
-                forked.append(header)
+                if forked[header.author].map({ newestFirst(header, $0) }) ?? true { forked[header.author] = header }
             }
         }
-        let newestFirst: (AccountHeaderObject, AccountHeaderObject) -> Bool = {
-            ($0.generation, $0.credentialID) > ($1.generation, $1.credentialID)
-        }
-        return (pending.sorted(by: newestFirst), forked.sorted(by: newestFirst))
+        return (pending.values.sorted(by: order), forked.values.sorted(by: order))
     }
 
     static func isCandidate(_ header: AccountHeaderObject, account: AccountRecord, view: RegistryView) -> Bool {
@@ -414,9 +619,49 @@ extension VaultSession {
             let credential = (view.state.pendingCredentials + view.state.forkedCredentials).first(where: {
                 $0.id == header.credentialID
             }), credential.generation == header.generation, credential.author == header.author,
-            let key = view.state.devices[header.author]?.key ?? view.state.revoked[header.author]?.key
+            let key = Self.registeredKey(of: header.author, in: view)
         else { return false }
         return (try? header.verifySignatures(accountSigningKey: view.state.accountSigningKey, deviceKey: key)) != nil
+    }
+
+    /// The key `device` is registered under as this device sees the registry, revoked or not.
+    static func registeredKey(of device: UUID, in view: RegistryView) -> DevicePublicKey? {
+        view.state.devices[device]?.key ?? view.state.revoked[device]?.key
+    }
+
+    /// The credential changes this device does not follow, by the device that made them, each device's newest
+    /// first. The devices in `sealed` (`sealedAuthors`) come first, then the rest; within each, in the order their
+    /// newest change sorts (generation, then entry ID, descending). That last order is no defence, since whoever
+    /// makes a change chooses its place in it; `sealed` is (review finding Z13): a device registered after the change
+    /// this device follows may have been registered with the password that change retired, by anyone who knew it,
+    /// and as many of them as they like, while one the checkpoint sealed was registered before. What bounds an author
+    /// is that each gets one attempt, and what reaches a change this order starves is naming its device.
+    static func changesByAuthor(_ changes: [DeviceRegistryState.Credential], sealed: Set<UUID> = []) -> [(
+        author: UUID, changes: [DeviceRegistryState.Credential]
+    )] {
+        var grouped: [UUID: [DeviceRegistryState.Credential]] = [:]
+        for change in changes { grouped[change.author, default: []].append(change) }
+        return grouped.map { author, changes in
+            (author, changes.sorted { ($0.generation, $0.id) > ($1.generation, $1.id) })
+        }.sorted {
+            let (first, second) = (sealed.contains($0.author), sealed.contains($1.author))
+            if first != second { return first }
+            return ($0.changes[0].generation, $0.changes[0].id) > ($1.changes[0].generation, $1.changes[0].id)
+        }
+    }
+
+    /// The devices whose registration the credential entry this device follows sealed: it descends from the entry
+    /// that registered them (review finding Z13). Bounded by the entries held.
+    static func sealedAuthors(_ view: RegistryView) -> Set<UUID> {
+        var sealed: Set<ObjectDigest> = []
+        var stack = [view.state.credential.id]
+        while let id = stack.popLast() {
+            guard sealed.insert(id).inserted, let entry = view.entries[id] else { continue }
+            stack += entry.parents
+        }
+        return Set(
+            (Array(view.state.devices.values) + Array(view.state.revoked.values))
+                .filter { sealed.contains($0.entry) }.map(\.id))
     }
 
     // MARK: - Account creation and upkeep
@@ -468,7 +713,7 @@ extension VaultSession {
         registryView = nil
         let accountID = account.accountID
         let stored = try await storedHeader(account)
-        let anchor = await readAnchor(accountID)
+        let anchor = await trustedAnchor(account)
         guard epoch == lockEpoch, !keys.accountUnlockKey.isZeroised else { return }
 
         // An account from before the registry existed has none of this. Its registry is started at a sync, and only
@@ -478,11 +723,20 @@ extension VaultSession {
 
         // The stored header is this account record's own only if it opens under the key just derived; then what it
         // names is authenticated by the password, and can restore a missing anchor (a Keychain that lost it, a
-        // store restored onto other hardware) or move it forward (a crash between committing a password change and
-        // pinning it).
+        // store restored onto other hardware). It never moves an anchor that exists (review finding Z9): this
+        // device's own steps move it through the intent they write first (`trustedAnchor`), and a header ahead of
+        // the anchor that no intent named is not this device's step, whoever opened it with which password.
         // A device that has an anchor never takes another genesis entry: one registry per account, for good.
-        if let stored, stored.header.unlockKeyID == account.unlockKeyID,
-            (try? stored.header.openBinding(with: keys.accountUnlockKey)) == account.personalVaultID,
+        //
+        // A stored header that is not this record's own, or whose binding names another Personal vault than the row
+        // does, is not a reason to skip this quietly: the row was edited (review finding Z5). The unlock checked the
+        // same before installing a key (`requirePersonalVaultBinding`); here it is a hard failure too.
+        if let stored {
+            guard stored.header.unlockKeyID == account.unlockKeyID,
+                (try? stored.header.openBinding(with: keys.accountUnlockKey)) == account.personalVaultID
+            else { throw VaultError.personalVaultMismatch }
+        }
+        if let stored,
             anchor == nil || anchor?.genesis == stored.header.genesisID,
             anchor?.credential != stored.header.credentialID,
             let accountKey = await trustedAccountSigningKey(account)
@@ -497,10 +751,10 @@ extension VaultSession {
                 // Older than, or beside, what this device follows: the file was rolled back (A8).
                 throw VaultError.accountHeaderRolledBack
             }
-            if let view = try? Self.evaluateRegistry(
-                rows.map(\.envelope), accountID: accountID, accountKey: accountKey,
-                genesis: stored.header.genesisID, credential: stored.header.credentialID,
-                requiredHeads: anchor?.heads ?? [])
+            if anchor == nil,
+                let view = try? Self.evaluateRegistry(
+                    rows.map(\.envelope), accountID: accountID, accountKey: accountKey,
+                    genesis: stored.header.genesisID, credential: stored.header.credentialID)
             {
                 try await pinRegistry(view, accountID: accountID)
                 registryView = view
@@ -511,15 +765,34 @@ extension VaultSession {
         // A store restored onto other hardware arrives without the device key (Keychain items never leave a
         // device): this installation is a new device, and says so. One whose registration no longer counts (it was
         // made with a password since changed) registers again under the same ID.
-        guard view.state.pendingCredentials.isEmpty else { return }
+        guard view.state.pendingCredentials.isEmpty, !(await passwordChangePending(account)), epoch == lockEpoch
+        else { return }
+        // A move of an earlier ID's sync state that did not finish is made first, so that a registration below starts
+        // from a whole state; one that fails again throws, after the rest, and runs again at the next unlock (Z181).
+        // The markers first: until they are read every vault but the Personal one is held closed, and a deletion
+        // there would be parked for want of a key rather than carried (review of round 11, Z190).
+        var moveFailure: (any Error)?
+        if account.migration != nil {
+            await loadSharedMarkersIfNeeded(force: true)
+            guard epoch == lockEpoch else { return }
+            do {
+                try await completeDeviceMigration(account: account)
+            } catch {
+                moveFailure = error
+            }
+        }
+        let account = (try await loadAccount()) ?? account
+        guard epoch == lockEpoch else { return }
         let ownKey = try await deviceKeys.publicKey(accountID: accountID, deviceID: account.deviceID)
         if ownKey == nil {
             try await registerThisDevice(account: account, keys: keys, asNewDevice: true)
         } else if view.state.standing(of: account.deviceID) == .unknown {
             try await registerThisDevice(account: account, keys: keys, asNewDevice: false)
         }
-        // Deletions fetched while locked become this device's own now that it can sign.
+        // Deletions fetched while locked become this device's own now that it can sign, whether or not the move
+        // finished (I3): it has nothing to do with them.
         try? await adoptVerifiedDeletions(account: (try? await loadAccount()) ?? account)
+        if let moveFailure { throw moveFailure }
     }
 
     /// For an account created before the device registry existed — no registry entries, no published header, no
@@ -547,7 +820,7 @@ extension VaultSession {
     /// before any key is installed. Needs nothing from the file but the account record, so deleting registry
     /// entries hides nothing.
     func refuseRolledBackHeader(_ account: AccountRecord) async throws {
-        guard let anchor = await readAnchor(account.accountID) else { return }
+        guard let anchor = await trustedAnchor(account) else { return }
         // The two move together with every credential change; apart, one of them was edited.
         guard account.keysetVersion == account.credentialGeneration, account.keysetVersion >= anchor.generation
         else { throw VaultError.accountHeaderRolledBack }
@@ -569,14 +842,73 @@ extension VaultSession {
     ///
     /// As a new device (a store restored onto other hardware), what the old device ID wrote and never published is
     /// carried over, or nobody would ever publish it (`SyncEngine` publishes only rows of its own device): each such
-    /// row is written again by the new ID, unchanged (`ItemMerge.written`), in the commit that registers it, and
-    /// each of the old ID's pending deletions is recorded again as the new ID's (PRD F7.7).
+    /// row is written again by the new ID, unchanged (`ItemMerge.written`), in the commit that registers it, and that
+    /// commit records the move of the old ID's sync state (`AccountRecord.migration`, signed), which
+    /// `completeDeviceMigration` then makes: the old ID's pending deletions recorded again as the new ID's (PRD F7.7),
+    /// or parked for it (Z167, Z170). A move that fails part way is made again at each unlock, and at each sync, until
+    /// it is complete, and until then this device publishes nothing (review of round 10, Z181).
     func registerThisDevice(account: AccountRecord, keys: UnlockedKeys, asNewDevice: Bool) async throws {
+        // A new ID over a move that is not complete would replace its record, and the earlier ID's deletions would
+        // stay stamped by an ID this installation never publishes again: the move comes first
+        // (`reconcileAccountObjects` makes it, and throws if it fails), and registration waits for it (Z181).
+        guard !asNewDevice || account.migration == nil else { return }
+        // One registration at a time (review of round 12, L1): one begun while another waits (an unlock or a sync
+        // during its awaits) would make a second device key over the first's, and the first's failure would then
+        // delete it. This one is left to the next unlock or sync.
+        guard !registrationInFlight else { return }
+        registrationInFlight = true
+        defer { registrationInFlight = false }
         let epoch = lockEpoch
+        // What the caller read may be stale (review of round 13, L-b): another registration can have finished since,
+        // under another new ID, and a second key made now would replace its key in the Keychain's one slot. So the
+        // account is read again here, under the flag, and this one goes ahead only if it still names the ID the caller
+        // saw, with no move recorded and, for a new device, still no key of its own; otherwise it is left to the next
+        // unlock or sync, which sees the account as it is.
+        guard let current = try await store.loadAccount(), current.deviceID == account.deviceID,
+            !asNewDevice || current.migration == nil
+        else { return }
+        let ownKey = try await deviceKeys.publicKey(accountID: current.accountID, deviceID: current.deviceID)
+        guard asNewDevice == (ownKey == nil), epoch == lockEpoch else { return }
+        let account = current
+        // Before a current key is picked for any row carried over.
+        await loadSharedMarkersIfNeeded()
         let view = try await registry(account)
         var updated = account
-        if asNewDevice { updated.deviceID = UUID.random(using: &random) }
+        // What the old ID left, read before anything is made or committed: one read that fails ends the registration
+        // with nothing written and no device key made (review of round 10, I1; Z182), and it runs again at the next
+        // unlock (Z177). The move reads the deletions again (`completeDeviceMigration`), and decides what it parks.
         let unpublished = asNewDevice ? try await unpublishedRows(of: account) : (rows: [], deletions: [:])
+        if asNewDevice { _ = try await parkedDeletions(of: account) }
+        // Then a new device's key, so that its ID can commit to the account under it (review finding Z157). Made
+        // before what follows can fail (the label is sealed for its ID, the entry signed with it), so any failure
+        // before the commit deletes it again: a retry leaves no key under an ID nothing registered (review of round 11,
+        // Z189).
+        let created = asNewDevice ? try await deviceKeys.createDevice(accountID: account.accountID) : nil
+        do {
+            try await commitRegistration(
+                account: account, as: &updated, created: created, view: view, unpublished: unpublished.rows,
+                asNewDevice: asNewDevice, epoch: epoch)
+        } catch {
+            // Only the key this registration made: never one made since (review of round 12, L1).
+            if let created { try? await deviceKeys.delete(accountID: account.accountID, deviceID: created.id) }
+            throw error
+        }
+        registryView = nil
+        if let refreshed = try? await registry(updated) {
+            try? await pinRegistry(refreshed, accountID: account.accountID)
+        }
+        // After the registry is pinned again, so that the move reads the registry that lists the new ID. A move that
+        // fails throws, and is made again at the next unlock or sync (Z181).
+        if asNewDevice { try await completeDeviceMigration(account: updated) }
+    }
+
+    /// `registerThisDevice` from its new key to its commit: everything that can fail while a key just made is not yet
+    /// registered.
+    private func commitRegistration(
+        account: AccountRecord, as updated: inout AccountRecord, created: DeviceIdentity?, view: RegistryView,
+        unpublished: [UnpublishedRow], asNewDevice: Bool, epoch: UInt64
+    ) async throws {
+        if let created { updated.deviceID = created.id }
         let now = await clock.now()
         let keys = try requireKeys(since: epoch)
         let enrolment = EnrolmentKey.derive(from: keys.accountUnlockKey, accountID: account.accountID)
@@ -585,8 +917,8 @@ extension VaultSession {
             name: configuration.deviceName, at: now, deviceID: updated.deviceID, keyset: keys.keyset)
         let keyset = keys.keyset
         let deviceKey: DevicePublicKey
-        if asNewDevice {
-            deviceKey = try await deviceKeys.create(accountID: account.accountID, deviceID: updated.deviceID)
+        if let created {
+            deviceKey = created.key
         } else {
             guard
                 let existing = try await deviceKeys.publicKey(
@@ -601,8 +933,23 @@ extension VaultSession {
             keyset: keyset, enrolment: enrolment)
         var change = StoreChange(upserts: [Self.registryRow(entry, account: updated)])
         if asNewDevice {
+            if syncSettings != nil {
+                let migration = try signedMigration(from: account.deviceID, to: updated, keyset: keyset)
+                updated.migration = migration
+                change.migration = .set(migration)
+            }
             change.account = .update(updated, expectedKeysetVersion: account.keysetVersion)
-            for row in try carriedOver(unpublished.rows, keys: try requireKeys(since: epoch), as: updated) {
+            change.expectedDeviceID = account.deviceID
+            // The old ID's unpublished work in a shared vault is written again as the new ID's, where the old ID's
+            // published work counts for the vault's members (it commits): otherwise every member's judge holds it
+            // aside, the restored device's own on a replay, for want of a segment of the old ID's stream that carried
+            // it (review of round 12, Z191). Not here: a sync does it once the vault's log is pulled (Z198), and the
+            // move records those rows for it.
+            let reattributing = !Self.idsNobodyReceives(account: account, view: view, including: account.deviceID)
+                .contains(account.deviceID)
+            for row in try carriedOver(
+                unpublished, keys: try requireKeys(since: epoch), as: updated, reattributing: reattributing)
+            {
                 change.upserts.append(row.row)
                 change.expectations[row.row.key] = .version(row.replacing)
             }
@@ -613,24 +960,25 @@ extension VaultSession {
             for row in change.upserts where row.kind == .item || row.kind == .vaultMetadata {
                 highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, row.version)
             }
-            try? await startNewDeviceSyncState(carrying: unpublished.deletions, as: updated)
-        }
-        registryView = nil
-        if let refreshed = try? await registry(updated) {
-            try? await pinRegistry(refreshed, accountID: account.accountID)
         }
     }
+
+    /// A row this device wrote that its sync state does not record as published, with the last version of the record
+    /// the state does record it published (0 for none).
+    typealias UnpublishedRow = (row: StoredRecord, published: UInt64)
 
     /// The rows this device wrote that its sync state does not record as published, and its pending deletions
     /// (those that verify), per vault: what a store restored onto other hardware holds that no other device has.
     func unpublishedRows(of account: AccountRecord) async throws -> (
-        rows: [StoredRecord], deletions: [UUID: [RecordKey: PendingDeletion]]
+        rows: [UnpublishedRow], deletions: [UUID: [RecordKey: PendingDeletion]]
     ) {
-        guard let base = syncSettings?.state, let syncState else { return ([], [:]) }
-        var rows: [StoredRecord] = []
+        guard let syncState else { return ([], [:]) }
+        var rows: [UnpublishedRow] = []
         var deletions: [UUID: [RecordKey: PendingDeletion]] = [:]
         for vaultID in try await vaultDirectory(account).keys {
-            let state = try await base.loadState(vaultID: vaultID)
+            // The state this session signed, or none (Z20): a planted `published` must not keep a row from being
+            // carried over.
+            let state = try await syncState.loadState(vaultID: vaultID)
             let published = state?.published ?? [:]
             // Items merge by what each value's writer had seen, so carrying one over that was published after all
             // changes nothing. A vault's name is last-writer-wins: carried over without knowing it was unpublished,
@@ -639,7 +987,8 @@ extension VaultSession {
             for kind in kinds {
                 for row in try await store.records(in: vaultID, kind: kind) where row.deviceID == account.deviceID {
                     if let stamp = published[row.key], stamp >= RecordStamp(row) { continue }
-                    rows.append(row)
+                    let last = published[row.key].flatMap { $0.device == account.deviceID ? $0.version : nil }
+                    rows.append((row, last ?? 0))
                 }
             }
             let pending = try await syncState.pendingDeletions(vaultID: vaultID)
@@ -649,13 +998,23 @@ extension VaultSession {
     }
 
     /// Each row as the version `updated`'s device writes next: the same content, one version up, sealed under the
-    /// vault's current key. A row that does not open is left as it is; it carries nothing this device can read.
-    func carriedOver(_ rows: [StoredRecord], keys: UnlockedKeys, as updated: AccountRecord) throws -> [(
-        row: StoredRecord, replacing: UInt64
-    )] {
+    /// vault's current key. A row that does not open is left as it is; it carries nothing this device can read. One
+    /// whose vault has no current key here is left too, and the move records it for a later sync to carry
+    /// (`SyncState.restoredUnpublished`, review of round 12, M1). With `reattributing`, an item in a vault that may be
+    /// shared is left the same way: what the old ID wrote there above what it published is written as the new ID's
+    /// (`ItemMerge.reattributed`, Z191), and what it published is known only once a sync has pulled the vault's log
+    /// (review of round 13, M2). The backup's own record of that can be older than the old ID's last publish.
+    func carriedOver(_ rows: [UnpublishedRow], keys: UnlockedKeys, as updated: AccountRecord, reattributing: Bool)
+        throws -> [(row: StoredRecord, replacing: UInt64)]
+    {
         var result: [(row: StoredRecord, replacing: UInt64)] = []
-        for row in rows {
+        for (row, _) in rows {
             guard let vaultKey = currentVaultKey(row.vaultID, keys: keys, account: updated) else { continue }
+            if row.kind == .item, reattributing,
+                isMarkedShared(row.vaultID, keys: keys, personalVaultID: updated.personalVaultID)
+            {
+                continue
+            }
             let revision = try nextRevision(in: row.vaultID, above: row, account: updated)
             highestVersionSeen[row.vaultID] = max(highestVersionSeen[row.vaultID] ?? 0, revision.version)
             switch row.kind {
@@ -675,25 +1034,327 @@ extension VaultSession {
         return result
     }
 
-    /// The sync state of a new device ID: what the old ID published and acknowledged is not this device's to
-    /// continue (its stream, its sequence numbers), so each vault starts over — but the old ID's pending deletions
-    /// are recorded again as this device's, each stamped above the old one so that it replaces it in one write.
-    func startNewDeviceSyncState(carrying deletions: [UUID: [RecordKey: PendingDeletion]], as updated: AccountRecord)
-        async throws
-    {
-        guard let base = syncSettings?.state, let syncState else { return }
-        for pending in deletions.values {
-            for deletion in pending.values where deletion.stamp.version < .max {
-                try await syncState.addPendingDeletion(
-                    PendingDeletion(
-                        stamp: RecordStamp(
-                            version: deletion.stamp.version + 1, device: updated.deviceID, deleted: true),
-                        record: deletion.record))
+    /// The move of an earlier device ID's sync state to `account`'s (review of round 10, Z181), recorded by
+    /// registration with the account record that names the new ID (`AccountRecord.migration`) and made here, again
+    /// at each unlock and each sync until it is complete; a failure throws, and the record stays. What the old ID
+    /// published and acknowledged is not this device's to continue (its stream, its sequence numbers), so each vault's
+    /// state is first saved empty, signed by this session for the new ID through `syncState`: one the session did not
+    /// sign is no state (Z20), which reads back as none, so that a second restore before the next sync would carry no
+    /// vault's description over (`unpublishedRows`, Z184). Then the old ID's pending deletions are recorded again as this
+    /// device's, each stamped above the old one so that it replaces it in one write, so a move made twice finds only
+    /// what the first did not do; or, while a shared vault holds an edit nobody received of the old ID or of any
+    /// device ID of the registry that does not commit (`vaultsHoldingEditsNobodyReceived`, Z167, Z170), parked for the
+    /// new ID (`parkedDeletionDevice`), which the engine neither publishes nor applies. Those the old ID had parked
+    /// itself are always parked again (Z170): only `releaseParkedDeletions` lets one go. So is any this device cannot
+    /// sign as its own now, for want of a current key for its vault (a shared vault held closed, or a key not held
+    /// here): every deletion is carried, parked or left, and none stops the move (review of round 11, Z185). Last, the
+    /// record is cleared.
+    /// Until then the sync publishes nothing (`AccountSyncReport.deviceMigrationIncomplete`), so a state started over
+    /// again by a second attempt loses nothing this device published.
+    ///
+    /// A move that would read a vault's chain row while sharing, which keeps the rows, is not configured waits, record
+    /// and all (`moveAwaitsSharing`, review of round 18, Z229): made then, it recorded nothing for what an ID before
+    /// the earlier one left there, saved a state that verifies, and nothing read that row again.
+    ///
+    /// A record the session did not sign (`DeviceMigration.authenticator` over the account, the new ID and the old,
+    /// under `SignatureDomain.deviceMigration`) moves nothing: planted in the database (A8), it would make this
+    /// device take another device's genuine pending deletions, copied into its state file, for its own. It is cleared.
+    /// Without sync configured there is nothing to move, and the record waits for a session that has it.
+    ///
+    /// One at a time, and only the move the store still records (review of round 19, Z237): the unlock, a sync and
+    /// `configureSharing` each make it from an account they read before an await, and one made after another had
+    /// cleared the record started each vault's state over after the engine had published there. A move begun while
+    /// another is under way returns, leaving the record to the one under way; and the account is read again under the
+    /// flag, so one whose record has been cleared, or replaced, since the caller read it does nothing.
+    ///
+    /// A caller turned away is not lost (review of round 20, Z241): it may be the one the move under way was waiting
+    /// for (`configureSharing` while that move, begun without sharing, waits in `moveAwaitsSharing`), or the unlock
+    /// after a lock that the move under way then stops at (`requireKeys(since:)`). So it says it asked
+    /// (`migrationAskedAgain`), and the move under way, once it has returned or thrown, is made once more, with the
+    /// keys and the epoch of then, from the account the store holds then (review of round 21, Z247): not from a
+    /// caller's, which may have been read before a registration recorded the move the store holds now, so that the
+    /// last caller turned away, holding the older record, made nothing and the newer move waited. And an attempt's
+    /// failure is kept until an attempt makes the move: a later one that returns without making it (a record it does
+    /// not hold, a wait for sharing) does not turn the failure into success, so a sync whose move failed on a chain
+    /// row still says so (`restoredChainUnreadable`), and an unlock still notes it (Z247). The failure kept is the
+    /// first, not the latest, except that a chain row that could not be read is kept over any other (review of round
+    /// 22, Z259): a `locked` from an attempt after a lock replaced it, and the sync did not say why its move failed.
+    func completeDeviceMigration(account caller: AccountRecord) async throws {
+        guard caller.migration != nil, syncSettings?.state != nil, syncState != nil else { return }
+        guard !migrationInFlight else {
+            migrationAskedAgain = true
+            return
+        }
+        migrationInFlight = true
+        defer { migrationInFlight = false }
+        var next = caller
+        var failure: (any Error)?
+        while true {
+            do {
+                if try await makeDeviceMigration(account: next) { failure = nil }
+            } catch {
+                // The first failure, unless a later one is a chain row that could not be read: that is the one the
+                // sync reports (`restoredChainUnreadable`), and a `locked` from an attempt after a lock must not hide
+                // it (review of round 22, Z259).
+                if failure == nil || (error is RestoredChainRowUnreadable && !(failure is RestoredChainRowUnreadable)) {
+                    failure = error
+                }
+            }
+            guard migrationAskedAgain else { break }
+            migrationAskedAgain = false
+            // Read under the flag, so that a record cleared or replaced since is what the next attempt finds (Z237).
+            next = (try? await store.loadAccount()) ?? next
+        }
+        if let failure { throw failure }
+    }
+
+    /// One attempt at the move (`completeDeviceMigration`), under its flag: whether it made it, clearing the record.
+    /// The lock epoch is taken first, before any await (review of round 20, Z242): taken after the account's read, a
+    /// lock and an unlock during that read let a move begun under the earlier keys go on under the new ones.
+    private func makeDeviceMigration(account caller: AccountRecord) async throws -> Bool {
+        let epoch = lockEpoch
+        guard let account = try await store.loadAccount(), account.deviceID == caller.deviceID,
+            let migration = account.migration, migration == caller.migration, let base = syncSettings?.state,
+            let syncState
+        else { return false }
+        let previous = migration.previousDeviceID
+        if try verifiedMigration(migration, to: account, keyset: try requireKeys(since: epoch).keyset) {
+            // Not yet where it would read a chain row it cannot: the record stays, the sync publishes nothing, and the
+            // move is made at the next unlock or sync with sharing configured, or by `configureSharing` (Z229).
+            if try await moveAwaitsSharing(from: previous, account: account) { return false }
+            let view = try await registry(account)
+            for vaultID in try await vaultDirectory(account).keys {
+                _ = try requireKeys(since: epoch)
+                // What the old ID left that registration could not carry for want of a vault key, read from the state
+                // this replaces, for a sync to carry once the vault has one (review of round 12, M1).
+                var state = SyncState(vaultID: vaultID)
+                state.restoredUnpublished = try await restoredWork(
+                    in: vaultID, leftBy: previous, account: account, since: epoch)
+                // Which earlier IDs those name, in a row of their own, before the state: a state that is later damaged
+                // or edited (A8) verifies no more, and the row keeps the chain (review of round 16, Z216). Added to
+                // what the row names, never replacing it (review of round 17, Z225): a move made again after the
+                // state an earlier attempt saved stopped verifying would otherwise drop an ID before the previous one
+                // (a store restored twice). Only the carry, Stop Waiting and the re-record of a started-over state
+                // narrow the row (Z232).
+                _ = try requireKeys(since: epoch)
+                try await noteRestoredChain(
+                    state.restoredUnpublished, in: vaultID, account: account, keeping: true, since: epoch)
+                _ = try requireKeys(since: epoch)
+                try await syncState.saveState(state)
+            }
+            let deletions = try await signedPendingDeletions(stampedBy: previous, account: account)
+            let parked = try await signedPendingDeletions(
+                stampedBy: Self.parkedDeletionDevice(of: previous), account: account)
+            // The old ID's deletions wait while a shared vault holds an edit that nobody received, of it or of any
+            // device ID of the registry that does not commit: the release's own predicate, so that an ID which commits
+            // (a second restore) does not let go of what an earlier one left.
+            var parking = false
+            if !deletions.isEmpty {
+                let nobodyReceived = Self.idsNobodyReceives(account: account, view: view, including: previous)
+                parking = !(await vaultsHoldingEditsNobodyReceived(of: nobodyReceived, account: account)).isEmpty
+            }
+            let carried = deletions.map { (deletion: $0, parks: parking) } + parked.map { ($0, true) }
+            for (deletion, parks) in carried where deletion.stamp.version < .max - 1 {
+                _ = try requireKeys(since: epoch)
+                // Signed here, on the actor, as the new ID's; one that cannot be signed now (no current key for its
+                // vault on this device: a shared vault held closed, Z41, Z59, or a key this device does not hold) is
+                // parked instead of failing the move, which would leave the record and stop this device publishing
+                // in every vault for as long as that lasted (review of round 11, Z185). Parking needs no vault key, and
+                // `releaseParkedDeletions` records it as this device's once its vault has a key and nothing holds it.
+                let carry = Self.restamped(deletion, device: account.deviceID)
+                let own = parks ? nil : try? authenticatePendingDeletion(carry)
+                if let own {
+                    try await base.addPendingDeletion(own)
+                } else {
+                    try await base.addPendingDeletion(
+                        try signedPendingDeletion(
+                            Self.restamped(deletion, device: Self.parkedDeletionDevice(of: account.deviceID))))
+                }
             }
         }
-        for vaultID in try await vaultDirectory(updated).keys {
-            try await base.saveState(SyncState(vaultID: vaultID))
+        _ = try requireKeys(since: epoch)
+        guard let current = try await store.loadAccount(), current.deviceID == account.deviceID,
+            current.migration == migration
+        else { return false }
+        var done = current
+        done.migration = nil
+        try await store.commit(
+            StoreChange(
+                account: .update(done, expectedKeysetVersion: current.keysetVersion), migration: .clear,
+                expectedDeviceID: current.deviceID))
+        self.account = done
+        return true
+    }
+
+    /// The move from `previous` to `updated`'s device ID, signed by the account key (Z181).
+    func signedMigration(from previous: UUID, to updated: AccountRecord, keyset: Keyset) throws -> DeviceMigration {
+        DeviceMigration(
+            previousDeviceID: previous,
+            authenticator: try keyset.sign(
+                Self.migrationMessage(from: previous, to: updated), domain: .deviceMigration))
+    }
+
+    /// Whether this session signed `migration` for `account`'s current device ID.
+    func verifiedMigration(_ migration: DeviceMigration, to account: AccountRecord, keyset: Keyset) throws -> Bool {
+        Self.migrationVerifies(migration, to: account, signingKey: try keyset.publicKeyBundle().signingKey)
+    }
+
+    /// Whether `migration` verifies for `account`'s current device ID under the account's public `signingKey` (the
+    /// keyset's, or the Keychain's copy while locked).
+    static func migrationVerifies(_ migration: DeviceMigration, to account: AccountRecord, signingKey: [UInt8])
+        -> Bool
+    {
+        let message = migrationMessage(from: migration.previousDeviceID, to: account)
+        return
+            (try? Signatures.verify(
+                migration.authenticator, for: message, domain: .deviceMigration, signingKey: signingKey)) != nil
+    }
+
+    static func migrationMessage(from previous: UUID, to account: AccountRecord) -> [UInt8] {
+        Array("WW-device-migration-v1".utf8) + bytes(account.accountID) + bytes(account.deviceID) + bytes(previous)
+    }
+
+    /// `deletion` stamped by `device`, above the original so that it replaces it in one write.
+    static func restamped(_ deletion: PendingDeletion, device: UUID) -> PendingDeletion {
+        PendingDeletion(
+            stamp: RecordStamp(version: deletion.stamp.version + 1, device: device, deleted: true),
+            record: deletion.record)
+    }
+
+    /// The device ID a deletion parked for `deviceID` is stamped with (review finding Z167): derived from it, so that
+    /// only the installation that is `deviceID` releases it, and naming no device, so that no engine publishes or
+    /// applies it (`verifiedPendingDeletions` takes only the current ID's). Never another device's deletion: one that
+    /// device's session genuinely signed, copied into this file (A8), is stamped with that device's own ID.
+    static func parkedDeletionDevice(of deviceID: UUID) -> UUID {
+        var id = Array(ObjectDigest(hashing: Array("WW-parked-deletion-v1".utf8) + bytes(deviceID)).bytes[..<16])
+        id[6] = (id[6] & 0x0F) | 0x80
+        id[8] = (id[8] & 0x3F) | 0x80
+        return uuid(id)
+    }
+
+    /// `deletion` signed by the account key, as `authenticatePendingDeletion` signs this device's own.
+    func signedPendingDeletion(_ deletion: PendingDeletion) throws -> PendingDeletion {
+        let keys = try requireKeys()
+        var signed = deletion
+        signed.authenticator = try keys.keyset.sign(Self.pendingDeletionMessage(deletion), domain: .pendingDeletion)
+        return signed
+    }
+
+    /// The deletions parked for `account`'s device (`parkedDeletionDevice`) that the account key signed. Throws what
+    /// the state store threw, and `VaultError.locked` while locked: never an empty list for one it could not read.
+    func parkedDeletions(of account: AccountRecord) async throws -> [PendingDeletion] {
+        try await signedPendingDeletions(stampedBy: Self.parkedDeletionDevice(of: account.deviceID), account: account)
+    }
+
+    /// The pending deletions stamped by `device` that the account key signed, in every vault of `account`'s directory.
+    /// Throws what the state store threw, and `VaultError.locked` while locked.
+    func signedPendingDeletions(stampedBy device: UUID, account: AccountRecord) async throws -> [PendingDeletion] {
+        guard let base = syncSettings?.state else { return [] }
+        let keys = try requireKeys()
+        let signingKey = try keys.keyset.publicKeyBundle().signingKey
+        var parked: [PendingDeletion] = []
+        for vaultID in try await vaultDirectory(account).keys {
+            for (key, deletion) in try await base.pendingDeletions(vaultID: vaultID)
+            where deletion.stamp.device == device
+                && Self.isSigned(deletion, as: key, in: vaultID, signingKey: signingKey)
+            {
+                parked.append(deletion)
+            }
         }
+        return parked
+    }
+
+    /// The device IDs whose edits in a shared vault nobody else received (review findings Z157, Z162, Z170): every ID
+    /// of `account`'s registry, current or revoked, that does not commit to the account under the key the registry
+    /// lists for it, and `deviceID` (an ID this installation wrote under) unless the registry lists it with a key it
+    /// commits under. Every member's device counts only devices whose IDs commit, so such an edit reached nobody
+    /// whatever the sync state recorded as published, and it keeps its writer's ID in every value it stamped: carried
+    /// over to a new ID, or merged into a row of another of this account's devices, it is still held aside everywhere
+    /// else.
+    static func idsNobodyReceives(account: AccountRecord, view: RegistryView, including deviceID: UUID? = nil)
+        -> Set<UUID>
+    {
+        var ids: Set<UUID> = []
+        for device in Array(view.state.devices.values) + Array(view.state.revoked.values)
+        where !DeviceIdentifier.commits(device.id, to: account.accountID, key: device.key) {
+            ids.insert(device.id)
+        }
+        if let deviceID {
+            let listed = view.state.devices[deviceID] ?? view.state.revoked[deviceID]
+            if listed.map({ !DeviceIdentifier.commits(deviceID, to: account.accountID, key: $0.key) }) ?? true {
+                ids.insert(deviceID)
+            }
+        }
+        return ids
+    }
+
+    /// The items of `vaultID`, if it is shared, whose rows hold an edit of one of `deviceIDs` (`idsNobodyReceives`),
+    /// whichever device's row it is (Z170: one this installation carried over under an intermediate ID holds the first
+    /// ID's values too); `nil` where the vault's rows cannot be read. An edit is a value that ID stamped
+    /// (`holdsValue(ofAny:in:)`), never a clock's claim to have seen one, which another account can write (Z173).
+    /// Fails closed: a row that does not open counts, and "shared" is `isMarkedShared`, so a vault counts until the
+    /// markers say it is private.
+    func itemsHoldingEdits(of deviceIDs: Set<UUID>, in vaultID: UUID, account: AccountRecord) async -> Set<UUID>? {
+        guard !deviceIDs.isEmpty, isMarkedShared(vaultID, keys: keys, personalVaultID: account.personalVaultID) else {
+            return []
+        }
+        guard let rows = try? await store.records(in: vaultID, kind: .item) else { return nil }
+        var items: Set<UUID> = []
+        for row in rows where holdsValue(ofAny: deviceIDs, in: row) { items.insert(row.recordID) }
+        return items
+    }
+
+    /// The shared vaults whose rows hold an edit of one of `deviceIDs` (`itemsHoldingEdits`); the Personal vault where
+    /// the directory could not be read. The predicate both registration and `releaseParkedDeletions` decide by, and the
+    /// one the deletion gate applies (`holdsUnpublishedWork`).
+    func vaultsHoldingEditsNobodyReceived(of deviceIDs: Set<UUID>, account: AccountRecord) async -> Set<UUID> {
+        guard !deviceIDs.isEmpty else { return [] }
+        guard let vaults = try? await vaultDirectory(account).keys else { return [account.personalVaultID] }
+        var held: Set<UUID> = []
+        for vaultID in vaults {
+            let items = await itemsHoldingEdits(of: deviceIDs, in: vaultID, account: account)
+            if items?.isEmpty != true { held.insert(vaultID) }
+        }
+        return held
+    }
+
+    /// The pending deletions made under an earlier ID of this installation that registering as a new device parked
+    /// (review finding Z167), stamped for this device (`parkedDeletionDevice`), so the engine neither publishes nor
+    /// applies them. While a shared vault holds an edit nobody received of a device ID of this account's registry that
+    /// does not commit (the earlier ID among them; `vaultsHoldingEditsNobodyReceived`), they stay parked, and this
+    /// returns the vaults holding one (the sync reports them in `deletionsHeldBack`, and the deletion gate holds every
+    /// other deletion back too, Z170); once none remains (the person moved the copy out, or deleted it),
+    /// each is recorded again as this device's, as a device move does (`completeDeviceMigration`), and goes out like
+    /// any other. One whose vault has no current key here (a move parked it for that, review of round 11, Z185) cannot
+    /// be signed as this device's: it stays parked, is tried again at the next sync, and its vault is returned too, so
+    /// that the sync says it waits (review of round 12). Fails closed: with no
+    /// registry, or parked deletions that cannot be read, nothing is released.
+    ///
+    /// Each is signed only while the sync that releases it is still entitled to write (`writes`,
+    /// `requireEntitlement`, review of PR #22's V66, Z256): checked on the actor, with no suspension between the check
+    /// and the signature, so that a lock, an unlock that registers a new ID and its move, landing during the awaits
+    /// above, leave it parked rather than restamped for an ID the move has already read.
+    func releaseParkedDeletions(account: AccountRecord, view: RegistryView?, within writes: SyncStateWrites? = nil)
+        async -> Set<UUID>
+    {
+        guard let syncState, let parked = try? await parkedDeletions(of: account), !parked.isEmpty else { return [] }
+        guard let view else { return [account.personalVaultID] }
+        let held = await vaultsHoldingEditsNobodyReceived(
+            of: Self.idsNobodyReceives(account: account, view: view), account: account)
+        guard held.isEmpty else { return held }
+        var waiting: Set<UUID> = []
+        for deletion in parked {
+            do {
+                try requireEntitlement(writes)
+                let own = try authenticatePendingDeletion(Self.restamped(deletion, device: account.deviceID))
+                try await syncState.addPendingDeletion(own)
+            } catch {
+                // Not signed as this device's (no current key for its vault here, Z185): it waits, and says so
+                // (review of round 12).
+                waiting.insert(deletion.record.vaultID)
+            }
+        }
+        return waiting
     }
 
     // MARK: - Devices (PRD F10.2; review findings D9, Y5, Y6)
@@ -708,7 +1369,76 @@ extension VaultSession {
     /// the old password is refused and sync neither merges nor publishes.
     public func isAwaitingNewPassword() async throws -> Bool {
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        // What the Keychain remembers of a change first: a registry that cannot be evaluated hides none of it.
+        if await passwordChangePending(account) { return true }
         return !(try await registry(account)).state.pendingCredentials.isEmpty
+    }
+
+    /// The password changes other devices have made that this one does not follow, one per device that made any
+    /// (its newest), for the person to choose between when the lock screen cannot (`tooManyPasswordChangesPending`),
+    /// and to see what following one would do before they type its password. Device names need the vault unlocked.
+    ///
+    /// To a device that has not been given a new password, two changes made at once are symmetric: both carry the
+    /// account key's signature, a registered device's and the previous password's. Which is the person's own is
+    /// theirs to say, by the device it was made on; `revokedDevices` is what each would take away.
+    ///
+    /// **Every** author is listed (review finding Z13): listing needs no replay. Those whose registration the
+    /// followed checkpoint sealed come first, so that puppets registered with a retired password cannot push the
+    /// genuine change off a screen. What following each would do is worked out for the first
+    /// `maximumChangesDescribed`; `describePasswordChange(by:)` works it out for any other.
+    public func pendingPasswordChanges() async throws -> [PendingPasswordChange] {
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        let view = try await registry(account)
+        let rows = try await store.records(in: account.accountID, kind: .deviceRegistry)
+        let sealed = Self.sealedAuthors(view)
+        let authors = Self.changesByAuthor(
+            view.state.pendingCredentials + view.state.forkedCredentials, sealed: sealed)
+        return authors.enumerated().map { index, author in
+            describe(
+                author.changes[0], view: view, rows: rows, account: account, sealed: sealed,
+                replaying: index < Self.maximumChangesDescribed)
+        }
+    }
+
+    /// One row of `pendingPasswordChanges`, worked out in full: the newest change `device` made that this device
+    /// does not follow.
+    public func describePasswordChange(by device: UUID) async throws -> PendingPasswordChange {
+        guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        let view = try await registry(account)
+        let rows = try await store.records(in: account.accountID, kind: .deviceRegistry)
+        guard
+            let change = Self.changesByAuthor(view.state.pendingCredentials + view.state.forkedCredentials)
+                .first(where: { $0.author == device })?.changes.first
+        else { throw VaultError.noPasswordChangeToFollow(device) }
+        return describe(
+            change, view: view, rows: rows, account: account, sealed: Self.sealedAuthors(view), replaying: true)
+    }
+
+    private func describe(
+        _ change: DeviceRegistryState.Credential, view: RegistryView, rows: [StoredRecord], account: AccountRecord,
+        sealed: Set<UUID>, replaying: Bool
+    ) -> PendingPasswordChange {
+        let author = change.author
+        // As it would be followed: the registry replayed with the change as its last checkpoint.
+        let followed =
+            replaying
+            ? try? Self.evaluateRegistry(
+                rows.map(\.envelope), accountID: account.accountID, accountKey: view.state.accountSigningKey,
+                genesis: view.state.genesis, credential: change.id) : nil
+        var name = ""
+        if let keys, !keys.keyset.isZeroised,
+            let label = view.state.devices[author]?.label ?? view.state.revoked[author]?.label
+        {
+            name = Self.openLabel(label, deviceID: author, keyset: keys.keyset)?.name ?? ""
+        }
+        let known = Set(view.state.devices.keys).union(view.state.revoked.keys)
+        return PendingPasswordChange(
+            device: author, deviceName: name, generation: change.generation,
+            isFork: !view.state.pendingCredentials.contains { $0.id == change.id }, canBeFollowed: followed != nil,
+            revokedDevices: (followed?.state.revoked.keys.filter(known.contains) ?? [])
+                .sorted { $0.uuidString < $1.uuidString },
+            revokesThisDevice: followed?.state.standing(of: account.deviceID) == .revoked,
+            registeredBeforeFollowed: sealed.contains(author), isDescribed: replaying)
     }
 
     /// Every device of the account, revoked ones included, this device first. Names need the vault unlocked.
@@ -740,10 +1470,18 @@ extension VaultSession {
     /// Registers another device from this one, before it has the Secret Key: the registered, unlocked device vouches
     /// for the new device's key (shown as a QR code, say). The new device still needs the password and the Secret
     /// Key to open the keyset; this only spares it registering itself.
+    ///
+    /// The ID must commit to the account under the key (`DeviceIdentifier`, review findings Z157 and Z162), as
+    /// `prepareDeviceIdentity` makes it: a device whose ID does not would count in no shared vault, and what it wrote
+    /// there would reach nobody. An identity from an older build, or an edited one, is refused
+    /// (`deviceIDDoesNotCommit`).
     public func approveDevice(id: UUID, key: DevicePublicKey, name: String) async throws {
         let epoch = lockEpoch
         _ = try requireKeys()
         guard let account = try await loadAccount() else { throw VaultError.noAccount }
+        guard DeviceIdentifier.commits(id, to: account.accountID, key: key) else {
+            throw VaultError.deviceIDDoesNotCommit
+        }
         let view = try await registry(account)
         guard view.state.standing(of: account.deviceID) == .active else { throw VaultError.deviceRevoked }
         let now = await clock.now()
@@ -797,13 +1535,20 @@ extension VaultSession {
     ///
     /// `identity` is for a device that a registered device has already vouched for (`approveDevice`): it enrols as
     /// that device, with the key `prepareDeviceIdentity` made. Without it the device takes a new ID and key and
-    /// registers itself with the enrolment key, which the password and Secret Key yield.
+    /// registers itself with the enrolment key, which the password and Secret Key yield. An identity whose ID does not
+    /// commit to the account under its key is refused (`deviceIDDoesNotCommit`, Z162).
     public func enrol(
         password: String, secretKey: String, accountID: UUID? = nil, as identity: DeviceIdentity? = nil
     ) async throws {
-        if let identity, let accountID = accountID ?? EmergencyKit.parseSetupCode(secretKey)?.accountID {
+        if let identity {
+            guard let accountID = accountID ?? EmergencyKit.parseSetupCode(secretKey)?.accountID else {
+                throw VaultError.enrolmentUnavailable
+            }
             guard try await deviceKeys.publicKey(accountID: accountID, deviceID: identity.id) == identity.key else {
                 throw VaultError.enrolmentUnavailable
+            }
+            guard DeviceIdentifier.commits(identity.id, to: accountID, key: identity.key) else {
+                throw VaultError.deviceIDDoesNotCommit
             }
         }
         try await enrol(
@@ -815,11 +1560,13 @@ extension VaultSession {
     /// leaves this device, and nothing here gives it access: it still needs the password and the Secret Key.
     public func prepareDeviceIdentity(accountID: UUID) async throws -> DeviceIdentity {
         guard keys == nil, try await loadAccount() == nil else { throw VaultError.enrolmentUnavailable }
-        let id = UUID.random(using: &random)
-        return DeviceIdentity(id: id, key: try await deviceKeys.create(accountID: accountID, deviceID: id))
+        return try await deviceKeys.createDevice(accountID: accountID)
     }
 
-    /// As `enrol`, with the new device's ID chosen by the caller: for tests that need to name the device.
+    /// As `enrol`, with the new device's ID chosen by the caller: for tests that need to name the device. An ID with a
+    /// key this installation prepared must commit to the account under it, as for `enrol(as:)` (Z162); an ID a test
+    /// names with no prepared key is given a key of its own and commits to nothing, so it counts in no shared vault and
+    /// writes nothing there (`SharedVaultError.deviceIDDoesNotCommit`). No production path names an ID.
     package func enrol(password: String, secretKey text: String, accountID: UUID?, assigningDeviceID: UUID?)
         async throws
     {
@@ -854,8 +1601,14 @@ extension VaultSession {
 
         var opened: (header: AccountHeaderObject, unlockKey: EncryptionKey, keyset: Keyset, personal: UUID)?
         var derivations = 0
+        // One derivation per authoring device, on its newest header that parses: a device that publishes a chain of
+        // password changes (a revoked device that kept the account key can, each under parameters of its choosing)
+        // spends one attempt, and the header of the device that really changed the password is still reached (Z1).
+        // Nothing here can be checked against the registry yet, so a store that plants headers under device IDs of
+        // its own invention still exhausts the budget; it can as easily delete the real one (W5, Y7).
+        var triedAuthors: Set<UUID> = []
         for candidate in names.prefix(Self.maximumHeadersConsidered)
-        where derivations < Self.maximumHeaderAttempts {
+        where derivations < Self.maximumHeaderAttempts && !triedAuthors.contains(candidate.author) {
             // A header that is not what its name says, or whose KDF parameters are out of bounds, costs a fetch and
             // nothing more; only one that parses is worth a derivation, and only a few of those are tried.
             guard
@@ -864,6 +1617,7 @@ extension VaultSession {
                 let header = try? AccountHeaderObject.parse(bytes), header.accountID == accountID,
                 header.generation == candidate.generation, header.author == candidate.author
             else { continue }
+            triedAuthors.insert(candidate.author)
             derivations += 1
             // `accountUnlockKey` validates the KDF parameters again before any work (SEC5, SEC9).
             guard
@@ -917,23 +1671,29 @@ extension VaultSession {
         guard view.state.pendingCredentials.isEmpty else { throw VaultError.passwordSuperseded }
 
         // This device: a new ID, a new key, registered with the enrolment key the derived AUK yields.
+        // Its ID commits to the account under its key (review finding Z157): made with the key, unless a registered
+        // device vouched for one made earlier (`prepareDeviceIdentity`) or a test names it.
         let deviceID: UUID
+        let deviceKey: DevicePublicKey
         if let assigningDeviceID {
             deviceID = assigningDeviceID
+            if let prepared = try await deviceKeys.publicKey(accountID: accountID, deviceID: deviceID) {
+                guard DeviceIdentifier.commits(deviceID, to: accountID, key: prepared) else {
+                    throw VaultError.deviceIDDoesNotCommit
+                }
+                deviceKey = prepared
+            } else {
+                deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)
+            }
         } else {
-            deviceID = UUID.random(using: &random)
+            let created = try await deviceKeys.createDevice(accountID: accountID)
+            (deviceID, deviceKey) = (created.id, created.key)
         }
         var account = AccountRecord(
             accountID: accountID, deviceID: deviceID, personalVaultID: opened.personal,
             personalVaultKeyID: Self.zeroUUID, kdf: header.kdf, salt: header.salt, unlockKeyID: header.unlockKeyID,
             wrappedKeyset: header.wrappedKeyset, keysetVersion: header.keysetVersion,
             credentialGeneration: header.generation, createdAt: now, emergencyKitConfirmedAt: now)
-        let deviceKey: DevicePublicKey
-        if let prepared = try await deviceKeys.publicKey(accountID: accountID, deviceID: deviceID) {
-            deviceKey = prepared
-        } else {
-            deviceKey = try await deviceKeys.create(accountID: accountID, deviceID: deviceID)
-        }
         let enrolment = EnrolmentKey.derive(from: unlockKey, accountID: accountID)
         defer { enrolment.zeroise() }
         let registration = try await signedRegistryEntry(
@@ -976,6 +1736,9 @@ extension VaultSession {
             rows.append(
                 deleted[vaultID] ?? Self.directoryRow(vaultID: vaultID, accountID: accountID, deviceID: deviceID))
         }
+        // Which of those vaults are shared, as the account's other devices marked them: a new device knows from its
+        // first moment, and holds them closed until it has their ledgers (review finding Z41).
+        rows += directory.markers
 
         // Keychain first, as in `createAccount`: an orphaned Secret Key is harmless.
         try await keychain.store(
@@ -1000,8 +1763,9 @@ extension VaultSession {
             throw VaultError.lockedDuringUnlock
         }
         registryView = nil
-        install(newKeys, at: now)
+        install(newKeys, at: now, withPassword: true)
         try? await refreshSigningKey(account: account, keys: newKeys)
+        await loadSharedMarkersIfNeeded(force: true)
     }
 
     // MARK: - Account objects on the transport (docs/02-architecture.md §7.7)
@@ -1122,10 +1886,12 @@ extension VaultSession {
     /// keyset, a wrap is kept only if it also opens for the vault and key its name says.
     func fetchDirectory(
         transport: any SyncTransport, accountID: UUID, view: RegistryView, keyset: Keyset?, knownKeys: Set<UUID>,
-        deletedVaults: Set<UUID>, personalVaultID: UUID, report: inout AccountObjectsReport
-    ) async throws -> (keys: [StoredRecord], deletions: [StoredRecord], listed: Set<String>) {
+        deletedVaults: Set<UUID>, markedVaults: Set<UUID> = [], personalVaultID: UUID,
+        report: inout AccountObjectsReport
+    ) async throws -> (keys: [StoredRecord], deletions: [StoredRecord], markers: [StoredRecord], listed: Set<String>) {
         var keys: [UUID: StoredRecord] = [:]
         var deletions: [UUID: StoredRecord] = [:]
+        var markers: [UUID: StoredRecord] = [:]
         let listed = Set(try await transport.list(prefix: AccountObjectLocation.vaultsPrefix(accountID)))
         for name in listed.sorted() {
             guard let location = AccountObjectLocation(name: name), location.accountID == accountID else {
@@ -1145,6 +1911,12 @@ extension VaultSession {
                     continue
                 }
                 author = device
+            case .vaultShared(_, let vaultID, let device):
+                // A marker this device holds already is not fetched again; the Personal vault is never shared.
+                guard !markedVaults.contains(vaultID), markers[vaultID] == nil, vaultID != personalVaultID else {
+                    continue
+                }
+                author = device
             default:
                 report.ignoredNames += 1
                 continue
@@ -1161,10 +1933,8 @@ extension VaultSession {
                 switch location {
                 case .vaultKey(_, let vaultID, let keyID, _):
                     let header = try EnvelopeHeader.parse(object.envelope, expecting: .vaultKeyWrap).header
-                    _ = try Envelope.parse(
-                        object.envelope,
-                        expecting: VaultKey.wrapContext(vaultID: vaultID, keyID: keyID, keysetKeyID: header.keyID),
-                        maximumLength: 1024)
+                    // Of either class: the account's own key, or one that arrived by grant (`VaultKey`).
+                    try VaultKey.checkWrapForm(object.envelope, vaultID: vaultID, keyID: keyID)
                     if let keyset {
                         // The session's keyset may have been zeroised by a `lock()` during the fetch: reading it
                         // would trap. The rest of this sync is then a download.
@@ -1178,6 +1948,12 @@ extension VaultSession {
                     guard object.envelope == Self.deletionMarker else { throw SyncFormatError.malformedEntry }
                     deletions[vaultID] = Self.directoryRow(
                         vaultID: vaultID, accountID: accountID, deviceID: author, deletion: object)
+                case .vaultShared(_, let vaultID, _):
+                    guard let marker = Self.parseSharedMarkerBody(object.envelope), marker.vaultID == vaultID else {
+                        throw SyncFormatError.malformedEntry
+                    }
+                    markers[vaultID] = Self.sharedMarkerRow(
+                        vaultID: vaultID, accountID: accountID, author: author, object: object)
                 default:
                     break
                 }
@@ -1189,7 +1965,7 @@ extension VaultSession {
                 report.rejected.append(name)
             }
         }
-        return (Array(keys.values), Array(deletions.values), listed)
+        return (Array(keys.values), Array(deletions.values), Array(markers.values), listed)
     }
 
     /// What a directory object's signatures cover: its name and its body.
@@ -1216,7 +1992,7 @@ extension VaultSession {
         //    from the local header's genesis and credential: that decides what is stored, not what is trusted,
         //    which waits for the header to open under the password at the next unlock.
         let pin: (genesis: ObjectDigest, credential: ObjectDigest, heads: [ObjectDigest])
-        if let anchor = await readAnchor(accountID) {
+        if let anchor = await trustedAnchor(account) {
             pin = (anchor.genesis, anchor.credential, anchor.heads)
         } else if let stored = try await storedHeader(account) {
             pin = (stored.header.genesisID, stored.header.credentialID, [])
@@ -1290,42 +2066,54 @@ extension VaultSession {
             // Any device puts back a header the store has lost — unless it knows its own to be out of date (the
             // password was changed elsewhere), or is no longer a device of the account.
             if !listed.contains(name), view.state.pendingCredentials.isEmpty,
+                stored.header.credentialID == view.state.credential.id,
                 view.state.standing(of: account.deviceID) == .active
             {
                 report.headerPublished = try await create(name, contents: stored.row.envelope, on: transport)
             }
         }
 
-        // Candidates: only headers whose credential entry the registry already holds as pending or forked are
-        // fetched at all, so a store full of planted headers costs nothing.
-        let wanted = view.state.pendingCredentials + view.state.forkedCredentials
+        // Candidates: only headers whose credential entry the registry lists as pending or forked are fetched at
+        // all, so a store full of planted headers costs nothing; and one per authoring device, its newest that the
+        // transport holds, so a device that publishes a chain of changes costs one header (Z1).
         let rows = try await store.records(in: accountID, kind: .accountHeader).filter { $0.recordID != accountID }
-        var held: Set<ObjectDigest> = []
+        var held: [UUID: (header: AccountHeaderObject, key: RecordKey)] = [:]
         var stale: [RecordKey] = []
         for row in rows {
-            if let header = try? AccountHeaderObject.parse(row.envelope),
+            guard let header = try? AccountHeaderObject.parse(row.envelope),
                 Self.isCandidate(header, account: account, view: view)
-            {
-                held.insert(header.credentialID)
-            } else {
+            else {
                 stale.append(row.key)
+                continue
             }
+            if let other = held[header.author] {
+                let newer =
+                    (header.generation, header.credentialID) > (other.header.generation, other.header.credentialID)
+                stale.append(newer ? other.key : row.key)
+                if !newer { continue }
+            }
+            held[header.author] = (header, row.key)
         }
         if !stale.isEmpty { try await store.commit(StoreChange(deletions: stale)) }
-        for credential in wanted where !held.contains(credential.id) {
-            let name = AccountObjectLocation.header(
-                accountID: accountID, generation: credential.generation, author: credential.author
-            ).name
-            guard listed.contains(name),
-                let bytes = try? await transport.fetch(name, maximumLength: AccountHeaderObject.maximumLength),
-                let header = try? AccountHeaderObject.parse(bytes), header.credentialID == credential.id,
-                Self.isCandidate(header, account: account, view: view)
-            else { continue }
-            let row = Self.headerRow(
-                header, recordID: Self.uuid(Array(ObjectDigest(hashing: bytes).bytes[..<16])), version: 1)
-            if try await store.record(row.key) == nil {
-                try await store.commit(StoreChange(upserts: [row]))
-                report.candidateHeadersFetched += 1
+        let wanted = Self.changesByAuthor(
+            view.state.pendingCredentials + view.state.forkedCredentials, sealed: Self.sealedAuthors(view))
+        for (author, changes) in wanted.prefix(Self.maximumCandidateAuthors) {
+            for credential in changes.prefix(Self.maximumHeaderAttempts) {
+                if let have = held[author], have.header.generation >= credential.generation { break }
+                guard
+                    let header = await fetchCandidateHeader(
+                        for: credential, account: account, view: view,
+                        transport: transport, listed: listed)
+                else { continue }
+                let row = Self.headerRow(
+                    header,
+                    recordID: Self.uuid(Array(ObjectDigest(hashing: header.serialized()).bytes[..<16])), version: 1)
+                var change = StoreChange()
+                if try await store.record(row.key) == nil { change.upserts.append(row) }
+                if let replaced = held[author] { change.deletions.append(replaced.key) }
+                if !change.upserts.isEmpty || !change.deletions.isEmpty { try await store.commit(change) }
+                if !change.upserts.isEmpty { report.candidateHeadersFetched += 1 }
+                break
             }
         }
 
@@ -1337,6 +2125,23 @@ extension VaultSession {
                 }
             }
         }
+    }
+
+    /// The header for `credential` from the transport, if it is there under the name its generation and author
+    /// give it and is what `isCandidate` requires.
+    func fetchCandidateHeader(
+        for credential: DeviceRegistryState.Credential, account: AccountRecord, view: RegistryView,
+        transport: any SyncTransport, listed: Set<String>? = nil
+    ) async -> AccountHeaderObject? {
+        let name = AccountObjectLocation.header(
+            accountID: account.accountID, generation: credential.generation, author: credential.author
+        ).name
+        guard listed?.contains(name) ?? true,
+            let bytes = try? await transport.fetch(name, maximumLength: AccountHeaderObject.maximumLength),
+            let header = try? AccountHeaderObject.parse(bytes), header.credentialID == credential.id,
+            Self.isCandidate(header, account: account, view: view)
+        else { return nil }
+        return header
     }
 
     private func syncDirectory(
@@ -1356,9 +2161,32 @@ extension VaultSession {
             }
         }
         let deleted = Set(directory.filter { $0.value.isDeleted }.keys)
+        // The markers this device holds, read from the store now: a row removed from the file since (A8) is fetched
+        // again here, before any vault's log is touched.
+        await loadSharedMarkersIfNeeded(force: true)
+        var markedLocally: Set<UUID> = []
+        if let signingKey = await trustedAccountSigningKey(account) {
+            for row in try await store.records(in: accountID, kind: .vaultDirectory) {
+                if let marker = Self.verifiedSharedMarker(row, accountID: accountID, accountSigningKey: signingKey) {
+                    markedLocally.insert(marker.vaultID)
+                }
+            }
+        }
         let fetched = try await fetchDirectory(
             transport: transport, accountID: accountID, view: view, keyset: keys?.keyset, knownKeys: knownKeys,
-            deletedVaults: deleted, personalVaultID: account.personalVaultID, report: &report)
+            deletedVaults: deleted, markedVaults: markedLocally, personalVaultID: account.personalVaultID,
+            report: &report)
+        // Which vaults the account's other devices know of, as far as the listing says: a device that holds nothing of
+        // one the listing names accepts no invitation for it naming just anyone (Z59, `knownOwner`).
+        sharing.directoryVaults = Set(
+            fetched.listed.compactMap { name -> UUID? in
+                switch AccountObjectLocation(name: name) {
+                case .vaultKey(let owner, let vaultID, _, _)? where owner == accountID: return vaultID
+                case .vaultDeletion(let owner, let vaultID, _)? where owner == accountID: return vaultID
+                case .vaultShared(let owner, let vaultID, _)? where owner == accountID: return vaultID
+                default: return nil
+                }
+            })
 
         var change = StoreChange()
         var indexed = Set(directory.keys)
@@ -1380,11 +2208,29 @@ extension VaultSession {
             }
         }
         for var deletion in fetched.deletions {
-            if let existing = try await store.record(deletion.key) { deletion.version = existing.version + 1 }
+            if let existing = try await store.record(deletion.key) {
+                // A row at the last version (an edited file, Z23) cannot be replaced: left as it is, like a wrap.
+                guard existing.version < UInt64.max else { continue }
+                deletion.version = existing.version + 1
+            }
             change.upserts.append(deletion)
             report.vaultDeletionsFetched += 1
         }
+        for var marker in fetched.markers {
+            // Over whatever the row held: only a row that marks nothing can be there (a marker held is not fetched).
+            if let existing = try await store.record(marker.key) {
+                guard existing.version < UInt64.max else { continue }
+                marker.version = existing.version + 1
+                change.expectations[marker.key] = .version(existing.version)
+            } else {
+                change.expectations[marker.key] = .absent
+            }
+            change.upserts.append(marker)
+        }
         if !change.upserts.isEmpty { try await store.commit(change) }
+        if !fetched.markers.isEmpty { await loadSharedMarkersIfNeeded(force: true) }
+        // Every device's marker for a vault must name the same owner (VaultSession+SharedMarker.swift, Z48).
+        await examineSharedMarkers(listed: fetched.listed, view: view, account: account, transport: transport)
         if report.vaultKeysFetched > 0 { try await adoptNewVaultKeys(account: account) }
         if report.vaultDeletionsFetched > 0 { try? await adoptVerifiedDeletions(account: account) }
 
@@ -1411,6 +2257,21 @@ extension VaultSession {
             {
                 report.vaultKeysPublished += 1
             }
+        }
+        // The markers this device holds, each vouched for under its own name, so that one does not rest on the
+        // device that first wrote it.
+        for (vaultID, owner) in sharing.markers.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            let name = AccountObjectLocation.vaultShared(
+                accountID: accountID, vaultID: vaultID, author: account.deviceID
+            )
+            .name
+            guard !fetched.listed.contains(name) else { continue }
+            let keys = try requireSyncKeys(since: epoch)
+            let body = Self.sharedMarkerBody(vaultID: vaultID, owner: owner)
+            let signature = try await dualSignature(
+                Self.directoryMessage(name: name, body: body), domain: .vaultDirectory, keys: keys, account: account)
+            _ = try await create(
+                name, contents: SignedObject(signature: signature, envelope: body).serialized(), on: transport)
         }
         for (vaultID, entry) in try await vaultDirectory(account) where entry.isDeleted {
             let name = AccountObjectLocation.vaultDeletion(

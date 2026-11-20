@@ -31,6 +31,43 @@ extension MembershipLedger {
             ? .awaitingPublication : .superseded
     }
 
+    /// Whether `addition`, a record that added a member, was undone on its own branch: a record this ledger holds on
+    /// a losing branch, built on it, removed that member or recorded their departure. Such an addition is not
+    /// proposed again when it is superseded: what its branch last meant is that they are not a member, and replaying
+    /// it alone would sign them back in and wrap the current key to them with nobody asking (review finding Z43).
+    /// Records built on the removal are not looked at: an addition after it is another record, replayed by its own
+    /// author.
+    ///
+    /// A removal undoes it only if its signer could remove such a member on the accepted head (Z53): anyone who
+    /// could once sign on that branch, a former or demoted administrator, could otherwise build a removal on an
+    /// honest administrator's displaced invitation and have it quietly dropped. A departure carries the member's own
+    /// request and needs no standing.
+    public func wasUndoneOnItsBranch(_ addition: MembershipRecord) -> Bool {
+        guard case .addMember(let accountID, _) = addition.operation,
+            let added = branches.first(where: { $0.state.hash == addition.hash })
+        else { return false }
+        let head = state
+        // `branches` holds every record after its predecessor, so one pass follows every path from the addition.
+        var descendants: [MembershipHash: MembershipState] = [addition.hash: added.state]
+        for link in branches {
+            guard let before = descendants[link.record.previousHash] else { continue }
+            switch link.record.operation {
+            case .removeMember(let removed) where removed == accountID:
+                if let remover = head.member(link.record.signer), remover.role.isAdministrator,
+                    let target = before.member(accountID), target.role != .owner,
+                    target.role != .administrator || remover.role == .owner
+                {
+                    return true
+                }
+            case .memberLeft(let left, _) where left == accountID:
+                return true
+            default:
+                descendants[link.state.hash] = link.state
+            }
+        }
+        return false
+    }
+
     /// Signs the record that adds a verified contact to the vault (PRD F4.1). `contact` is a `VerifiedContact`, so the
     /// fingerprint comparison of F4.2 cannot be skipped. Only the owner may add an administrator.
     ///

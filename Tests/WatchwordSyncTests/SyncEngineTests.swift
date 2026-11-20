@@ -144,6 +144,24 @@ struct SyncEngineTests {
         #expect(try await b.items().isEmpty)
     }
 
+    @Test("a replay keeps what a restore has still to carry over, which no log holds (review of round 12)")
+    func replayKeepsRestoredWork() async throws {
+        let keys = FakeAccountKeys(seed: 5)
+        await keys.addVaultKey(vaultID: Household.vault)
+        let id = Household.deviceIDs[0]
+        await keys.trust(device: id)
+        let a = SyncTestClient(deviceID: id, vaultID: Household.vault, keys: keys, transport: InMemorySyncTransport())
+        _ = try await a.save(Household.login())
+        try await a.sync()
+        let key = RecordKey(recordID: UUID(), kind: .item)
+        var state = try #require(try await a.syncState.loadState(vaultID: Household.vault))
+        state.restoredUnpublished = [key: RecordStamp(version: 2, device: Household.deviceIDs[1])]
+        await a.syncState.saveState(state)
+        try await a.sync(reconcile: true)
+        let replayed = try await a.syncState.loadState(vaultID: Household.vault)
+        #expect(replayed?.restoredUnpublished == state.restoredUnpublished)
+    }
+
     @Test("while locked a device downloads and checks; it merges on unlock with no network (§7.4)")
     func lockedDownload() async throws {
         let server = SimulatedServer(seed: 3, maximumVisibilityDelay: 0, duplicateListings: false)

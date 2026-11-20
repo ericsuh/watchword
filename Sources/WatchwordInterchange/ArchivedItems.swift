@@ -36,7 +36,7 @@ public struct ArchivedEntry: Sendable {
 /// mark and the exclusion from suggestions.
 public enum ArchivedItems {
     public static func importEntries(
-        _ entries: [ArchivedEntry], into vaultID: UUID, limits: InterchangeLimits = .standard,
+        _ entries: [ArchivedEntry], into vaultID: UUID, limits: InterchangeLimits = .archive,
         options: ImportOptions = ImportOptions(), using generator: inout some RandomNumberGenerator
     ) throws -> ImportResult {
         var assembler = ImportAssembler(format: .watchwordArchive, vaultID: vaultID, limits: limits, options: options)
@@ -52,6 +52,76 @@ public enum ArchivedItems {
         }
         return assembler.result
     }
+
+    /// What a restore of an archive holding `items` would not bring back, worked out when the archive is made, so the
+    /// person learns of it before relying on the file (review §Z, Z82). The same assembler and limits as the restore,
+    /// with the trash included (whether to restore it is the person's choice then, not a loss). The drafts are thrown
+    /// away; `generator` only fills their IDs.
+    public static func restoreCheck(
+        _ items: [Item], limits: InterchangeLimits = .archive, using generator: inout some RandomNumberGenerator
+    ) -> ArchiveRestoreCheck {
+        do {
+            let result = try importEntries(
+                items.map { ArchivedEntry(.item($0)) }, into: UUID(), limits: limits,
+                options: ImportOptions(includesTrashed: true), using: &generator)
+            let skipped = result.report.skipped.compactMap { record -> ArchiveRestoreCheck.Skipped? in
+                guard let id = record.entry.sourceID.flatMap(UUID.init(uuidString:)) else { return nil }
+                return ArchiveRestoreCheck.Skipped(itemID: id, reason: record.reason)
+            }
+            var check = ArchiveRestoreCheck(skipped: skipped, limitReached: nil)
+            // Restored into a new account (the Kit's Secret Key typed), the import-wide budgets are a file's (Z128).
+            if limits == .archive {
+                do {
+                    _ = try importEntries(
+                        items.map { ArchivedEntry(.item($0)) }, into: UUID(), limits: .archiveOfAnotherAccount,
+                        options: ImportOptions(includesTrashed: true), using: &generator)
+                } catch InterchangeError.limitExceeded(let kind, _) {
+                    check.limitReachedInAnotherAccount = kind
+                } catch {
+                    check.failed = true
+                }
+            }
+            return check
+        } catch InterchangeError.limitExceeded(let kind, _) {
+            return ArchiveRestoreCheck(skipped: [], limitReached: kind)
+        } catch {
+            return ArchiveRestoreCheck(skipped: [], limitReached: nil, failed: true)
+        }
+    }
+}
+
+/// What restoring an archive would not bring back (`ArchivedItems.restoreCheck`). Empty when everything restores.
+public struct ArchiveRestoreCheck: Hashable, Sendable {
+    public struct Skipped: Hashable, Sendable {
+        public var itemID: UUID
+        public var reason: ImportSkipReason
+    }
+
+    /// Items a restore would leave out, each with why.
+    public var skipped: [Skipped]
+    /// A budget that would fail the whole restore, if one would.
+    public var limitReached: InterchangeLimits.Kind?
+    /// The check itself failed for another reason: whether the archive restores is unknown.
+    public var failed: Bool
+    /// A budget that would fail a restore of the archive into a new account, with its Kit's Secret Key typed, where it
+    /// has a file's import-wide budgets (`InterchangeLimits.archiveOfAnotherAccount`, review finding Z128), if one
+    /// would. It still restores into this account.
+    public var limitReachedInAnotherAccount: InterchangeLimits.Kind?
+
+    public init(
+        skipped: [Skipped] = [], limitReached: InterchangeLimits.Kind? = nil, failed: Bool = false,
+        limitReachedInAnotherAccount: InterchangeLimits.Kind? = nil
+    ) {
+        self.skipped = skipped
+        self.limitReached = limitReached
+        self.failed = failed
+        self.limitReachedInAnotherAccount = limitReachedInAnotherAccount
+    }
+
+    /// Everything in the archive would come back, into this account or a new one.
+    public var restoresEverything: Bool {
+        skipped.isEmpty && limitReached == nil && !failed && limitReachedInAnotherAccount == nil
+    }
 }
 
 extension ImportAssembler {
@@ -60,6 +130,20 @@ extension ImportAssembler {
         let seconds = date.timeIntervalSince1970
         guard seconds.isFinite, seconds >= 0, seconds <= Double(latestPlausibleTimestamp) else { return nil }
         return date
+    }
+
+    /// The prefix of the `Field.meta` keys the AutoFill extension writes (`autofill.lastReport` and the rest).
+    static let autoFillMetaPrefix = "autofill."
+
+    /// A field's metadata as an archive restores it: everything but the AutoFill extension's state (Z85).
+    static func restoredMeta(_ meta: [String: String], dropped: inout Int) -> [String: String] {
+        guard meta.keys.contains(where: { $0.hasPrefix(autoFillMetaPrefix) }) else { return meta }
+        var kept = meta
+        for key in meta.keys where key.hasPrefix(autoFillMetaPrefix) {
+            kept[key] = nil
+            dropped += 1
+        }
+        return kept
     }
 
     /// The archive's counterpart of `add`: the same rules, applied to an item rather than to a format's record.
@@ -127,6 +211,10 @@ extension ImportAssembler {
         // an earlier version's field is still recognisably the same field. A repeated ID among the current fields
         // gets one of its own.
         var renamed: [UUID: UUID] = [:]
+        // Keys the AutoFill extension keeps about a relying party's reports (rate limits, flags) are this vault's
+        // state, not the item's: a person cannot type them, and a far-future `autofill.lastReport` from a crafted
+        // archive would silence that field's reports for good (Z85). They are not restored.
+        var deviceState = 0
         for field in archived.fields {
             let id = RandomUUID.make(using: &generator)
             if renamed[field.id] == nil { renamed[field.id] = id }
@@ -134,10 +222,13 @@ extension ImportAssembler {
             case .totp:
                 do {
                     let uri = try ImportAssembler.canonicalOneTimePasswordURI(field.value)
-                    fields.append(Field(id: id, kind: .totp, label: field.label, value: uri, meta: field.meta))
+                    fields.append(
+                        Field(
+                            id: id, kind: .totp, label: field.label, value: uri,
+                            meta: Self.restoredMeta(field.meta, dropped: &deviceState)))
                 } catch {
                     let reason = (error as? OTPAuthError) ?? .notAnOTPAuthURI
-                    var meta = field.meta
+                    var meta = Self.restoredMeta(field.meta, dropped: &deviceState)
                     meta[InterchangeMeta.sourceType] = "totp"
                     let label = field.label.isEmpty ? "One-time password" : field.label
                     fields.append(Field(id: id, kind: .custom, label: label, value: field.value, meta: meta))
@@ -152,7 +243,10 @@ extension ImportAssembler {
                     warnings.append(.passkeyRefused(reason: "encoding"))
                 }
             default:
-                fields.append(Field(id: id, kind: field.kind, label: field.label, value: field.value, meta: field.meta))
+                fields.append(
+                    Field(
+                        id: id, kind: field.kind, label: field.label, value: field.value,
+                        meta: Self.restoredMeta(field.meta, dropped: &deviceState)))
             }
         }
         for value in unresolved.fields {
@@ -170,7 +264,9 @@ extension ImportAssembler {
                 let id = renamed[field.id] ?? RandomUUID.make(using: &generator)
                 renamed[field.id] = id
                 entryFields.append(
-                    Field(id: id, kind: field.kind, label: field.label, value: field.value, meta: field.meta))
+                    Field(
+                        id: id, kind: field.kind, label: field.label, value: field.value,
+                        meta: Self.restoredMeta(field.meta, dropped: &deviceState)))
             }
             let replacedAt = ImportAssembler.plausible(entry.replacedAt)
             if replacedAt == nil { implausible = true }
@@ -180,6 +276,7 @@ extension ImportAssembler {
                     fields: entryFields))
         }
 
+        if deviceState > 0 { warnings.append(.autoFillStateNotRestored(count: deviceState)) }
         let tags = Set(archived.tags.map { UTF8Text.trimmed($0) }.filter { !$0.isEmpty })
         var title = UTF8Text.trimmed(archived.title)
         guard !(title.isEmpty && fields.isEmpty && scopes.isEmpty && archived.notes.isEmpty) else {
@@ -202,7 +299,7 @@ extension ImportAssembler {
             id: RandomUUID.make(using: &generator), vaultID: vaultID, title: title, scopes: scopes, fields: fields,
             tags: tags, notes: archived.notes, createdAt: createdAt, modifiedAt: modified ?? createdAt,
             archived: archived.archived, history: history, excludedFromSuggestions: archived.excludedFromSuggestions)
-        guard StoredItemSize.estimate(item) <= limits.maximumStoredItemBytes else {
+        guard try countStored(item) else {
             skip(reference, .tooLarge(.storedItemBytes, limit: limits.maximumStoredItemBytes))
             return
         }

@@ -109,7 +109,7 @@ struct InviteView: View {
                 .disabled(model.isWorking)
                 .accessibilityIdentifier(AccessibilityID.Invite.send)
         } footer: {
-            Text("Administrators can invite and remove others; read-only members cannot change items.")
+            Text(InvitationModel.roleExplanation)
         }
     }
 

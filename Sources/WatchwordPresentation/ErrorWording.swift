@@ -47,6 +47,9 @@ public enum ErrorWording {
             return "That Secret Key belongs to another account."
         case .scopeRejected:
             return "That website address is too broad. Enter the site's own domain, such as example.com."
+        case .hostsNeedConfirmation(let hosts):
+            return "Check " + hosts.map { HostText.ascii($0.host) }.joined(separator: ", ")
+                + " before adding it: it is not a site this item is saved for."
         case .quickUnlockRefused(let reason):
             switch reason {
             case .enrolmentChanged:
@@ -66,6 +69,21 @@ public enum ErrorWording {
             return "Your account password was changed on another device. Enter the new password."
         case .passwordSuperseded:
             return "That password has been changed since. Enter the current one."
+        case .accountPasswordRequired:
+            return "Enter your account password."
+        case .passwordChangeRevokesThisDevice:
+            return "That password belongs to a change that removed this device from your account, so it is not "
+                + "used here. If you did not remove this device, unlock with the password it still has and remove "
+                + "the device that made the change."
+        case .tooManyPasswordChangesPending:
+            return "Several devices say they changed your account password, more than can be checked from here. "
+                + "Unlock with the password this device still has, then choose the device you changed it on under "
+                + "Devices."
+        case .noPasswordChangeToFollow:
+            return "That device has not changed the account password."
+        case .personalVaultMismatch:
+            return "This device's copy of your account does not match your account password's record of "
+                + "it, so it was not opened. Erase this device and set it up again from your Emergency Kit."
         case .deviceRevoked:
             return "This device has been removed from your account. It can no longer sync."
         case .cannotRevokeThisDevice:
@@ -78,6 +96,12 @@ public enum ErrorWording {
             return "The Personal vault cannot be deleted or shared."
         case .vaultDeleted:
             return "That vault was deleted. Move what it still holds to another vault."
+        case .restoredWorkCanBeCarried:
+            return "That vault opens on this device, so the changes made there before this device was restored go "
+                + "out at a sync. Sync, then try again if it still waits."
+        case .deviceMigrationIncomplete:
+            return "This device is still moving its sync records over from before it was restored. Try again after "
+                + "the next sync."
         case .vaultDeletionNotConfirmed:
             return "Something arrived in the vault since you were asked. Review it and try again."
         case .itemHasUnresolvedValues:
@@ -88,6 +112,8 @@ public enum ErrorWording {
             return "Sync between your devices is not available in this version yet."
         case .hygieneNotConfigured:
             return "The security report is not available in this version yet."
+        case .deviceIDDoesNotCommit:
+            return "That device's code was made by an older version of Watchword. Make a new one on that device."
         case .deviceRegistryUnavailable:
             return "This device cannot check your other devices yet. Sync, then try again."
         case .accountHeaderRolledBack:
@@ -115,6 +141,29 @@ public enum ErrorWording {
             return "This device has not received the vault's current key yet. Sync, then try again."
         case .keyIDInUse:
             return "That invitation conflicts with a vault already on this device, and was refused."
+        case .ownerUnknown:
+            return "This device cannot yet tell whose shared vault that is, so it cannot accept an invitation to it. "
+                + "Sync, then try again."
+        case .ownerDisputed:
+            return VaultRow.ownerDisputedReason
+        case .stillAMember:
+            return "You are still a member of this vault. Leave it first; its items can be removed from this device "
+                + "once you are no longer a member."
+        case .unsharedWork(_, let count):
+            return "\(count) change(s) made on this device never reached the vault's other members. Removing the "
+                + "vault's items from this device would discard them for good, so nothing was removed."
+        case .historyCompacted:
+            return "This vault has been in use too long to be shared as it is: its sync history was compacted. "
+                + "Create a new vault, share that one, and move the items you want to share into it."
+        case .ledgerUnavailable:
+            return "This shared vault is not set up on this device yet, so it cannot be changed from here. "
+                + "Accept its invitation on this device first."
+        case .deviceIDDoesNotCommit:
+            return "This device was set up by an older version of Watchword and cannot change shared vaults. "
+                + "Set it up again as a new device to share, join or change them."
+        case .deviceKeyUnreadable:
+            return "Watchword couldn't read this device's key just now, so the shared vault was not changed. "
+                + "Try again."
         }
     }
 
@@ -186,6 +235,8 @@ public enum ErrorWording {
         case .importInterrupted(let saved):
             return
                 "Watchword locked during the import. \(saved) item(s) were saved; choose the file again for the rest."
+        case .mergeNeedsConfirmation:
+            return "An address a merge would add changes which account AutoFill offers. Confirm it, or leave it out."
         }
     }
 }

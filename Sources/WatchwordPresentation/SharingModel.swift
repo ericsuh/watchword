@@ -14,6 +14,12 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         /// The chain lists keys for them that differ from the ones this device compared: a warning, never accepted
         /// silently (SEC3).
         case keysChanged
+        /// Their account's own devices disagree about which of them are the account's: its device registry holds a
+        /// second first entry, or a password change beside the one this device follows, made by someone who holds
+        /// their account key (review finding Z6). Nothing a device in question signs counts here, and nothing in this
+        /// version settles it (review finding Z11): comparing safety numbers again verifies their account's keys,
+        /// not which of its devices are theirs.
+        case devicesDisagree
         /// No comparison of the chain with this device's pins has been made on the current head (the vault is
         /// locked, or the contacts could not be read). Never shown as verified (D17).
         case notChecked
@@ -35,6 +41,8 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
         case .you, .verified: return nil
         case .unverified: return "Not verified by you"
         case .keysChanged: return "Keys changed: compare safety numbers again"
+        case .devicesDisagree:
+            return "This person's devices disagree. What their devices in question write is held aside here"
         case .notChecked: return "Not checked yet"
         }
     }
@@ -57,12 +65,24 @@ public struct MemberRow: Hashable, Sendable, Identifiable {
 public final class SharedVaultModel {
     public let vaultID: UUID
     public private(set) var isShared = false
+    /// The vault is shared and not set up on this device (`VaultInfo.isSharedUnavailable`): the screen says so and
+    /// offers neither "Share" nor a member list. `setUpCode` is the invitation to accept here, when this device knows
+    /// the vault's owner from its account's own marker; otherwise the person uses the invitation they were sent.
+    public private(set) var needsSetUp = false
+    public private(set) var setUpCode: String?
+    public static let setUpNotice =
+        "This vault is shared, and this device has not joined it yet: another of your devices shared or joined it. "
+        + "Until you accept its invitation on this device, nothing in it can be changed from here, and this device "
+        + "does not receive what the other members write."
     public private(set) var sharingAvailable = true
     public private(set) var members: [MemberRow] = []
     public private(set) var sharing: VaultSharing?
     /// "Pending rotation" and the other reasons a rotation is unfinished, worded (F4.3).
     public private(set) var pending: [String] = []
     public private(set) var ownRole: MemberRole?
+    /// Changes this device made in a vault its account is no longer in that nobody else has: what
+    /// `removeFromThisDevice` would discard, and the number its confirmation shows.
+    public private(set) var unsharedChanges = 0
     public private(set) var fingerprint: OwnFingerprint?
     public private(set) var isWorking = false
     public var errorMessage: String?
@@ -81,6 +101,39 @@ public final class SharedVaultModel {
     public var requiresNewerVersion: Bool { sharing?.requiresNewerVersion ?? false }
     public var mayInvite: Bool { ownRole?.isAdministrator == true && !isReadOnly }
     public var mayLeave: Bool { ownRole != nil && ownRole != .owner && !requiresNewerVersion }
+    /// This account is no longer a member (it left, or was removed), and this device still holds the vault: the
+    /// screen says so and offers to remove what it holds (`removeFromThisDevice`).
+    public var membershipEnded: Bool { isShared && ownRole == nil }
+
+    /// What leaving does and does not do, for the confirmation and the notice after it (PRD F4.4; review finding
+    /// Z45). Leaving is a request: an administrator's device carries it out. And nothing takes the vault's items off
+    /// this device; it stops receiving changes, AutoFill stops offering them, and the person removes them.
+    public static let leaveExplanation =
+        "You stay a member until an administrator's device has replaced the vault's key. After that this device "
+        + "no longer receives the vault's changes and AutoFill stops offering its items. What this device already "
+        + "holds stays on it until you remove it from the vault's screen, and the other members keep their copies."
+
+    /// What removing a member does and does not do (PRD F4.3: the app must say that copies may have been kept).
+    public static let removalExplanation =
+        "They lose access to new changes. The vault's key is replaced and every item sealed again, but what they "
+        + "already copied cannot be taken back, and their own devices keep what they hold until they remove it."
+
+    public static let removeCopiesExplanation =
+        "This removes the vault's items from this device only. The vault's members keep theirs."
+
+    /// What the removal would discard that is not a copy (review finding Z57): changes made here that never
+    /// reached anyone else. "The vault's members keep theirs" is not true of those.
+    public static func unsharedWarning(_ count: Int) -> String {
+        "\(count) change(s) made on this device never reached the other members. Nobody else has them, and "
+            + "removing discards them for good."
+    }
+
+    /// The text for the confirmation, as it stands for this vault now.
+    public var removeCopiesMessage: String {
+        unsharedChanges == 0
+            ? Self.removeCopiesExplanation
+            : Self.removeCopiesExplanation + " " + Self.unsharedWarning(unsharedChanges)
+    }
     public var mayRotate: Bool { ownRole?.isAdministrator == true && !isReadOnly }
 
     /// The roles `member` can be given by this account: the owner gives any role but owner to anyone else, an
@@ -141,9 +194,26 @@ public final class SharedVaultModel {
         await perform {
             try await context.session.leaveSharedVault(vaultID)
             try await reload()
-            notice =
-                "You asked to leave. The vault goes from your devices once an administrator's device has "
-                + "rotated its key."
+            notice = "You asked to leave. " + Self.leaveExplanation
+        }
+    }
+
+    /// Removes from this device what it holds of a vault this account is no longer a member of (review finding Z45):
+    /// the only thing that does.
+    public func removeFromThisDevice() async {
+        await perform {
+            // The number the confirmation showed: more than that, and the session refuses (Z57).
+            let shown = unsharedChanges
+            do {
+                let removed = try await context.session.removeLocalCopies(
+                    ofSharedVault: vaultID, discardingUnshared: shown)
+                try await reload()
+                notice = "\(removed) item(s) of this vault were removed from this device."
+            } catch let error as SharedVaultError {
+                // The count moved since it was shown: show the new one before anything is asked again.
+                try? await reload()
+                throw error
+            }
         }
     }
 
@@ -182,12 +252,21 @@ public final class SharedVaultModel {
         guard shared.contains(vaultID) else {
             isShared = false
             members = []
+            needsSetUp =
+                (try? await session.vaults(includingDeleted: true))?
+                .first { $0.id == vaultID }?.isSharedUnavailable ?? false
+            setUpCode =
+                needsSetUp
+                ? (try? await session.sharedVaultInvitation(vaultID)).flatMap { $0 }.map(SharingCodes.text(for:)) : nil
             return
         }
+        needsSetUp = false
+        setUpCode = nil
         let status = try await session.sharedVaultStatus(vaultID)
         isShared = true
         sharing = VaultSharing(status)
         ownRole = status.role
+        unsharedChanges = status.role == nil ? ((try? await session.unsharedWork(inSharedVault: vaultID)) ?? 0) : 0
         members = Self.rows(status, me: accountID)
         pending = status.pendingRotation.map(Self.describe)
     }
@@ -195,7 +274,8 @@ public final class SharedVaultModel {
     nonisolated static func rows(_ status: SharedVaultStatus, me: UUID?) -> [MemberRow] {
         rows(
             members: status.membership.members.map { ($0.accountID, $0.role) }, substituted: status.substitutedMembers,
-            unverified: status.unverifiedMembers, verified: status.verifiedMembers, me: me)
+            unverified: status.unverifiedMembers, verified: status.verifiedMembers,
+            devicesDisagree: status.membersWithDisagreeingDevices, me: me)
     }
 
     /// The member list: changed keys first of all, then unverified; verified only for a member the comparison on the
@@ -203,9 +283,10 @@ public final class SharedVaultModel {
     /// account that is in no list is never taken for verified.
     public nonisolated static func rows(
         members: [(accountID: UUID, role: MemberRole)], substituted: [UUID], unverified: [UUID], verified: [UUID]?,
-        me: UUID?
+        devicesDisagree: [UUID] = [], me: UUID?
     ) -> [MemberRow] {
         let substituted = Set(substituted)
+        let devicesDisagree = Set(devicesDisagree)
         let unverified = Set(unverified)
         let verified = Set(verified ?? [])
         return members.map { member in
@@ -214,6 +295,9 @@ public final class SharedVaultModel {
                 trust = .you
             } else if substituted.contains(member.accountID) {
                 trust = .keysChanged
+            } else if devicesDisagree.contains(member.accountID) {
+                // Above "verified": the keys compared are the right ones, and someone else holds them too.
+                trust = .devicesDisagree
             } else if unverified.contains(member.accountID) {
                 trust = .unverified
             } else if verified.contains(member.accountID) {
@@ -233,6 +317,10 @@ public final class SharedVaultModel {
                 + "sealed under a key they hold."
         case .removalOwed(let id):
             return "Removing member \(shortIdentifier(id)) has to be done again: a change made at the same time won."
+        case .keyHeldOutsideTheVault(let id):
+            return "The account \(shortIdentifier(id)) was invited and removed again while another change was being "
+                + "made, and still holds this vault's key. Until an administrator's device rotates the key, new items "
+                + "are sealed under a key it holds."
         case .awaitingPublication:
             return "A key rotation from this device goes out at the next sync."
         case .resealing(let remaining):
@@ -284,6 +372,12 @@ public final class InvitationModel {
     /// The roles an invitation can carry: never owner.
     public static let roles: [MemberRole] = [.readWrite, .readOnly, .administrator]
 
+    /// What the roles mean, under the role picker. Read-only is a rule the apps keep, not encryption, and the screen
+    /// must say so (PRD F4.5): a read-only member holds the vault's key like any other.
+    public static let roleExplanation =
+        "Administrators can invite and remove others. Read-only is a rule Watchword keeps, not encryption: a "
+        + "read-only member holds the vault's key like everyone else, and their copy of the app does not change items."
+
     /// Whether the person named the account with a fingerprint code. It only says which account: the comparison is
     /// still theirs to make.
     public var usesFingerprintCode: Bool { reference?.fingerprintCode != nil }
@@ -316,7 +410,7 @@ public final class InvitationModel {
 
     public func confirmFingerprint() async {
         guard case .compareFingerprint(let contact) = step else { return }
-        guard let evidence = confirmation.evidence() else {
+        guard let evidence = confirmation.evidence(showing: contact.fingerprint) else {
             errorMessage = "Type their safety number, or confirm that you compared the two."
             return
         }
@@ -394,8 +488,8 @@ public final class AcceptInvitationModel {
     }
 
     public func accept() async {
-        guard case .compareOwner = step, let invitation else { return }
-        guard let evidence = confirmation.evidence() else {
+        guard case .compareOwner(let owner) = step, let invitation else { return }
+        guard let evidence = confirmation.evidence(showing: owner.fingerprint) else {
             errorMessage = "Type the owner's safety number, or confirm that you compared the two."
             return
         }

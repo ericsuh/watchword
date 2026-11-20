@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import WatchwordInterchange
 import WatchwordKit
+import WatchwordMatching
 import WatchwordModel
 
 /// What the person chose for an imported entry that duplicates an existing item.
@@ -16,10 +17,43 @@ public struct ImportEntryRow: Hashable, Sendable, Identifiable {
     public let id: UUID
     public let title: String
     public let hosts: [String]
+    /// The entry's hosts as a person should read them before trusting one (`MergeHost`): ASCII, the registrable
+    /// domain picked out, how far each reaches, and the warning where the session found a look-alike (review finding
+    /// Z62). An entry's hosts need not belong to one site: each shows its own domain.
+    public let sites: [MergeHost]
     /// Apex hosts the import added beside a `www` host the file named: the widening the review must show.
     public let apexScopesAdded: [String]
     public let loginNames: [String]
     public let isDuplicate: Bool
+    /// The file marks the entry archived: it would be saved archived, which AutoFill never lists.
+    public let isArchived: Bool
+    /// The entry would change what AutoFill offers for a saved site, or scope an item to a look-alike host: see the
+    /// matching `ImportConcernRow`.
+    public let needsDecision: Bool
+}
+
+/// A saved account an imported entry would affect, as the review names it: its title, its vault (by the badge the
+/// vault list uses, never the name alone) and the host on which it happens.
+public struct AffectedAccountRow: Hashable, Sendable, Identifiable {
+    public let id: String
+    public let title: String
+    public let vault: String
+    public let host: String
+
+    public var text: String { "“\(title)” in \(vault) on \(host)" }
+}
+
+/// An entry that duplicates nothing and still needs the person's decision (`ImportConcern`; review finding Z62):
+/// what it would do to AutoFill, in words, before anything is written.
+public struct ImportConcernRow: Hashable, Sendable, Identifiable {
+    public let id: UUID
+    public let title: String
+    public let sites: [MergeHost]
+    public let hidden: [AffectedAccountRow]
+    public let beside: [AffectedAccountRow]
+    public let isArchived: Bool
+    /// What the entry would do, one sentence per effect.
+    public let explanation: [String]
 }
 
 /// An existing item an imported entry may duplicate.
@@ -69,13 +103,30 @@ public struct MergeReview: Hashable, Sendable {
     public let urlFields: [AdditionField]
     /// Labels of the other fields a merge adds as they are.
     public let otherFields: [String]
+    /// The same fields with their values, for the screen to show before the person chooses the merge (review finding
+    /// Z67): a merge adds these without a per-field choice, so what they say is shown, not only what they are called.
+    /// Secrets stay hidden until shown, like any other.
+    public let otherFieldValues: [AdditionField]
     public let tags: [String]
     public let addsNotes: Bool
+    /// The text a merge would append to the item's notes; empty when it adds none.
+    public let notes: String
 
-    /// `saved` is what the hosts are compared with for look-alikes: the vault's items, the existing one included.
-    public init(existingID: UUID, additions: MergeAdditions, saved: [Item]) {
+    /// `sites` is what the hosts are compared with for look-alikes: what is saved in every vault, as the gate sees it
+    /// (`VaultSession.savedSites()`), the existing item included. With `existing` (the item merged into), a host that
+    /// would hide or stand beside another account carries a warning too, and needs the second confirmation the
+    /// session requires (`MergeChoices.confirmedHosts`, review finding Z75).
+    public init(
+        existingID: UUID, additions: MergeAdditions, sites: SavedSites.Prepared, inSharedVault: Bool = false,
+        existing: Item? = nil
+    ) {
         self.existingID = existingID
-        hosts = additions.scopes.map { MergeHost($0, against: saved) }
+        hosts = additions.scopes.map { scope in
+            guard let existing else { return MergeHost(scope, among: sites, inSharedVault: inSharedVault) }
+            return MergeHost(
+                scope, among: sites, beside: existing.scopes, inSharedVault: inSharedVault,
+                mergingInto: (existing.id, existing.vaultID))
+        }
         func row(_ field: Field) -> AdditionField {
             AdditionField(
                 id: field.id, label: field.label.isEmpty ? field.kind.rawValue : field.label, value: field.value,
@@ -84,8 +135,10 @@ public struct MergeReview: Hashable, Sendable {
         signInFields = additions.signInFields.map(row)
         urlFields = additions.urlFields.map(row)
         otherFields = additions.otherFields.map { $0.label.isEmpty ? $0.kind.rawValue : $0.label }
+        otherFieldValues = additions.otherFields.map(row)
         tags = additions.tags.sorted()
         addsNotes = !additions.notes.isEmpty
+        notes = additions.notes
     }
 
     public var addsNothingWithoutChoice: Bool { otherFields.isEmpty && tags.isEmpty && !addsNotes }
@@ -135,9 +188,19 @@ public final class ImportModel: LockSensitive {
     /// For an archive another account made: the Secret Key from that account's Emergency Kit.
     public var archiveSecretKey = ""
 
+    /// Add the apex beside each `www` address a file names (`ImportOptions.matchApexOfWWWHosts`; owner decision of
+    /// 2026-11-16, on unless the person turns it off). Chosen before the file is read; the review says which it was.
+    public var addsApexOfWWWHosts = true
+    /// Also read what the source kept in its trash (`ImportOptions.includesTrashed`), saved into the trash here.
+    public var includesTrash = false
+    /// The option the file on review was read with, in words.
+    public private(set) var optionsLine = ""
+
     public private(set) var formatName = ""
     public private(set) var entries: [ImportEntryRow] = []
     public private(set) var duplicates: [DuplicateRow] = []
+    /// Entries that are not duplicates and still need a choice: import anyway (`keepBoth`) or skip.
+    public private(set) var concerns: [ImportConcernRow] = []
     public private(set) var reportLines: [String] = []
     /// When the archive was made, as sealed in it. The restore screen shows it, so that an older archive put in place
     /// of the newest is seen for what it is.
@@ -170,7 +233,22 @@ public final class ImportModel: LockSensitive {
     }
 
     public var undecided: [DuplicateRow] { duplicates.filter { choices[$0.id] == nil } }
-    public var canCommit: Bool { stage == .review && undecided.isEmpty && !isWorking }
+    public var undecidedConcerns: [ImportConcernRow] { concerns.filter { choices[$0.id] == nil } }
+    /// What the review found about one entry, duplicate or not.
+    public func concern(for importedID: UUID) -> ImportConcernRow? { concerns.first { $0.id == importedID } }
+    /// Entries with a concern that duplicate nothing: a duplicate's own block shows its concern.
+    public var concernsOfNewEntries: [ImportConcernRow] {
+        let duplicated = Set(duplicates.map(\.id))
+        return concerns.filter { !duplicated.contains($0.id) }
+    }
+    public var canCommit: Bool {
+        stage == .review && undecided.isEmpty && undecidedConcerns.isEmpty && !isWorking
+    }
+
+    /// The options a file is read with: the two the person can set, the rest as the import defines them.
+    var options: ImportOptions {
+        ImportOptions(includesTrashed: includesTrash, matchApexOfWWWHosts: addsApexOfWWWHosts)
+    }
 
     public func load() async {
         await perform {
@@ -186,9 +264,11 @@ public final class ImportModel: LockSensitive {
             return
         }
         let format = self.format
+        let options = self.options
         await perform {
-            let preview = try await context.session.previewImport(bytes, format: format, into: vaultID)
-            try await show(preview)
+            let preview = try await context.session.previewImport(
+                bytes, format: format, into: vaultID, options: options)
+            try await show(preview, options: options, isArchive: false)
         }
     }
 
@@ -200,12 +280,25 @@ public final class ImportModel: LockSensitive {
         }
         let passphrase = archivePassphrase
         let secretKey = archiveSecretKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let options = self.options
         await perform {
             let preview = try await context.session.previewArchiveImport(
-                bytes, passphrase: passphrase, secretKey: secretKey.isEmpty ? nil : secretKey, into: vaultID)
+                bytes, passphrase: passphrase, secretKey: secretKey.isEmpty ? nil : secretKey, into: vaultID,
+                options: options)
             archivePassphrase = ""
             archiveSecretKey = ""
-            try await show(preview)
+            try await show(preview, options: options, isArchive: true)
+        }
+    }
+
+    /// The choice for an entry the review raised a concern about: import it all the same, knowing what it does, or
+    /// leave it out. A merge is not offered: it duplicates nothing.
+    public func choose(_ choice: ImportChoice, forConcern importedID: UUID) {
+        context.recordActivity()
+        guard concerns.contains(where: { $0.id == importedID }) else { return }
+        switch choice {
+        case .skip, .keepBoth: choices[importedID] = choice
+        case .merge: return
         }
     }
 
@@ -216,8 +309,10 @@ public final class ImportModel: LockSensitive {
                 let additions = try await context.session.importAdditions(
                     preview: previewID, importedID: importedID, existingID: existingID)
                 let existing = try await context.session.item(id: existingID)
-                let saved = (try? await context.session.items().items) ?? [existing]
-                merges[importedID] = MergeReview(existingID: existingID, additions: additions, saved: saved)
+                let sites = try await context.session.savedSites().prepared()
+                merges[importedID] = MergeReview(
+                    existingID: existingID, additions: additions, sites: sites,
+                    inSharedVault: sites.sites.sharedVaults.contains(existing.vaultID), existing: existing)
             } else {
                 merges[importedID] = nil
             }
@@ -249,20 +344,27 @@ public final class ImportModel: LockSensitive {
         apply(host, accepted: isAccepted, for: importedID)
     }
 
-    /// The person confirmed the look-alike host a second time, having read its warning.
+    /// The person confirmed the host a second time, having read its warning: what the session's
+    /// `MergeChoices.confirmedHosts` records (Z75).
     public func confirmAwaitingHost() {
         guard let (importedID, host) = hostAwaitingConfirmation else { return }
         hostAwaitingConfirmation = nil
-        apply(host.host, accepted: true, for: importedID)
+        apply(host.host, accepted: true, for: importedID, confirmed: true)
     }
 
     public func cancelAwaitingHost() {
         hostAwaitingConfirmation = nil
     }
 
-    private func apply(_ host: String, accepted isAccepted: Bool, for importedID: UUID) {
+    private func apply(_ host: String, accepted isAccepted: Bool, for importedID: UUID, confirmed: Bool = false) {
         var current = accepted[importedID] ?? .none
-        if isAccepted { current.hosts.insert(host) } else { current.hosts.remove(host) }
+        if isAccepted {
+            current.hosts.insert(host)
+            if confirmed { current.confirmedHosts.insert(host) }
+        } else {
+            current.hosts.remove(host)
+            current.confirmedHosts.remove(host)
+        }
         accepted[importedID] = current
     }
 
@@ -292,7 +394,11 @@ public final class ImportModel: LockSensitive {
 
     public func commit() async {
         guard let previewID, canCommit else {
-            if !undecided.isEmpty { errorMessage = "Choose what to do with every duplicate first." }
+            if !undecided.isEmpty {
+                errorMessage = "Choose what to do with every duplicate first."
+            } else if !undecidedConcerns.isEmpty {
+                errorMessage = "Choose what to do with every item that would change AutoFill first."
+            }
             return
         }
         let decisions = self.decisions
@@ -317,6 +423,8 @@ public final class ImportModel: LockSensitive {
         previewID = nil
         entries = []
         duplicates = []
+        concerns = []
+        optionsLine = ""
         reportLines = []
         choices = [:]
         merges = [:]
@@ -326,17 +434,56 @@ public final class ImportModel: LockSensitive {
         archiveCreatedAt = nil
     }
 
-    private func show(_ preview: ImportPreview) async throws {
+    private func show(_ preview: ImportPreview, options: ImportOptions, isArchive: Bool) async throws {
         reset()
         previewID = preview.id
         archiveCreatedAt = preview.archiveCreatedAt
         formatName = InterchangeWording.name(of: preview.report.format)
+        // An archive's scopes are restored as they were: no apex is added to them.
+        optionsLine =
+            isArchive
+            ? ""
+            : (options.matchApexOfWWWHosts
+                ? "Each www address is also offered on the address without www. Cancel and turn that off to import "
+                    + "addresses exactly as the file has them."
+                : "Addresses are imported exactly as the file has them.")
         let matched = Dictionary(grouping: preview.matches, by: \.importedID)
+        let concerned = Dictionary(
+            preview.concerns.map { ($0.importedID, $0) }, uniquingKeysWith: { first, _ in first })
+        func sites(of entry: ImportPreviewEntry) -> [MergeHost] {
+            let judged = Dictionary(
+                (concerned[entry.id]?.lookAlikeHosts ?? []).map { ($0.host, $0) },
+                uniquingKeysWith: { first, _ in first })
+            return entry.scopes.map { MergeHost($0, judged: judged[$0.host]) }
+        }
         entries = preview.entries.map { entry in
             ImportEntryRow(
                 id: entry.id, title: entry.title.isEmpty ? "Untitled" : entry.title, hosts: entry.hosts,
-                apexScopesAdded: entry.apexScopesAdded, loginNames: entry.loginNames,
-                isDuplicate: matched[entry.id] != nil)
+                sites: sites(of: entry), apexScopesAdded: entry.apexScopesAdded, loginNames: entry.loginNames,
+                isDuplicate: matched[entry.id] != nil, isArchived: entry.state == .archived,
+                needsDecision: concerned[entry.id] != nil)
+        }
+        if !preview.concerns.isEmpty {
+            let badges = Dictionary(
+                ((try? await VaultRow.load(from: context.session)) ?? []).map { ($0.id, $0.label) },
+                uniquingKeysWith: { first, _ in first })
+            func rows(_ accounts: [AffectedAccount]) -> [AffectedAccountRow] {
+                accounts.map {
+                    AffectedAccountRow(
+                        id: "\($0.itemID.uuidString)/\($0.host)", title: $0.title.isEmpty ? "Untitled" : $0.title,
+                        vault: badges[$0.vaultID] ?? "another vault", host: HostText.ascii($0.host))
+                }
+            }
+            let byID = Dictionary(preview.entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            concerns = preview.concerns.compactMap { concern in
+                guard let entry = byID[concern.importedID] else { return nil }
+                let hidden = rows(concern.hidden)
+                let beside = rows(concern.beside)
+                return ImportConcernRow(
+                    id: concern.importedID, title: entry.title.isEmpty ? "Untitled" : entry.title,
+                    sites: sites(of: entry), hidden: hidden, beside: beside, isArchived: concern.isArchived,
+                    explanation: InterchangeWording.explanation(of: concern, hidden: hidden, beside: beside))
+            }
         }
         var existingTitles: [UUID: String] = [:]
         for id in Set(preview.matches.map(\.existingID)) {

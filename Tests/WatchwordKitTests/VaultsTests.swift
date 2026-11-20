@@ -645,6 +645,48 @@ struct VaultsSyncTests {
         try await fleet.expectConverged()
     }
 
+    /// Review of round 13 (Z202), found by the restore step of the vault simulation: old hardware still running. A
+    /// saves an item and, before publishing it, is backed up; restored onto other hardware, the backup carries the
+    /// item over and publishes it under its new ID, and trashes it there. A, offline all along, deletes the item; C
+    /// deletes its vault. When A comes back it keeps the item in the trash, for the restored device's trash its
+    /// deletion had not seen, in a version of its own that follows its deletion out. But the gate that keeps a copy
+    /// from going out after its original's deletion (Z148) took that version, which A had never published and the log
+    /// knew only as C's tombstone, for an edit of A's nobody had received, and held every deletion of A's back: the
+    /// deletion waited for the version and the version for the deletion, for good, and only A showed the item. What
+    /// A's own deletion wrote holds nothing back now, and every device ends with the item kept in the trash.
+    @Test("old hardware's version kept after its own deletion, in a vault deleted elsewhere, does not hold it back")
+    func keptAfterOwnDeletionInADeletedVault() async throws {
+        let fleet = try await Fleet.make(2)
+        let (a, c) = (fleet.devices[0].session, fleet.devices[1].session)
+        let kit = try await a.emergencyKit(password: TestVault.password)
+        let work = try await a.createVault(name: "Work")
+        try await fleet.settle()
+        let saved = try await a.save(login(work.id, title: "Saved on A, never sent"))
+        let backup = try #require(await fleet.devices[0].backup())
+
+        let restored = TestVault(
+            store: backup.store, sync: SyncSettings(state: backup.state, transport: fleet.transport), seed: 20_001,
+            deviceName: "Restored")
+        try await restored.session.unlock(password: TestVault.password, secretKey: kit.secretKey)
+        try await restored.session.trash(id: saved.id)
+        try await restored.session.sync()
+        try await a.trash(id: saved.id)
+        try await a.deletePermanently(id: saved.id)
+        try await c.sync()
+        try await c.deleteVault(id: work.id, confirmingItemCount: try await c.itemCount(in: work.id))
+        try await c.sync()
+
+        let devices = fleet.devices + [restored]
+        try await fleet.settle(devices)
+        let report = try await a.syncAll()
+        #expect(!report.deletionsHeldBack.contains(work.id), "the deletion waits for the version kept after it")
+        let expected = try await Fleet.seen(fleet.devices[1])
+        for device in devices {
+            #expect(try await Fleet.seen(device) == expected, "the devices disagree about the item")
+        }
+        #expect(expected[saved.id]?.keptAfterDeletion == true, "the restored device's trash was not kept")
+    }
+
     /// docs/02-architecture.md §7.7: a deletion wins for good. Revoking the device that deleted a vault must not
     /// bring the vault back on a device that had already checked the deletion — synced unlocked (A), or only while
     /// locked and then unlocked (B) — whether or not it syncs again first.

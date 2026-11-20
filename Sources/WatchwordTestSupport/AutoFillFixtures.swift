@@ -10,12 +10,17 @@ public struct AutoFillHarness: Sendable {
     public let publisher: FakeCredentialIdentityPublisher
     public let model: CredentialProviderModel
 
+    /// - Parameter sharedVaults: Vaults other accounts write, by ID, with the name each shows. Items carrying one
+    ///   of these vault IDs are what a member of that vault wrote.
     public init(
         items: [Item] = [], backedUp: Bool = true, seed: UInt64 = 42,
-        publisher: FakeCredentialIdentityPublisher = FakeCredentialIdentityPublisher()
+        publisher: FakeCredentialIdentityPublisher = FakeCredentialIdentityPublisher(),
+        sharedVaults: [UUID: String] = [:]
     ) {
         clock = FakeClock(AutoFillFixtures.now)
-        vault = FakeCredentialVault(vaultID: AutoFillFixtures.vaultID, clock: clock, backedUp: backedUp, items: items)
+        vault = FakeCredentialVault(
+            vaultID: AutoFillFixtures.vaultID, clock: clock, backedUp: backedUp, items: items,
+            sharedVaults: sharedVaults)
         self.publisher = publisher
         model = CredentialProviderModel(
             vault: vault, clock: clock, publisher: publisher,
@@ -74,6 +79,12 @@ extension PasskeyIdentity {
 /// The items of PRD scenarios S1 to S4, with fixed IDs so a failure names the same item every run.
 public enum AutoFillFixtures {
     public static let vaultID = UUID(uuidString: "00000000-0000-4000-8000-0000000000AA")!
+    /// A vault other accounts write, for tests of what a member (adversary A4) can do to AutoFill.
+    public static let sharedVaultID = UUID(uuidString: "00000000-0000-4000-8000-0000000000BB")!
+    public static let sharedVaultName = "Household"
+    /// The harness's default vault and its shared one, as entries name them.
+    public static let personalVault = EntryVault(id: vaultID, name: "Personal", isShared: false)
+    public static let sharedVault = EntryVault(id: sharedVaultID, name: sharedVaultName, isShared: true)
     public static let now = Date(timeIntervalSince1970: 1_800_000_000)
     public static let email = "pat@example.com"
 

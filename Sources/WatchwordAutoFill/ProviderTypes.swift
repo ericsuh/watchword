@@ -20,7 +20,7 @@ public enum ProviderRefusal: Error, Equatable, Sendable {
     case gate(FillRefusal)
     /// The identity or choice names no item or field the vault holds: a stale identity store, or a made-up one.
     case unknownRecord
-    /// Two readable items carry this ID, so it names neither (see `CredentialVault.credentialItems()`).
+    /// Two readable items carry this ID, so it names neither (see `CredentialSnapshot.items`).
     case duplicateRecord
     /// The item is archived, in the trash, or marked "exclude from AutoFill suggestions": such an item is reachable
     /// only by opening the app (PRD F6.8).
@@ -37,7 +37,8 @@ public enum ProviderRefusal: Error, Equatable, Sendable {
     case invalidRequest(String)
     case scopeRejected(ScopeValidationError)
     case passwordRules(PasswordRulesError)
-    /// A conditional passkey registration found no single saved password login to upgrade.
+    /// A conditional passkey registration found no single saved password login to upgrade, in a vault only this
+    /// account reads: nothing is written to an item of a shared vault without the person (review finding Z60).
     case noItemToUpgrade
     case vault(CredentialVaultError)
 }
@@ -88,9 +89,35 @@ public struct LookAlikeWarning: Hashable, Sendable {
     public let impersonating: [String]
 }
 
+/// The vault an entry's item is in, and whose it is (review finding Z60).
+///
+/// Every list entry, every candidate for a save or a registration and every proposal carries one, because the
+/// vault decides who reads what is saved there and who wrote what is offered from there. In a shared vault any
+/// member who may write chose the item's title, user name, scopes and even the vault's name ("Personal" included),
+/// so a sheet shows `isShared` wherever it shows the entry, and never the name alone.
+public struct EntryVault: Hashable, Sendable {
+    public let id: UUID
+    public let name: String
+    /// Accounts other than this one read this vault, and those who may write there can add and change its items.
+    /// Also `true` for a vault the session did not describe.
+    public let isShared: Bool
+
+    public init(id: UUID, name: String, isShared: Bool) {
+        self.id = id
+        self.name = name
+        self.isShared = isShared
+    }
+
+    /// Whether a secret written to an item of this vault is one every member of the vault can read. A sheet that
+    /// offers such an item as the destination of a password or a passkey says so before the person confirms.
+    public var everyMemberSeesWhatIsSaved: Bool { isShared }
+}
+
 /// A password login the gate will release for the request's host.
 public struct PasswordEntry: Hashable, Sendable {
     public let itemID: UUID
+    /// The vault the login is in. Two entries alike in every other field can differ here.
+    public let vault: EntryVault
     public let title: String
     /// Empty when the item has no username or email.
     public let userName: String
@@ -105,6 +132,7 @@ public struct PasswordEntry: Hashable, Sendable {
 public struct PasskeyEntry: Hashable, Sendable {
     public let itemID: UUID
     public let fieldID: UUID
+    public let vault: EntryVault
     public let title: String
     public let userName: String
     public let relyingPartyID: String
@@ -119,7 +147,7 @@ public struct CredentialList: Equatable, Sendable {
     public let passwords: [PasswordEntry]
     public let passkeys: [PasskeyEntry]
     /// The one login to offer first: set only when a single item is the most specific match, and `nil` whenever
-    /// accounts tie (PRD F11.5).
+    /// accounts tie (PRD F11.5) or an item of a shared vault stands beside one of the person's own.
     public let suggested: PasswordEntry?
     /// Why no passkey is listed although the request asked for some, if the relying party itself was refused.
     public let passkeyRefusal: ProviderRefusal?
@@ -184,6 +212,7 @@ public struct PasswordCredential: Hashable, Sendable, CustomStringConvertible, C
 public struct OneTimeCodeEntry: Hashable, Sendable {
     public let itemID: UUID
     public let fieldID: UUID
+    public let vault: EntryVault
     public let title: String
     public let userName: String
     public let label: String
@@ -275,6 +304,7 @@ public struct InsertableField: Hashable, Sendable {
 
 public struct InsertableItem: Hashable, Sendable {
     public let itemID: UUID
+    public let vault: EntryVault
     public let title: String
     public let userName: String
     public let fields: [InsertableField]
@@ -442,6 +472,9 @@ public enum PasskeyDestination: Hashable, Sendable {
 
 public struct PasskeyRegistrationCandidate: Hashable, Sendable {
     public let itemID: UUID
+    /// The vault the passkey would be saved in. Where it is shared, every member of it could use the passkey: the
+    /// sheet says so beside the candidate (`EntryVault.everyMemberSeesWhatIsSaved`).
+    public let vault: EntryVault
     public let title: String
     public let userName: String
     /// The item's login names include the name the relying party gave.
@@ -462,8 +495,10 @@ public struct PasskeyRegistrationOptions: Hashable, Sendable {
     public let relatedLogins: [PasskeyRegistrationCandidate]
     /// The item `PasskeyDestination.newItem` would create, and what that would do to the items already offered.
     public let newItem: NewItemProposal
-    /// The one existing item with the user name, if there is exactly one; otherwise a new item, beside the items
-    /// already offered for the relying party where there are any: the suggestion never hides an account.
+    /// The one existing item with the user name, if there is exactly one and it is in a vault only this account
+    /// reads; otherwise a new item, beside the person's own items already offered for the relying party where there
+    /// are any: the suggestion never hides an account, and never puts a new passkey where other people can use it.
+    /// An item of a shared vault is a destination the person picks, not one picked for them.
     public let suggested: PasskeyDestination
 }
 
@@ -497,9 +532,10 @@ public struct SavePasswordRequest: Hashable, Sendable {
     }
 }
 
-/// The scope that puts a new item beside the accounts already offered on the request's host.
+/// The scope that puts a new item beside the person's own accounts already offered on the request's host.
 public struct SharedScopeProposal: Hashable, Sendable {
-    /// The scope host of those accounts, which the new item would take.
+    /// The scope host of those accounts, which the new item would take. Always the scope of items in vaults only
+    /// this account writes: a scope a member of a shared vault chose is never copied into a new item.
     public let scopeHost: String
     public let includesSubdomains: Bool
     /// How many accounts the new one would tie with. The person then chooses among them each time (PRD F11.5).
@@ -514,6 +550,8 @@ public struct SharedScopeProposal: Hashable, Sendable {
 
 /// The item a `newItem` destination would create, for the sheet to show before the person confirms.
 public struct NewItemProposal: Hashable, Sendable {
+    /// The vault the item would be created in: the default (Personal) vault.
+    public let vault: EntryVault
     public let title: String
     /// The host the new item is scoped to: the exact host the login was made on, or a passkey's relying party.
     public let scopeHost: String
@@ -532,9 +570,10 @@ public struct NewItemProposal: Hashable, Sendable {
     public let besideExisting: SharedScopeProposal?
 
     public init(
-        title: String, scopeHost: String, includesSubdomains: Bool, userName: String, warning: LookAlikeWarning?,
-        hiddenAccounts: Int, besideExisting: SharedScopeProposal?
+        vault: EntryVault, title: String, scopeHost: String, includesSubdomains: Bool, userName: String,
+        warning: LookAlikeWarning?, hiddenAccounts: Int, besideExisting: SharedScopeProposal?
     ) {
+        self.vault = vault
         self.title = title
         self.scopeHost = scopeHost
         self.includesSubdomains = includesSubdomains
@@ -545,8 +584,12 @@ public struct NewItemProposal: Hashable, Sendable {
     }
 }
 
+/// An existing item a save could update. `vault` names where the password would be written: in a shared vault
+/// every member reads it, and a member who may write there chose everything else this candidate shows, so two
+/// candidates alike in title, user name and host are told apart by their vaults (review finding Z60).
 public struct SaveCandidate: Hashable, Sendable {
     public let itemID: UUID
+    public let vault: EntryVault
     public let title: String
     public let userName: String
     public let matchedHost: String
@@ -646,10 +689,14 @@ public struct ReportResult: Hashable, Sendable {
     public var rateLimited: Int
     /// Items that changed underneath the report; the next report will find them.
     public var conflicts: Int
+    /// Fields a report would have changed, had the change not taken the item past
+    /// `CredentialProviderModel.remoteWriteItemBudget` (review finding Z71).
+    public var overBudget: Int
 
-    public init(changes: [ReportChange], rateLimited: Int, conflicts: Int) {
+    public init(changes: [ReportChange], rateLimited: Int, conflicts: Int, overBudget: Int = 0) {
         self.changes = changes
         self.rateLimited = rateLimited
         self.conflicts = conflicts
+        self.overBudget = overBudget
     }
 }

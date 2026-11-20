@@ -116,6 +116,111 @@ struct DevicesModelTests {
         locks.stop()
     }
 
+    /// The summary can name items and vaults by title (Z171), which a locked screen does not show (Z176).
+    @Test("the last sync's summary is cleared by a lock of the session")
+    func syncSummaryClearedOnLock() async throws {
+        let devices = try await TwoDevices.make()
+        let locks = await LockSignal.watching(devices.first.session)
+        let model = DevicesModel(context: ScreenContext(session: devices.first.session, locks: locks))
+        await model.syncNow()
+        #expect(model.sync != nil)
+        await devices.first.session.lock()
+        for _ in 0..<1000 where model.sync != nil { await Task.yield() }
+        #expect(model.sync == nil)
+        locks.stop()
+    }
+
+    /// The summary was stored after the sync's awaits, so a lock that landed after the sync but before the summary
+    /// was stored (here in the reload's reads of the device's standing, which do not throw), whose clearing had
+    /// already run, left the summary of that sync on a locked screen (review of round 10, Z183). The model notes the
+    /// lock generation before the sync and drops the result if it changed.
+    @Test("a lock after the sync but before its summary is stored leaves no summary behind")
+    func lockBeforeSummaryLeavesNone() async throws {
+        let store = LockingStore()
+        let sync = SyncSettings(state: InMemorySyncStateStore(), transport: InMemorySyncTransport())
+        let vault = TestVault(store: store, sync: sync, seed: 183)
+        try await vault.createAccount()
+        let locks = await LockSignal.watching(vault.session)
+        let model = DevicesModel(context: ScreenContext(session: vault.session, locks: locks))
+        let probe = LockProbe()
+        locks.register(probe)
+        // Quiet syncs, then how many reads the sync and the reload's list of devices make before the rest of it.
+        await model.syncNow()
+        await model.syncNow()
+        await store.resetCount()
+        _ = try await vault.session.syncAll()
+        _ = try await vault.session.devices()
+        let beforeStanding = await store.reads
+        await store.arm(atRead: beforeStanding + 1, vault.session, until: { await probe.drops > 0 })
+        await model.syncNow()
+        let state = try await vault.session.state()
+        #expect(state == .locked)
+        #expect(probe.drops == 1, "the lock's clearing had not run before the summary was stored")
+        #expect(model.sync == nil)
+        locks.stop()
+    }
+
+    /// Review of round 11 (Z188): the generation moved only when the lock signal's watch ran on the main actor, so a
+    /// sync whose continuation the main actor ran first found it unchanged and stored a summary made across the lock.
+    /// The session's own count moves in `lock()` itself: here no signal tells the model of the lock at all, and the
+    /// summary is dropped all the same.
+    @Test("a summary made across a lock is dropped before anything has told the model of the lock")
+    func unheardLockLeavesNoSummary() async throws {
+        let store = LockingStore()
+        let sync = SyncSettings(state: InMemorySyncStateStore(), transport: InMemorySyncTransport())
+        let vault = TestVault(store: store, sync: sync, seed: 186)
+        try await vault.createAccount()
+        let warm = DevicesModel(context: ScreenContext(session: vault.session))
+        await warm.syncNow()
+        await warm.syncNow()
+        #expect(warm.sync != nil)
+        await store.resetCount()
+        _ = try await vault.session.syncAll()
+        _ = try await vault.session.devices()
+        let beforeStanding = await store.reads
+        await store.arm(atRead: beforeStanding + 1, vault.session, until: { true })
+        let model = DevicesModel(context: ScreenContext(session: vault.session))
+        await model.syncNow()
+        let state = try await vault.session.state()
+        #expect(state == .locked)
+        #expect(model.sync == nil, "a summary made across the lock was stored")
+    }
+
+    /// The mark the Settings summary takes before its sync (`AppModel.syncNow`, not built here; review of round 11,
+    /// Z188): a lock of the session counts from `lock()` itself, before the signal's watch has run, and so does a fire.
+    @Test("a lock signal's mark sees a lock before the signal does, and a fire")
+    func lockSignalMark() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let signal = LockSignal()
+        let first = await signal.mark(vault.session)
+        #expect(await signal.unchanged(since: first, in: vault.session))
+        await vault.session.lock()
+        #expect(signal.generation == 0)
+        #expect(!(await signal.unchanged(since: first, in: vault.session)))
+        let second = await signal.mark(vault.session)
+        signal.fire()
+        #expect(!(await signal.unchanged(since: second, in: vault.session)))
+    }
+
+    /// What the Settings summary notes before its sync (`AppModel.syncNow`, not built here; Z183): every lock of the
+    /// session, and every lock the app reports itself, moves it.
+    @Test("the lock signal's generation moves with every lock")
+    func lockSignalGeneration() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let locks = await LockSignal.watching(vault.session)
+        let probe = LockProbe()
+        locks.register(probe)
+        #expect(locks.generation == 0)
+        await vault.session.lock()
+        for _ in 0..<1000 where probe.drops == 0 { await Task.yield() }
+        #expect(locks.generation == 1)
+        locks.fire()
+        #expect(locks.generation == 2)
+        locks.stop()
+    }
+
     @Test("keeping the password needs both statements confirmed")
     func keepPasswordNeedsConfirmations() {
         var form = RevocationForm()
@@ -249,6 +354,40 @@ struct PasswordChangedElsewhereTests {
         #expect(await model.revoke(other, with: form), "\(model.errorMessage ?? "")")
         #expect(!model.awaitingNewPassword)
         #expect(model.rows.first { $0.id == other.id }?.isRevoked == true)
+    }
+
+    /// The other answer (review findings Z1, Z8): the change was the person's own, and they unlocked this device with
+    /// the password it still had. The Devices screen says which device changed it and what following that does, and
+    /// follows it with that change's password and no other.
+    @Test("the person follows the change they made on the other device, by naming that device")
+    func followTheChange() async throws {
+        let devices = try await TwoDevices.make()
+        let newPassword = "the person's own new password"
+        try await devices.second.session.changePassword(current: TestVault.password, new: newPassword)
+        try await devices.second.session.sync()
+        let model = DevicesModel(context: ContextProbe().context(devices.first.session))
+        await model.syncNow()
+        await devices.first.session.lock()
+        try await devices.first.session.unlock(password: TestVault.password, ignoringPasswordChange: true)
+        await model.load()
+        #expect(model.awaitingNewPassword)
+        let change = try #require(model.passwordChanges.first)
+        #expect(model.passwordChanges.count == 1 && change.mayFollow)
+        #expect(change.summary.hasPrefix("The account password was changed on “"), "\(change.summary)")
+
+        #expect(await !model.follow(change, current: TestVault.password, password: TestVault.password))
+        #expect(model.errorMessage == "Incorrect password.")
+        #expect(await !model.follow(change, current: newPassword, password: newPassword))
+        #expect(model.errorMessage == "Incorrect password.")
+        #expect(
+            await model.follow(change, current: TestVault.password, password: newPassword),
+            "\(model.errorMessage ?? "")")
+        #expect(!model.awaitingNewPassword && model.passwordChanges.isEmpty)
+        await devices.first.session.lock()
+        await #expect(throws: CryptoError.authenticationFailed) {
+            try await devices.first.session.unlock(password: TestVault.password)
+        }
+        try await devices.first.session.unlock(password: newPassword)
     }
 }
 

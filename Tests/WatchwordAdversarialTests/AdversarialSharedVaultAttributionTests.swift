@@ -266,7 +266,9 @@ extension AdversarialSharedVaultTests {
         let invitation = try await attacker.session.invite(victim.accountID, to: lure, as: .readWrite)
         try await victim.session.acceptInvitation(invitation, ownerEvidence: .safetyNumber(attacker.safetyNumber))
 
-        let device = RegistryFixture.deviceID(7)
+        // Its ID commits to X's account ID under the substitute's key (Z157): what decides is which vault's chain
+        // gives which key for X, not whether the ID could be X's.
+        let device = substitute.committedDevice()
         let genesis = substitute.genesis(device: device)
         await household.transport.tamper(
             AccountObjectLocation.registryEntry(accountID: x.accountID, id: genesis.id.hex).name,

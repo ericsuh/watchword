@@ -1,5 +1,7 @@
 import Foundation
+import SecureMemory
 import Testing
+import WatchwordCrypto
 import WatchwordEnvelope
 import WatchwordStore
 import WatchwordSync
@@ -49,14 +51,21 @@ actor LockingTransport: SyncTransport {
 actor LockingRecordStore: RecordStore {
     let base = InMemoryRecordStore()
     private var target: (session: VaultSession, kind: EnvelopeKind)?
+    private var skipping = 0
     private(set) var locks = 0
 
-    func lock(_ session: VaultSession, onNextUnlockedRead kind: EnvelopeKind) {
+    /// `skipping` such reads go by first: the lock lands in the one after them.
+    func lock(_ session: VaultSession, onNextUnlockedRead kind: EnvelopeKind, skipping: Int = 0) {
         target = (session, kind)
+        self.skipping = skipping
     }
 
     private func gate(_ kind: EnvelopeKind) async {
         guard let target, target.kind == kind, (try? await target.session.state()) == .unlocked else { return }
+        guard skipping == 0 else {
+            skipping -= 1
+            return
+        }
         self.target = nil
         locks += 1
         await target.session.lock()
@@ -121,5 +130,108 @@ struct LockDuringAccountSyncTests {
         try await vault.session.unlock(password: TestVault.password)
         try await vault.session.save(login(personal, title: "After the race"))
         #expect(try await vault.session.deviceStanding() == .active)
+    }
+
+    /// A session's lock, callable from a Keychain hook: once, and only while the session is unlocked.
+    actor LockOnce {
+        private(set) var locks = 0
+
+        func lock(_ session: VaultSession) async {
+            guard locks == 0, (try? await session.state()) == .unlocked else { return }
+            locks += 1
+            await session.lock()
+        }
+
+        /// For a lock that lands before the unlock has installed anything.
+        func lockWhateverTheState(_ session: VaultSession) async {
+            guard locks == 0 else { return }
+            locks += 1
+            await session.lock()
+        }
+    }
+
+    /// Review finding Z4. A password unlock installs its keys and then waits on the Keychain (the quick-unlock
+    /// state) before it copies the account's signing key there: an auto-lock in that wait zeroised the keyset the
+    /// copy then read.
+    @Test("a lock while a password unlock waits on the Keychain leaves the session locked, not crashed")
+    func lockWhileUnlockWaitsOnTheKeychain() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        let personal = try #require(await vault.session.personalVaultID)
+        await vault.session.lock()
+
+        let once = LockOnce()
+        let session = vault.session
+        await vault.keychain.onRead { item in
+            if case .quickUnlockState = item { await once.lock(session) }
+        }
+        try await vault.session.unlock(password: TestVault.password)
+        #expect(await once.locks == 1)
+        #expect(try await vault.session.state() == .locked)
+
+        await vault.keychain.onRead(nil)
+        try await vault.session.unlock(password: TestVault.password)
+        try await vault.session.save(login(personal, title: "After the race"))
+        let accountID = try #require(await session.account).accountID
+        #expect(await vault.keychain.contains(.accountSigningKey(accountID: accountID)))
+    }
+
+    /// Review finding Z4, the quick-unlock side: a lock while the quick-unlock state is being written. The lock wins
+    /// (`lockedDuringUnlock`), and no key is read after it.
+    @Test("a lock while a quick unlock writes its state leaves the session locked, not crashed")
+    func lockWhileQuickUnlockWritesItsState() async throws {
+        let vault = TestVault()
+        try await vault.createAccount()
+        try await vault.session.enableQuickUnlock(password: TestVault.password)
+        await vault.session.lock()
+
+        // The prompt has been answered and the key released; the lock lands in a write of the state after that.
+        let session = vault.session
+        let keychain = vault.keychain
+        let landed = LockOnce()
+        await keychain.onStore { item in
+            guard case .quickUnlockState = item, await keychain.biometricPrompts == 1 else { return }
+            await landed.lockWhateverTheState(session)
+        }
+        await #expect(throws: VaultError.lockedDuringUnlock) { try await vault.session.quickUnlock() }
+        #expect(await landed.locks == 1)
+        #expect(try await vault.session.state() == .locked)
+        await keychain.onStore(nil)
+        try await vault.session.quickUnlock()
+        #expect(try await vault.session.state() == .unlocked)
+    }
+
+    /// Review finding Z4. A vault key that arrives by grant is wrapped under the keyset after two reads of the store:
+    /// a lock during the second left the wrap reading a zeroised keyset.
+    @Test("a lock while a granted vault key is being stored fails that cleanly, and the key is stored the next time")
+    func lockWhileAdoptingAVaultKey() async throws {
+        let store = LockingRecordStore()
+        let vault = TestVault(store: store)
+        try await vault.createAccount()
+        let account = try #require(await vault.session.account)
+        var generator = SeededGenerator(seed: 31)
+        let vaultID = UUID(uuidString: "5A000000-0000-4000-8000-0000000000AA")!
+        let granted = VaultKey(
+            vaultID: vaultID, key: EncryptionKey.generate(using: &generator), arrivedByGrant: true)
+        let again = VaultKey(
+            vaultID: vaultID,
+            key: try EncryptionKey(
+                keyID: granted.key.keyID, material: SecureBytes(copying: granted.key.material.unprotectedCopy())),
+            arrivedByGrant: true)
+
+        // The first read of a wrap row is the check that the key's ID is free; the lock lands in the second.
+        await store.lock(vault.session, onNextUnlockedRead: .vaultKeyWrap, skipping: 1)
+        let epoch = await vault.session.lockEpoch
+        await #expect(throws: VaultError.locked) {
+            try await vault.session.adoptVaultKey(granted, owner: account.accountID, account: account, epoch: epoch)
+        }
+        #expect(await store.locks == 1)
+        #expect(try await vault.session.state() == .locked)
+        #expect(try await store.record(RecordKey(recordID: granted.key.keyID, kind: .vaultKeyWrap)) == nil)
+
+        try await vault.session.unlock(password: TestVault.password)
+        try await vault.session.adoptVaultKey(
+            again, owner: account.accountID, account: account, epoch: await vault.session.lockEpoch)
+        #expect(try await store.record(RecordKey(recordID: granted.key.keyID, kind: .vaultKeyWrap))?.vaultID == vaultID)
     }
 }

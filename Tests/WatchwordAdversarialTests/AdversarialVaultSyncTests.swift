@@ -239,6 +239,90 @@ struct AdversarialVaultSyncTests {
         }
     }
 
+    /// Threat: A8, with the local sync state file and the record store while the app is locked, plants an *erasure*
+    /// in the vault's state row for an item that exists (a summary claiming every device's edits, a stamp just above
+    /// the row), deletes the item's row, and adds a made-up stream far enough ahead that this device is due a
+    /// snapshot. Believed, the state would make this device seal and sign a snapshot carrying the tombstone, every
+    /// other device would erase the item, and a reconciling sync would keep the planted erasure (review finding Z20).
+    /// The state row is signed by the session like the stash and the pending deletions; one it did not write is no
+    /// state, and the log is replayed, which puts the row back.
+    @Test("an erasure planted in the local sync state signs no tombstone and erases nothing")
+    func plantedErasure() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let row = try #require(try await f.a.store.records(in: f.vaultID, kind: .item).first)
+        let deviceA = try #require(try await f.a.store.loadAccount()?.deviceID)
+        let base = try #require(f.a.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await base.loadState(vaultID: f.vaultID))
+        let high = row.version + 1000
+        let summary = try ItemErasure(
+            seen: VersionVector([deviceA: high, Self.deviceB: high]), row: high, device: deviceA, date: nil
+        ).summary()
+        state.erasures[row.key] = Erasure(
+            stamp: RecordStamp(version: high + 1, device: deviceA, deleted: true), summary: summary)
+        state.merged[UUID()] = 300
+        await base.tamper(state)
+        try await f.a.store.commit(StoreChange(deletions: [row.key]))
+
+        let report = try await f.a.session.sync()
+        #expect(report.snapshotsWritten == 0, "a snapshot was signed from a planted state")
+        #expect(await f.transport.allObjects.keys.allSatisfy { !$0.contains("/snapshot/") })
+        try await f.b.session.sync()
+        #expect(try await f.b.session.items().items.map(\.id) == [row.recordID], "the item was erased on B")
+        #expect(try await f.a.session.items().items.map(\.id) == [row.recordID], "the replay put the row back")
+        #expect(try await base.loadState(vaultID: f.vaultID)?.erasures.isEmpty == true)
+    }
+
+    /// Threat: A8 edits the same row's `merged` vector instead: another device of the account at 2^48, and a made-up
+    /// stream to make this device due a snapshot. The snapshot's coverage and every segment's acknowledgement vector
+    /// are taken from `merged`, so the forged number would be signed and published; each other device would take
+    /// the coverage for its own stream, move its next sequence number to 2^48 + 1 and publish from then on under names
+    /// every reader ignores, for good (Z20, Z21). No key and no insider is needed. The state row does not verify, so
+    /// nothing in it is signed.
+    @Test("a merged vector planted in the local sync state mutes no other device")
+    func plantedMergedVector() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let base = try #require(f.a.sync?.state as? InMemorySyncStateStore)
+        var state = try #require(await base.loadState(vaultID: f.vaultID))
+        state.merged[Self.deviceB] = 1 << 48
+        state.merged[UUID()] = 300
+        await base.tamper(state)
+
+        try await f.a.session.sync()
+        try await f.b.session.sync()
+        let later = try await f.b.session.save(Item(vaultID: f.vaultID, title: "Later", scopes: [], fields: []))
+        let published = try await f.b.session.sync()
+        #expect(published.pushedEntries == 1)
+        let stateB = try #require(try await f.b.sync?.state.loadState(vaultID: f.vaultID))
+        #expect(stateB.nextSequence < 16, "B's next sequence number was moved to \(stateB.nextSequence)")
+        let reader = try await f.reader()
+        try await reader.session.sync()
+        #expect(try await reader.session.items().items.map(\.id).contains(later.id), "B's later edit never arrived")
+    }
+
+    /// Threat: A8 copies a state row this session genuinely signed to where it does not belong: another vault's row.
+    /// The signature covers the vault and this device, so it is no state there either.
+    @Test("a sync state row signed for one vault is no state for another")
+    func stateRowOfAnotherVault() async throws {
+        let f = try await Self.fixture()
+        try await f.a.session.sync()
+        let work = try await f.a.session.createVault(name: "Work")
+        try await f.a.session.sync()
+        let base = try #require(f.a.sync?.state as? InMemorySyncStateStore)
+        let signed = AuthenticatedSyncState(base: base, session: f.a.session)
+        var moved = try #require(await base.loadState(vaultID: f.vaultID))
+        #expect(try await signed.loadState(vaultID: f.vaultID) != nil, "the session's own row verifies")
+        moved.vaultID = work.id
+        await base.tamper(moved)
+        #expect(try await signed.loadState(vaultID: work.id) == nil)
+        // And one with any field changed after signing.
+        var edited = try #require(await base.loadState(vaultID: f.vaultID))
+        edited.nextSequence += 1
+        await base.tamper(edited)
+        #expect(try await signed.loadState(vaultID: f.vaultID) == nil)
+    }
+
     /// Threat: code that kept the sync adapter past a `lock()` (an engine mid-sync, a stray task) tries to use the
     /// keys. Every key operation goes back to the actor, which has zeroised them, and refuses.
     @Test("after lock, the sync adapter refuses every operation that needs a key")

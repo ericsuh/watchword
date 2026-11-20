@@ -441,15 +441,12 @@ public enum CredentialExchange {
     }
 
     /// Exports `items` as a CXF 1.0 document: the payload for the OS Credential Exchange export, or a file. The
-    /// bytes are plaintext (`ExportResult`). Trashed items are left out and reported.
+    /// bytes are plaintext (`ExportResult`). The person's own trash is left out and reported (`ExportSupport.exports`).
     public static func exportDocument(_ items: [Item], options: ExportOptions) -> ExportResult {
         var report = ExportReport()
         var exported: [JSONValue] = []
         for item in items {
-            guard !item.isTrashed else {
-                report.warnings.append(.trashedItemOmitted(itemID: item.id))
-                continue
-            }
+            guard ExportSupport.exports(item, report: &report) else { continue }
             exported.append(.object(export(item, options: options, report: &report)))
             report.exportedCount += 1
         }

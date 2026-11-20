@@ -106,6 +106,40 @@ struct AdversarialUnlockTests {
     /// coerced or sleeping owner) quick-unlocks just before the 14-day interval ends and re-enables quick unlock to
     /// restart it, forever (review finding U1). Enabling needs the password, re-verified against the stored header,
     /// so the interval still ends 14 days after the password was last entered.
+    /// Threat: the adversary of U3 (holds the unlocked device and knows its passcode, so can clear the OS biometric
+    /// lockout, but cannot pass the enrolled biometric), killing the app while the system prompt is up instead of
+    /// letting it end. The Keychain read then never returns, so a count made after it returns is never made, and the
+    /// three-attempt limit of F5.4 never trips (review finding Z7). The attempt is counted before the prompt is
+    /// shown.
+    @Test("an app killed while the biometric prompt is up has still used an attempt")
+    func killedDuringThePrompt() async throws {
+        let (vault, kit) = try await Self.enrolled()
+        for attempt in 1...3 {
+            let launch = vault.relaunched()
+            #expect(try await launch.session.status().quickUnlock == .allowed)
+            await vault.keychain.script(.neverReturns)
+            let prompt = Task { try await launch.session.quickUnlock() }
+            await vault.keychain.waitUntilPromptsHeld(attempt)
+            // The process is gone: nothing after the read runs.
+            prompt.cancel()
+            _ = await prompt.result
+        }
+        let next = vault.relaunched()
+        #expect(try await next.session.status().quickUnlock == .requirePassword(.tooManyFailedAttempts))
+        await #expect(throws: VaultError.quickUnlockRefused(.tooManyFailedAttempts)) {
+            try await next.session.quickUnlock()
+        }
+        #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
+        #expect(await vault.keychain.biometricPrompts == 3, "no prompt is shown once the limit is reached")
+        // The password brings quick unlock back, and a prompt that ends in the key takes its attempt back.
+        try await next.session.unlock(password: TestVault.password)
+        await next.session.lock()
+        try await next.session.quickUnlock()
+        await next.session.lock()
+        #expect(try await next.session.status().quickUnlock == .allowed)
+        try await next.session.quickUnlock()
+    }
+
     @Test("a quick-unlocked session cannot restart the password interval")
     func cannotExtendInterval() async throws {
         let (vault, _) = try await Self.enrolled()
@@ -119,6 +153,36 @@ struct AdversarialUnlockTests {
         await #expect(throws: VaultError.quickUnlockRefused(.passwordIntervalExpired)) {
             try await vault.session.quickUnlock()
         }
+    }
+
+    /// Threat: U1's adversary, who can present the enrolled face or reaches the unlocked app but does not know the
+    /// account password, reads out the Secret Key (Z86). The kit is the one thing such a holder can take that still
+    /// matters once the device is back with its owner: with the sync store's ciphertext (A1) the password is then the
+    /// only barrier, for good. Before the fix `emergencyKit()` needed only unlocked keys. Now it takes the password
+    /// in the call, and the unconfirmed kit shown again without one needs keys opened with the password: a quick
+    /// unlock, even with the confirmation column cleared (A8), gets neither.
+    @Test("a quick-unlocked session cannot read the Emergency Kit without the account password")
+    func kitNeedsPassword() async throws {
+        let (vault, kit) = try await Self.enrolled()
+        try await vault.session.quickUnlock()
+        // The account was created and never confirmed: the state a cleared column also produces.
+        #expect(try await !vault.session.status().emergencyKitConfirmed)
+        await #expect(throws: VaultError.accountPasswordRequired) { try await vault.session.unconfirmedEmergencyKit() }
+        await #expect(throws: CryptoError.authenticationFailed) {
+            try await vault.session.emergencyKit(password: "a guess at the password")
+        }
+        #expect(try await vault.session.emergencyKit(password: TestVault.password) == kit)
+
+        // A password unlock may show the unconfirmed kit again without asking twice; once confirmed, it may not.
+        await vault.session.lock()
+        try await vault.session.unlock(password: TestVault.password)
+        #expect(try await vault.session.unconfirmedEmergencyKit() == kit)
+        try await vault.session.confirmEmergencyKitSaved()
+        await #expect(throws: VaultError.accountPasswordRequired) { try await vault.session.unconfirmedEmergencyKit() }
+        // And a lock ends what the password unlock allowed.
+        await vault.session.lock()
+        try await vault.session.quickUnlock()
+        await #expect(throws: VaultError.accountPasswordRequired) { try await vault.session.unconfirmedEmergencyKit() }
     }
 
     // MARK: Expiry (F5.4)
@@ -424,4 +488,34 @@ actor GatedRecordStore: RecordStore {
         isHolding = false
     }
     func eraseAll() async throws { try await inner.eraseAll() }
+}
+
+// Claims of Z7 that no test held (review finding Z17).
+extension AdversarialUnlockTests {
+    /// Z7: an attempt is counted before the prompt and taken back only once the released key has opened the keyset.
+    /// After two cancels, three quick unlocks in a row must each take their attempt back (counted, the third would
+    /// be refused); and a released key that opens nothing destroys the enrolment and takes nothing back.
+    @Test("each quick unlock that opens the keyset takes its attempt back; a key that opens nothing does not")
+    func attemptsTakenBackOnlyByTheKeyset() async throws {
+        let (vault, kit) = try await Self.enrolled()
+        await vault.session.lock()
+        await vault.keychain.script(.cancel, .cancel)
+        for _ in 0..<2 {
+            await #expect(throws: KeychainError.userCancelled) { try await vault.session.quickUnlock() }
+        }
+        for _ in 0..<3 {
+            try await vault.session.quickUnlock()
+            await vault.session.lock()
+        }
+        await vault.keychain.script(.cancel, .cancel)
+        for _ in 0..<2 {
+            await #expect(throws: KeychainError.userCancelled) { try await vault.session.quickUnlock() }
+        }
+        #expect(try await vault.session.status().quickUnlock == .allowed, "a success did not take its attempt back")
+
+        await vault.keychain.script(.releaseBytes(Array(repeating: 0x5A, count: 32)))
+        await #expect(throws: (any Error).self) { try await vault.session.quickUnlock() }
+        #expect(try await vault.session.state() == .locked)
+        #expect(!(await vault.keychain.contains(.quickUnlockKey(accountID: kit.accountID))))
+    }
 }

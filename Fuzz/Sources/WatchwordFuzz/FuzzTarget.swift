@@ -35,7 +35,8 @@ enum FuzzTarget: String, CaseIterable, Sendable {
     /// the same code with larger numbers.
     static let limits = InterchangeLimits(
         maximumInputBytes: 1 << 20, maximumDocumentBytes: 1 << 20, maximumArchiveEntries: 256, maximumItems: 256,
-        maximumEntryBytes: 1 << 16, maximumFieldBytes: 1 << 14, maximumFieldsPerItem: 128, maximumNestingDepth: 32)
+        maximumEntryBytes: 1 << 16, maximumFieldBytes: 1 << 14, maximumFieldsPerItem: 128, maximumNestingDepth: 32,
+        maximumTotalStoredBytes: 4 << 20)
 
     static let vaultID = UUID(uuid: (0xF0, 0x22, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1))
     static let envelopeContext = EnvelopeContext(
@@ -277,14 +278,18 @@ enum FuzzTarget: String, CaseIterable, Sendable {
         require(result.entries.count <= limits.maximumItems, "more entries than the item limit")
         // The import-wide budgets: what bounds the memory the drafts take, whatever the per-entry limits allow.
         var parts = 0
+        var stored = 0
         for entry in result.entries {
             let item = entry.item
             parts += item.fields.count + item.tags.count + item.history.count
             require(item.scopes.count <= limits.maximumURLsPerItem, "more scopes than URLs considered")
-            require(
-                StoredItemSize.estimate(item) <= limits.maximumStoredItemBytes, "a draft the vault could not store")
+            let size = StoredItemSize.estimate(item)
+            require(size <= limits.maximumStoredItemBytes, "a draft the vault could not store")
+            stored += size
         }
         require(parts <= limits.maximumTotalFields, "more fields than the import budget")
+        // What a commit would write, summed: a small file must not become gigabytes of synced rows (Z81).
+        require(stored <= limits.maximumTotalStoredBytes, "more stored bytes than the import budget")
         require(result.report.skipped.count <= limits.maximumItems, "more skip records than entries")
         require(result.report.warnings.count <= ImportReport.maximumWarnings, "more warnings than the cap")
         require(result.report.importedCount == result.entries.count, "the counts disagree with the entries")

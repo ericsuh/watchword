@@ -55,6 +55,16 @@ struct ImportMappingTests {
         return try PasswordCSV.importFile(Array(csv.utf8), into: Fixtures.vaultID, options: options, using: &generator)
     }
 
+    /// A sign-in site at a shared-hosting suffix (Z63): its own host is a scope, its tenants are not.
+    @Test("A URL at a shared-hosting suffix becomes a scope for that host alone")
+    func sharedHostingSuffix() throws {
+        #expect(
+            try ScopeDerivation.scope(forURL: "https://wordpress.com/log-in").get()
+                == ServiceScope(host: "wordpress.com", includeSubdomains: false))
+        #expect(throws: (any Error).self) { try ScopeDerivation.scope(forURL: "https://co.uk/").get() }
+        #expect(throws: (any Error).self) { try ScopeDerivation.scope(forURL: "https://github.io/").get() }
+    }
+
     @Test("The apex beside a www scope: one label removed, the subdomain setting kept, never a public suffix")
     func apexScope() throws {
         let www = try ScopeDerivation.scope(forURL: "https://www.example.com/").get()
@@ -64,6 +74,9 @@ struct ImportMappingTests {
         #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.co.uk")) == nil)
         #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.com")) == nil)
         #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.github.io")) == nil)
+        // Not as an exact host either: the apex is never a public suffix, however far it would reach (Z63).
+        #expect(
+            ScopeDerivation.apexScope(beside: ServiceScope(host: "www.wordpress.com", includeSubdomains: false)) == nil)
         #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "www.1.2.3.4")) == nil)
         #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "wwwexample.com")) == nil)
         #expect(ScopeDerivation.apexScope(beside: ServiceScope(host: "shop.www.example.com")) == nil)

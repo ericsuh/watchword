@@ -44,6 +44,15 @@ public enum PublicSuffix {
         "trycloudflare.com", "localhost.run", "loca.lt",
     ]
 
+    /// The shared-hosting suffixes that are also their operator's own sign-in site at that exact name: each is in the
+    /// repository's site directory (`WatchwordHygiene`'s `SiteDirectoryData`), or, for `bandcamp.com`, signs in at
+    /// `bandcamp.com/login`. For these alone an exact-host scope is accepted (review finding Z63); the rest
+    /// (`github.io`, `herokuapp.com`, ...) have no site of their own at the bare name, and stay refused either way.
+    /// Moving an entry here is a judgement about one operator, recorded with it.
+    static let signInAtSuffix: Set<String> = [
+        "bandcamp.com", "squarespace.com", "substack.com", "tumblr.com", "weebly.com", "wordpress.com", "zendesk.com",
+    ]
+
     /// Multi-label suffixes under which registrations are public.
     static let multiLabel: Set<String> = countryCodeSecondLevel.union(sharedHosting)
 
@@ -111,9 +120,22 @@ public enum ScopePolicy {
         if host.split(separator: ".").count == 1 {
             throw ScopeValidationError.singleLabel(host)
         }
+        // Some shared-hosting suffixes are their operator's own sign-in host (`wordpress.com`, `substack.com`): as an
+        // exact host such a scope spans no other owner, so only one reaching the tenants is refused (review finding
+        // Z63). Every other suffix is nobody's site, and is refused either way.
+        if PublicSuffix.signInAtSuffix.contains(host), !scope.includeSubdomains { return }
         if PublicSuffix.isPublicSuffix(host) {
             throw ScopeValidationError.publicSuffix(host)
         }
+    }
+
+    /// The scope a new host gets where nobody chose its reach (the item editor, an imported URL, a passkey's relying
+    /// party): the host and its subdomains, except at a suffix that is also its operator's sign-in site
+    /// (`PublicSuffix.signInAtSuffix`), whose subdomains are other people's sites. The result still goes through
+    /// `validate`.
+    public static func newScope(forHost host: String) -> ServiceScope {
+        let canonical = ServiceScope.canonicalHost(host)
+        return ServiceScope(host: host, includeSubdomains: !PublicSuffix.signInAtSuffix.contains(canonical))
     }
 
     /// Non-throwing form for UI validation.
