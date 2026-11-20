@@ -876,6 +876,14 @@ guard's clearing of the owed entry removed, Z275); the owed take-out tests asser
 notice's `changesWait` (Z273). In `WordingTests`, `takeOutUnfinished` and `takeOutUnfinishedAfterSending` (Z273), and
 `deletionsHeldBackWording` (Z278). The replay's publishing while owed (Z276) has no test on PR #23, whose guard is
 unreachable without a hook in `Sources/`; on this branch `owedTakeOutPublishesNothingInItsReplay` above pins it.
+The review of the twenty-sixth round (Z279). `partialTakeOutReplaysAfterARelaunch` pins that the take-out nulls the
+judged head before its first row goes, not that it saves it at once: there the sync's after-logs pass saves the vault,
+nil head included, so a take-out that only nulled it passes too. The immediate save matters only where the process ends
+between the take-out and the end of that sync, which no test reaches without simulating a kill (a sync cut short by
+the transport does not stand for one: the ledger the sharing pass ingested is unsaved too, so the relaunch's basis is
+not the old head anyway); it is argued by reading. So is the same save before the take-out withdraws pending deletions
+(Z57's withdrawal): `deletionUnpublishedAtDemotion` ("shared vaults through the session") runs it, a withdrawal with no
+row taken out, and passes with it, but pins only the withdrawal.
 Review of this branch's eighth merge (V71): a rotation carried on after a take-out that did not finish leaves its
 reseal for the next sync, the record and the revocation going out, and completes there with every record under the new
 key, nothing missing meanwhile (`rotationAfterAnUnfinishedTakeOutResealsAtTheNextSync`, "shared vaults through the

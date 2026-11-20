@@ -1662,7 +1662,9 @@ extension VaultSession {
         // is in memory. With the judged head kept, a relaunch after the basis came back to it found nothing to take
         // out and asked for no replay (Z269's case, across a relaunch); an unsettled head is taken out and replayed
         // after any relaunch, as `requestReplay` writes its request down (S41). The replay after a take-out that
-        // finishes settles it again (`sharedEngineDidRun`).
+        // finishes settles it again (`sharedEngineDidRun`). So before a withdrawal of pending deletions, which only the
+        // replay makes good too (review of round 26, Z279). The save's immediacy matters only where the process ends
+        // before the sync does: the sync's after-logs pass saves the vault too, so it is argued by reading.
         var unsettled = false
         for kind in [EnvelopeKind.item, .vaultMetadata, .scanStatus] {
             for row in try await store.records(in: vaultID, kind: kind) where restored[row.key]?.device != row.deviceID
@@ -1678,9 +1680,7 @@ extension VaultSession {
                     sharing.vaults[vaultID]?.indexChanged = true
                 }
                 if !unsettled {
-                    sharing.vaults[vaultID]?.index.judgedHead = nil
-                    sharing.vaults[vaultID]?.indexChanged = true
-                    try await saveSharedVault(vaultID)
+                    try await saveJudgementUnsettled(vaultID)
                     unsettled = true
                 }
                 try await syncSettings.state.quarantine(SyncEntry(row), vaultID: vaultID)
@@ -1693,12 +1693,14 @@ extension VaultSession {
         // A deletion this device queued and had not published when its account's permission to write ended is
         // outside the cut, as an edit of that moment is, and does not count either. Left queued it erased the
         // record in every merge here and went out, signed, on the day the account was let write again, with
-        // nothing asking (Z57). It is withdrawn; the replay puts back what the log holds of the record.
+        // nothing asking (Z57). It is withdrawn, the judged head saved unsettled first (Z279), so that a relaunch
+        // replays too; the replay puts back what the log holds of the record.
         if let me = account?.accountID {
             if case .mayWrite = vault.ledger.writeStanding(of: me) {
             } else {
                 let pending = try await syncSettings.state.pendingDeletions(vaultID: vaultID)
                 if !pending.isEmpty {
+                    if !unsettled { try await saveJudgementUnsettled(vaultID) }
                     try await syncSettings.state.removePendingDeletions(pending.mapValues(\.stamp), vaultID: vaultID)
                 }
             }
@@ -1708,6 +1710,14 @@ extension VaultSession {
         let unmoved = sharing.vaults[vaultID]?.ledger.state.hash.bytes == head
         sharing.vaults[vaultID]?.takenOutAgainst = unmoved ? head : nil
         takeOutsOwed.remove(vaultID)
+    }
+
+    /// The vault's judged head set to `nil` and the vault saved (review of round 25, Z274): a take-out about to change
+    /// what the vault holds writes down first that a replay is owed, as `requestReplay` does (S41).
+    private func saveJudgementUnsettled(_ vaultID: UUID) async throws {
+        sharing.vaults[vaultID]?.index.judgedHead = nil
+        sharing.vaults[vaultID]?.indexChanged = true
+        try await saveSharedVault(vaultID)
     }
 
     // MARK: - Taking a write cut

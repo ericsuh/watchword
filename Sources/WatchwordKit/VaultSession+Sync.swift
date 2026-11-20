@@ -1471,17 +1471,20 @@ public struct AccountSyncReport: Sendable, Equatable {
     /// move again.
     public var movePendingWhileUnlocked = false
     /// The shared vaults where this device began taking out what no longer counts (`takeOutWhatNoLongerCounts`) and
-    /// could not finish, a local store failing or a lock during it (review of round 24, Z268; review of round 25,
-    /// Z273): their replay waits, and no vault's deletions went out in this sync, after what the take-out may have put
-    /// aside of this device's own (Z262). Not `deletionsHeldBack`, whose wording (something moved has not reached the
-    /// other devices) would be untrue here. Tried again at the next sync; nothing a member or the sync storage writes
-    /// can make a take-out throw. Those where nothing of this device's was published in this sync are also in
-    /// `takeOutUnfinishedSentNothing`; in the others, a first pass that was not owed published before the replay's
-    /// take-out failed (Z273).
+    /// could not finish, a local store failing, a lock during it, or the sharing state not saved (review of round 24,
+    /// Z268; review of round 25, Z273; review of round 26, Z279: the take-out saves the judged head unsettled before
+    /// it changes anything, Z274, so a sharing store that refuses writes fails it, closed): their replay waits, and no
+    /// vault's deletions went out in this sync, after what the take-out may have put aside of this device's own
+    /// (Z262). Not `deletionsHeldBack`, whose wording (something moved has not reached the other devices) would be
+    /// untrue here. Tried again at the next sync; nothing a member or the sync storage writes can make a take-out
+    /// throw. Those where nothing of this device's was published in this sync are also in
+    /// `takeOutUnfinishedSentNothing`; in the others, a first pass that was not owed may have published before the
+    /// replay's take-out failed (Z273, Z279).
     public var takeOutUnfinished: Set<UUID> = []
-    /// Of `takeOutUnfinished`, the vaults whose take-out was owed as their first pass ran and still is: nothing of this
-    /// device's was published there in this sync, first pass or replay (Z270, Z276), so its changes there wait too
-    /// (Z273).
+    /// Of `takeOutUnfinished`, the vaults where no pass of this sync ran publishing, first pass or replay (an owed
+    /// pass publishes nothing, Z270, Z276): nothing of this device's was published there in this sync, so its changes
+    /// there wait too (Z273). Read from what ran publishing, not from being owed at the first pass, since on this
+    /// branch a vault found owed only at its replay may have published in its first (merged so at round 26, V72).
     public var takeOutUnfinishedSentNothing: Set<UUID> = []
 
     public init() {}
